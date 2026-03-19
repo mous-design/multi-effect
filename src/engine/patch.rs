@@ -71,15 +71,14 @@ pub struct NodeDef {
 // Runtime types
 // ---------------------------------------------------------------------------
 
-/// Final output stage: scales the accumulated effect signal and subtracts
-/// a controlled amount of the original dry signal.
+/// Final output stage: scales the accumulated effect signal and compensates
+/// for dry bleed in analogue-bypass setups.
 ///
-/// Formula: `out[ch] = eff[ch] * wet[ch] - dry[ch] * dry_sub[ch]`
+/// Formula: `out[ch] = eff[ch] * wet[ch] - dry[ch] * (1.0 - dry_param[ch])`
 ///
 /// - `wet`: output level of the accumulated effect chain.  Default: `1.0`.
-/// - `dry`: amount of original dry to **subtract** from the output.  Default: `0.0`.
-///   Set to `1.0` for analogue-bypass setups where bypassed effects (wet < 1)
-///   cause dry to bleed into the digital output.
+/// - `dry`: unity-gain semantics — `1.0` = dry passes through unchanged (digital mode),
+///   `0.0` = dry fully subtracted from digital output (analogue-bypass mode).  Default: `1.0`.
 /// - `gain`: overall output level (post-pan).  Default: `1.0`.
 /// - `pan`:  -1.0 = full left, 0.0 = centre, +1.0 = full right.  Default: `0.0`.
 pub struct Mix {
@@ -97,7 +96,7 @@ pub struct Mix {
 
 impl Mix {
     pub fn new(key: impl Into<String>) -> Self {
-        Self { key: key.into(), dry: [0.0; 2], wet: [0.0; 2], gain: 1.0, pan: 0.0, active: true }
+        Self { key: key.into(), dry: [1.0; 2], wet: [1.0; 2], gain: 1.0, pan: 0.0, active: true }
     }
 }
 
@@ -146,8 +145,8 @@ impl Device for Mix {
         let pan_l = (1.0 - self.pan).min(1.0);
         let pan_r = (1.0 + self.pan).min(1.0);
         for (e, &d) in eff.iter_mut().zip(dry.iter()) {
-            e[0] = (e[0] * self.wet[0] - d[0] * self.dry[0]) * self.gain * pan_l;
-            e[1] = (e[1] * self.wet[1] - d[1] * self.dry[1]) * self.gain * pan_r;
+            e[0] = (e[0] * self.wet[0] - d[0] * (1.0 - self.dry[0])) * self.gain * pan_l;
+            e[1] = (e[1] * self.wet[1] - d[1] * (1.0 - self.dry[1])) * self.gain * pan_r;
         }
     }
     fn reset(&mut self) {}
@@ -331,6 +330,9 @@ pub fn build_chain(def: &ChainDef, cfg: &BuildConfig) -> Result<Chain> {
         }
     }
 
+    validate_eq_order(&def.nodes)
+        .with_context(|| format!("Chain '{}'", def.key))?;
+
     let nodes: Result<Vec<Box<dyn Device>>> =
         def.nodes.iter().map(|n| build_node(n, cfg)).collect();
     let chain = Chain::new(def.key.clone(), def.input, def.output, nodes?);
@@ -379,6 +381,41 @@ fn build_node(def: &NodeDef, cfg: &BuildConfig) -> Result<Box<dyn Device>> {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+fn eq_dry_from_params(params: &serde_json::Map<String, Value>) -> f32 {
+    match params.get("dry") {
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) as f32,
+        Some(Value::Array(a))  => a.first()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32,
+        _ => 0.0,
+    }
+}
+
+fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
+    const EQ_TYPES: &[&str] = &["eq_param", "eq_low", "eq_high"];
+
+    for (mix_pos, mix_node) in nodes.iter().enumerate()
+        .filter(|(_, n)| n.device_type == "mix")
+    {
+        let dry = eq_dry_from_params(&mix_node.params);
+        if dry >= 1.0 { continue; }  // dry=1.0 → no subtraction → no issue
+
+        if let Some((eq_pos, eq_node)) = nodes.iter().enumerate()
+            .find(|(_, n)| EQ_TYPES.contains(&n.device_type.as_str()))
+        {
+            if eq_pos < mix_pos {
+                bail!(
+                    "EQ node '{}' (position {}) appears before Mix node '{}' (position {}) \
+                     which has dry={dry:.2}. EQ before Mix with dry>0 causes phase artefacts \
+                     on the analogue bypass signal. Move EQ after Mix, or set Mix dry=0.",
+                    eq_node.key, eq_pos, mix_node.key, mix_pos
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn load_file(path: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {
     let text = std::fs::read_to_string(path)
