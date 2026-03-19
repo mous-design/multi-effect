@@ -1,0 +1,27 @@
+# Build output
+/target/
+
+# Cargo lock (keep for binaries)
+# Cargo.lock
+
+# State files
+*.state.json
+state.json
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

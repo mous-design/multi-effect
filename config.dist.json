@@ -1,0 +1,38 @@
+{
+  "sample_rate":  48000,
+  "buffer_size":  256,
+  "device":       "default",
+  "in_channels":  1,
+  "out_channels": 2,
+  "control_port": 9000,
+
+  "delay_max_seconds":  2.0,
+  "looper_max_seconds": 30.0,
+
+  "active_preset": 1,
+  "presets": {
+    "1": {
+      "chains": [
+        {
+          "key":    "01-main",
+          "input":  [1, 1],
+          "output": [1, 2],
+          "nodes": [
+            { "key": "04-delay",  "type": "delay",  "time_ms": 1375, "feedback": 0.5, "wet": 1.0 },
+            { "key": "05-chorus", "type": "chorus", "rate_hz": 1.2,  "depth_ms": 8,  "wet": 0.3 },
+            { "key": "03-reverb", "type": "reverb", "room_size": 0.6, "damping": 0.5, "wet": 0.25 },
+            { "key": "06-mix",    "type": "mix",    "dry": 0.0, "wet": 1.0, "gain": 1.0, "pan": 0.0 }
+          ]
+        }
+      ],
+      "midi": [
+        {
+          "channel": "*",
+          "controls": {
+            "7": { "target": "06-mix.gain", "min": 0.0, "max": 1.0 }
+          }
+        }
+      ]
+    }
+  }
+}

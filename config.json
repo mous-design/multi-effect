@@ -1,0 +1,72 @@
+{
+  "sample_rate":  48000,
+  "buffer_size":  256,
+  "device":       "default",
+  "in_channels":  1,
+  "out_channels": 2,
+
+  "delay_max_seconds":  2.0,
+  "looper_max_seconds": 30.0,
+
+  "devices": {
+    "midi_in_1":  { "type": "midi-in",  "dev": "MPK", "channel": "*" },
+    "serial_1":   { "active": false, "type": "serial",   "dev": "/dev/ttyUSB0", "baud": 115200 },
+    "net_1":      { "type": "net",      "port": 9000 }
+  },
+
+  "active_preset": 1,
+  "presets": {
+    "1": {
+      "chains": [
+        {
+          "key":    "01-main",
+          "input":  [1, 1],
+          "output": [1, 2],
+          "nodes": [
+            { "key": "04-delay",  "type": "delay",  "time": 1.375, "feedback": 0.5, "wet": 0.7 },
+            { "active": false, "key": "05-chorus", "type": "chorus", "rate_hz": 1.2,  "depth_ms": 8,  "wet": 0.3 },
+            { "key": "03-reverb", "type": "reverb", "room_size": 0.6, "damping": 0.5, "wet": 0.25 },
+            { "key": "06-mix",    "type": "mix",    "dry": 1.0, "wet": 1.0, "gain": 1.0, "pan": 0.0 }
+          ]
+        }
+      ],
+      "controllers": [
+        {
+          "device": "midi_in_1",
+          "mappings": {
+            "70": { "target": "06-mix.dry",           "param": [0.0, 1.0] },
+            "71": { "target": "04-delay.time",         "param": [0.1, 2.0] },
+            "72": { "target": "04-delay.feedback",     "param": [0.0, 1.0] },
+            "73": { "target": "04-delay.wet",          "param": [0.0, 1.0] },
+            "74": { "target": "03-reverb.room_size",   "param": [0.0, 1.0] },
+            "75": { "target": "03-reverb.wet",         "param": [0.0, 1.0] },
+            "76": { "target": "03-reverb.damping",     "param": [0.0, 1.0] },
+            "77": { "target": "05-chorus.wet",         "param": [0.0, 1.0] }
+          }
+        },
+        {
+          "device": "net_1",
+          "mappings": {
+            "ctrl_1": { "target": "06-mix.dry", "ctrl": [0, 1023], "round": 1, "param": [0.0, 1.0] }
+          }
+        }
+      ]
+    },
+    "2": {
+      "chains": [
+        {
+          "key":    "dummy",
+          "input":  [1, 1],
+          "output": [1, 2],
+          "nodes": [
+            { "key": "05-harmonizer", "type": "harmonizer", "root": 57, "wet": 2 },
+            { "key": "04-delay",  "type": "delay",  "time": 1.375, "feedback": 0.5, "wet": 1.0 },
+            { "key": "05-chorus", "type": "chorus", "rate_hz": 1.2,  "depth_ms": 8,  "wet": 0.3 },
+            { "key": "03-reverb", "type": "reverb", "room_size": 0.6, "damping": 0.5, "wet": 0.25 },
+            { "key": "06-mix",    "type": "mix",    "dry": 1.0, "wet": 1.0, "gain": 1.0, "pan": 0.0 }
+          ]
+        }
+      ]
+    }
+  }
+}

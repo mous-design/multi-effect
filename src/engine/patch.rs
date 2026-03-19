@@ -1,0 +1,450 @@
+use anyhow::{bail, Context, Result};
+use tracing::{debug, warn};
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::config::BuildConfig;
+use crate::effects::{Chorus, Delay, Eq, Harmonizer, Reverb};
+use crate::effects::eq::EqType;
+use crate::effects::looper::Looper;
+use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+
+// ---------------------------------------------------------------------------
+// Custom deserializers
+// ---------------------------------------------------------------------------
+
+fn deserialize_channel_pair<'de, D>(deserializer: D) -> Result<[u8; 2], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ChannelSpec { Single(u8), Pair([u8; 2]) }
+
+    let spec = ChannelSpec::deserialize(deserializer)?;
+    Ok(match spec {
+        ChannelSpec::Single(n) => [n, n],
+        ChannelSpec::Pair(p)   => p,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// JSON definitions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct PatchDef {
+    pub chains: Vec<ChainDef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChainDef {
+    pub key: String,
+
+    #[serde(deserialize_with = "deserialize_channel_pair")]
+    pub input: [u8; 2],
+
+    #[serde(deserialize_with = "deserialize_channel_pair")]
+    pub output: [u8; 2],
+
+    pub nodes: Vec<NodeDef>,
+}
+
+/// One node in the chain as it appears in JSON.
+///
+/// ```json
+/// { "key": "04-reverb", "type": "reverb", "room_size": 0.7, "wet": 0.3 }
+/// { "key": "09-mix",    "type": "mix",    "dry": 1.0, "wet": [0.8, 0.6] }
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct NodeDef {
+    pub key: String,
+
+    #[serde(rename = "type")]
+    pub device_type: String,
+
+    #[serde(flatten)]
+    pub params: serde_json::Map<String, Value>,
+}
+
+// ---------------------------------------------------------------------------
+// Runtime types
+// ---------------------------------------------------------------------------
+
+/// Final output stage: scales the accumulated effect signal and subtracts
+/// a controlled amount of the original dry signal.
+///
+/// Formula: `out[ch] = eff[ch] * wet[ch] - dry[ch] * dry_sub[ch]`
+///
+/// - `wet`: output level of the accumulated effect chain.  Default: `1.0`.
+/// - `dry`: amount of original dry to **subtract** from the output.  Default: `0.0`.
+///   Set to `1.0` for analogue-bypass setups where bypassed effects (wet < 1)
+///   cause dry to bleed into the digital output.
+/// - `gain`: overall output level (post-pan).  Default: `1.0`.
+/// - `pan`:  -1.0 = full left, 0.0 = centre, +1.0 = full right.  Default: `0.0`.
+pub struct Mix {
+    pub key: String,
+    /// Per-channel gain applied to the dry signal
+    pub dry: [f32; 2],
+    /// Per-channel gain applied to the accumulated effect signal
+    pub wet: [f32; 2],
+    /// Overall output level (0.0 = silence, 1.0 = unity). Default: 1.0.
+    pub gain: f32,
+    /// Pan: -1.0 = full left, 0.0 = centre, +1.0 = full right. Default: 0.0.
+    pub pan: f32,
+    pub active: bool,
+}
+
+impl Mix {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into(), dry: [0.0; 2], wet: [0.0; 2], gain: 1.0, pan: 0.0, active: true }
+    }
+}
+
+impl Parameterized for Mix {
+    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        match param {
+            "active" => { self.active = value.try_bool()?; Ok(()) }
+            "dry"  => {
+                let [l, r] = value.try_stereo()?;
+                let (vl, rl) = check_bounds("Mix", "dry", l, 0.0, 1.0);
+                let (vr, rr) = check_bounds("Mix", "dry", r, 0.0, 1.0);
+                self.dry = [vl, vr]; rl.and(rr)
+            }
+            "wet"  => {
+                let [l, r] = value.try_stereo()?;
+                let (vl, rl) = check_bounds("Mix", "wet", l, 0.0, 1.0);
+                let (vr, rr) = check_bounds("Mix", "wet", r, 0.0, 1.0);
+                self.wet = [vl, vr]; rl.and(rr)
+            }
+            "gain" => { let (v, r) = check_bounds("Mix", "gain", value.try_float()?, 0.0, 4.0); self.gain = v; r }
+            "pan"  => { let (v, r) = check_bounds("Mix", "pan",  value.try_float()?, -1.0, 1.0); self.pan  = v; r }
+            _ => Err(format!("Mix: unknown param '{param}'")),
+        }
+    }
+}
+
+impl Device for Mix {
+    fn key(&self) -> &str { &self.key }
+
+    fn type_name(&self) -> &str { "mix" }
+
+    fn is_active(&self) -> bool { self.active }
+
+    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("active".into(), self.active.into());
+        m.insert("dry".into(),  serde_json::json!(self.dry));
+        m.insert("wet".into(),  serde_json::json!(self.wet));
+        m.insert("gain".into(), serde_json::json!(self.gain));
+        m.insert("pan".into(),  serde_json::json!(self.pan));
+        m
+    }
+
+    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
+        // Pan: the louder side stays at 1.0, the quieter side fades to 0.
+        let pan_l = (1.0 - self.pan).min(1.0);
+        let pan_r = (1.0 + self.pan).min(1.0);
+        for (e, &d) in eff.iter_mut().zip(dry.iter()) {
+            e[0] = (e[0] * self.wet[0] - d[0] * self.dry[0]) * self.gain * pan_l;
+            e[1] = (e[1] * self.wet[1] - d[1] * self.dry[1]) * self.gain * pan_r;
+        }
+    }
+    fn reset(&mut self) {}
+}
+
+// ---------------------------------------------------------------------------
+// Chain
+// ---------------------------------------------------------------------------
+
+/// A named processing chain with physical I/O routing and pre-allocated RT buffers.
+///
+/// Signal model per block:
+/// ```text
+/// dry_buf  ← physical input channels
+/// eff_buf  ← 0.0 initially
+///
+/// for each node:
+///     node.process(dry_buf, eff_buf)   // node reads dry+eff, writes new eff
+///
+/// output_channels += eff_buf
+/// ```
+pub struct Chain {
+    pub key: String,
+    pub input: [u8; 2],
+    pub output: [u8; 2],
+    pub nodes: Vec<Box<dyn Device>>,
+    dry_buf: Vec<Frame>,
+    eff_buf: Vec<Frame>,
+}
+
+impl Chain {
+    pub fn new(
+        key: String,
+        input: [u8; 2],
+        output: [u8; 2],
+        nodes: Vec<Box<dyn Device>>,
+    ) -> Self {
+        Self {
+            key, input, output, nodes,
+            dry_buf: Vec::new(),
+            eff_buf: Vec::new(),
+        }
+    }
+
+    pub fn prepare(&mut self, block_size: usize) {
+        self.dry_buf.resize(block_size, [0.0; 2]);
+        self.eff_buf.resize(block_size, [0.0; 2]);
+    }
+
+    pub fn process(
+        &mut self,
+        block_size: usize,
+        in_channels: usize,
+        out_channels: usize,
+        input: &[f32],
+        output: &mut [f32],
+    ) {
+        if block_size > self.dry_buf.len() {
+            self.prepare(block_size);
+        }
+
+        let in0 = (self.input[0] - 1) as usize;
+        let in1 = (self.input[1] - 1) as usize;
+
+        for f in 0..block_size {
+            self.dry_buf[f] = [
+                input[f * in_channels + in0],
+                input[f * in_channels + in1],
+            ];
+            self.eff_buf[f] = [0.0; 2];
+        }
+
+        // Destructure for disjoint field borrows.
+        let (nodes, dry_buf, eff_buf) =
+            (&mut self.nodes, &self.dry_buf, &mut self.eff_buf);
+
+        for node in nodes.iter_mut() {
+            if node.is_active() {
+                node.process(&dry_buf[..block_size], &mut eff_buf[..block_size]);
+            }
+        }
+
+        let out0 = (self.output[0] - 1) as usize;
+        let out1 = (self.output[1] - 1) as usize;
+        for f in 0..block_size {
+            output[f * out_channels + out0] += self.eff_buf[f][0];
+            output[f * out_channels + out1] += self.eff_buf[f][1];
+        }
+    }
+
+    pub fn reset(&mut self) {
+        for node in &mut self.nodes {
+            node.reset();
+        }
+    }
+
+    pub fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Key-prefix routing: "04-reverb.wet" → node "04-reverb", param "wet"
+        if let Some((key, rest)) = param.split_once('.') {
+            for node in &mut self.nodes {
+                if node.key() == key {
+                    match node.set_param(rest, value) {
+                        Ok(())  => debug!("SET {param}"),
+                        Err(e)  => warn!("{e}"),
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        // Fallback: try every node in order
+        for node in &mut self.nodes {
+            match node.set_param(param, value) {
+                Ok(()) => { debug!("SET {param}"); return Ok(()); }
+                Err(e) if !e.contains("unknown param") => { warn!("{e}"); return Ok(()); }
+                Err(_) => {}
+            }
+        }
+        Err(format!("Chain '{}': no node handles '{param}'", self.key))
+    }
+
+    #[allow(dead_code)]
+    pub fn on_cc(&mut self, controller: u8, value: u8) {
+        for node in &mut self.nodes {
+            node.on_cc(controller, value);
+        }
+    }
+
+    pub fn on_program_change(&mut self, program: u8) {
+        for node in &mut self.nodes {
+            node.on_program_change(program);
+        }
+    }
+
+    pub fn on_note_on(&mut self, note: u8, velocity: u8) {
+        for node in &mut self.nodes {
+            node.on_note_on(note, velocity);
+        }
+    }
+
+    pub fn on_note_off(&mut self, note: u8) {
+        for node in &mut self.nodes {
+            node.on_note_off(note);
+        }
+    }
+
+    /// Serialise this chain to a JSON value matching the patch file format.
+    pub fn to_json(&self) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = self.nodes.iter().map(|d| {
+            let mut obj = d.to_params();
+            obj.insert("key".into(),  d.key().into());
+            obj.insert("type".into(), d.type_name().into());
+            serde_json::Value::Object(obj)
+        }).collect();
+        serde_json::json!({
+            "key":    self.key,
+            "input":  self.input,
+            "output": self.output,
+            "nodes":  nodes,
+        })
+    }
+}
+
+/// Serialise a slice of chains to the top-level patch JSON format.
+pub fn chains_to_json(chains: &[Chain]) -> serde_json::Value {
+    serde_json::json!({ "chains": chains.iter().map(Chain::to_json).collect::<Vec<_>>() })
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+pub fn build_chain(def: &ChainDef, cfg: &BuildConfig) -> Result<Chain> {
+    for &ch in &def.input {
+        if ch == 0 || ch as usize > cfg.in_channels {
+            bail!("Chain '{}': input channel {} out of range (in_channels={})", def.key, ch, cfg.in_channels);
+        }
+    }
+    for &ch in &def.output {
+        if ch == 0 || ch as usize > cfg.out_channels {
+            bail!("Chain '{}': output channel {} out of range (out_channels={})", def.key, ch, cfg.out_channels);
+        }
+    }
+
+    let nodes: Result<Vec<Box<dyn Device>>> =
+        def.nodes.iter().map(|n| build_node(n, cfg)).collect();
+    let chain = Chain::new(def.key.clone(), def.input, def.output, nodes?);
+    debug!(
+        "Chain '{}': input=[{},{}] output=[{},{}], {} node(s)",
+        chain.key,
+        chain.input[0], chain.input[1],
+        chain.output[0], chain.output[1],
+        chain.nodes.len()
+    );
+    Ok(chain)
+}
+
+fn apply_params<P: Parameterized>(
+    target: &mut P,
+    params: &serde_json::Map<String, serde_json::Value>,
+    node_key: &str,
+) -> Result<()> {
+    for (k, v) in params {
+        if matches!(k.as_str(), "key" | "type") { continue; }
+        let pv = parse_param_value(v)
+            .with_context(|| format!("node '{node_key}': param '{k}'"))?;
+        if let Err(e) = target.set_param(k, pv) { warn!("{e}"); }
+    }
+    Ok(())
+}
+
+fn build_node(def: &NodeDef, cfg: &BuildConfig) -> Result<Box<dyn Device>> {
+    let mut device: Box<dyn Device> = match def.device_type.as_str() {
+        "mix"        => Box::new(Mix::new(&def.key)),
+        "looper"     => Box::new(Looper::new(&def.key, cfg.sample_rate, cfg.looper_max_seconds)),
+        "delay"      => Box::new(Delay::new(&def.key, cfg.sample_rate, cfg.delay_max_seconds)),
+        "reverb"     => Box::new(Reverb::new(&def.key, cfg.sample_rate)),
+        "chorus"     => Box::new(Chorus::new(&def.key, cfg.sample_rate)),
+        "harmonizer" => Box::new(Harmonizer::new(&def.key, cfg.sample_rate)),
+        "eq_param" => Box::new(Eq::new(&def.key, EqType::Peak,      cfg.sample_rate)),
+        "eq_low"   => Box::new(Eq::new(&def.key, EqType::LowShelf,  cfg.sample_rate)),
+        "eq_high"  => Box::new(Eq::new(&def.key, EqType::HighShelf, cfg.sample_rate)),
+        other      => bail!("unknown device type: '{other}'"),
+    };
+    apply_params(&mut device, &def.params, &def.key)?;
+    debug!("  Node '{}' ({})", def.key, def.device_type);
+    Ok(device)
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+pub fn load_file(path: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read patch file '{path}'"))?;
+    let def: PatchDef = serde_json::from_str(&text).context("patch JSON parse error")?;
+    def.chains.iter().map(|c| build_chain(c, cfg)).collect()
+}
+
+pub fn load_str(json: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {
+    let def: PatchDef = serde_json::from_str(json).context("patch JSON parse error")?;
+    def.chains.iter().map(|c| build_chain(c, cfg)).collect()
+}
+
+/// Parse a JSON value into a `ParamValue`.
+///
+/// - `number` or `bool`  → `ParamValue::Float`
+/// - `[number, number]`  → `ParamValue::Stereo`
+/// - anything else       → `Err`
+fn parse_param_value(v: &Value) -> Result<ParamValue> {
+    match v {
+        Value::Number(n) => Ok(ParamValue::Float(
+            n.as_f64().ok_or_else(|| anyhow::anyhow!("invalid number: {v}"))? as f32,
+        )),
+        Value::Bool(b) => Ok(ParamValue::Bool(*b)),
+        Value::Array(arr) if arr.len() == 2 => Ok(ParamValue::Stereo([
+            arr[0].as_f64().ok_or_else(|| anyhow::anyhow!("array element 0 is not a number"))? as f32,
+            arr[1].as_f64().ok_or_else(|| anyhow::anyhow!("array element 1 is not a number"))? as f32,
+        ])),
+        Value::Array(arr) => bail!("expected [number, number], got array with {} elements", arr.len()),
+        _ => bail!("expected number or [number, number], got: {v}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partial-update helper (for TCP UPDATE command)
+// ---------------------------------------------------------------------------
+
+/// Convert a partial-update JSON object into `(path, value)` pairs.
+///
+/// Example:
+/// ```json
+/// { "04-reverb": { "wet": 0.6 }, "09-mix": { "dry": 1.0 } }
+/// ```
+/// → `[("04-reverb.wet", 0.6), ("09-mix.dry", 1.0)]`
+pub fn flatten_update(update: &Value) -> Vec<(String, f32)> {
+    let mut out = Vec::new();
+    flatten_rec(update, String::new(), &mut out);
+    out
+}
+
+fn flatten_rec(v: &Value, prefix: String, out: &mut Vec<(String, f32)>) {
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map {
+                let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                flatten_rec(child, path, out);
+            }
+        }
+        Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                out.push((prefix, f as f32));
+            }
+        }
+        Value::Bool(b) => {
+            out.push((prefix, if *b { 1.0 } else { 0.0 }));
+        }
+        _ => {}
+    }
+}

@@ -1,0 +1,37 @@
+[package]
+name = "multi-effect"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "multi-effect"
+path = "src/main.rs"
+
+[dependencies]
+# Audio I/O (ALSA on Linux / CoreAudio on macOS)
+cpal = "0.15"
+
+# MIDI (program change, control change)
+midir = "0.10"
+
+# Lock-free ring channel: control thread → audio thread (no allocations in RT path)
+rtrb = "0.3"
+
+# Async runtime for TCP control server (control thread only, never in RT path)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time"] }
+
+# Config / preset serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# USB serial control port
+tokio-serial = "5"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+syslog = "7"
