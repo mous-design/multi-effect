@@ -115,6 +115,10 @@ pub struct Config {
     #[serde(default)]
     pub verbose: bool,
 
+    /// Port for the HTTP/WebSocket control API (0 = disabled).
+    #[serde(default = "Config::default_http_port")]
+    pub http_port: u16,
+
     /// Path of the loaded config file — set at runtime, not persisted.
     #[serde(skip)]
     pub config_path: String,
@@ -131,6 +135,7 @@ impl Config {
     fn default_log_target()          -> String { "stderr".into() }
     fn default_state_save_interval() -> u64    { 300 }
     fn default_state_save_path()     -> String { "/tmp/multi-effect-state.json".into() }
+    fn default_http_port()           -> u16    { 8080 }
 
     pub fn load(path: &str) -> Result<Self> {
         let text = fs::read_to_string(path)
@@ -301,6 +306,7 @@ impl Default for Config {
             looper_max_seconds:   Self::default_looper_max_seconds(),
             config_path:          String::new(),
             skip_state:           false,
+            http_port:            Self::default_http_port(),
         }
     }
 }

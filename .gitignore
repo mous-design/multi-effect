@@ -25,3 +25,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Frontend dependencies (build output ui/dist is tracked)
+ui/node_modules/

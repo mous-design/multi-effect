@@ -125,7 +125,7 @@ impl Parameterized for Eq {
         };
         match param {
             "active"  => { self.active = value.try_bool()?; Ok(()) }
-            "freq_hz" => { let (v, r) = check_bounds(name, "freq_hz", value.try_float()?, 20.0, self.sample_rate * 0.499); self.freq_hz = v; self.update_coefficients(); r }
+            "freq"    => { let (v, r) = check_bounds(name, "freq",    value.try_float()?, 20.0, self.sample_rate * 0.499); self.freq_hz = v; self.update_coefficients(); r }
             "q"       => { let (v, r) = check_bounds(name, "q",       value.try_float()?, 0.1,  30.0); self.q       = v; self.update_coefficients(); r }
             "gain_db" => { let (v, r) = check_bounds(name, "gain_db", value.try_float()?, -24.0, 24.0); self.gain_db = v; self.update_coefficients(); r }
             _ => Err(format!("{name}: unknown param '{param}'")),
@@ -135,7 +135,7 @@ impl Parameterized for Eq {
     fn get_param(&self, param: &str) -> Option<f32> {
         match param {
             "active"  => Some(if self.active { 1.0 } else { 0.0 }),
-            "freq_hz" => Some(self.freq_hz),
+            "freq"    => Some(self.freq_hz),
             "q"       => Some(self.q),
             "gain_db" => Some(self.gain_db),
             _ => None,
@@ -158,10 +158,12 @@ impl Device for Eq {
 
     fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut m = serde_json::Map::new();
-        m.insert("active".into(),   self.active.into());
-        m.insert("freq_hz".into(),  self.freq_hz.into());
-        m.insert("q".into(),        self.q.into());
-        m.insert("gain_db".into(),  self.gain_db.into());
+        m.insert("active".into(),  self.active.into());
+        m.insert("freq".into(),    self.freq_hz.into());
+        if self.eq_type == EqType::Peak {
+            m.insert("q".into(), self.q.into());
+        }
+        m.insert("gain_db".into(), self.gain_db.into());
         m
     }
 

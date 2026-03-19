@@ -39,8 +39,6 @@ pub struct PatchDef {
 
 #[derive(Debug, Deserialize)]
 pub struct ChainDef {
-    pub key: String,
-
     #[serde(deserialize_with = "deserialize_channel_pair")]
     pub input: [u8; 2],
 
@@ -169,7 +167,6 @@ impl Device for Mix {
 /// output_channels += eff_buf
 /// ```
 pub struct Chain {
-    pub key: String,
     pub input: [u8; 2],
     pub output: [u8; 2],
     pub nodes: Vec<Box<dyn Device>>,
@@ -179,13 +176,12 @@ pub struct Chain {
 
 impl Chain {
     pub fn new(
-        key: String,
         input: [u8; 2],
         output: [u8; 2],
         nodes: Vec<Box<dyn Device>>,
     ) -> Self {
         Self {
-            key, input, output, nodes,
+            input, output, nodes,
             dry_buf: Vec::new(),
             eff_buf: Vec::new(),
         }
@@ -264,7 +260,7 @@ impl Chain {
                 Err(_) => {}
             }
         }
-        Err(format!("Chain '{}': no node handles '{param}'", self.key))
+        Err(format!("no node handles '{param}'"))
     }
 
     #[allow(dead_code)]
@@ -301,7 +297,6 @@ impl Chain {
             serde_json::Value::Object(obj)
         }).collect();
         serde_json::json!({
-            "key":    self.key,
             "input":  self.input,
             "output": self.output,
             "nodes":  nodes,
@@ -318,27 +313,26 @@ pub fn chains_to_json(chains: &[Chain]) -> serde_json::Value {
 // Factory
 // ---------------------------------------------------------------------------
 
-pub fn build_chain(def: &ChainDef, cfg: &BuildConfig) -> Result<Chain> {
+pub fn build_chain(idx: usize, def: &ChainDef, cfg: &BuildConfig) -> Result<Chain> {
     for &ch in &def.input {
         if ch == 0 || ch as usize > cfg.in_channels {
-            bail!("Chain '{}': input channel {} out of range (in_channels={})", def.key, ch, cfg.in_channels);
+            bail!("Chain {idx}: input channel {} out of range (in_channels={})", ch, cfg.in_channels);
         }
     }
     for &ch in &def.output {
         if ch == 0 || ch as usize > cfg.out_channels {
-            bail!("Chain '{}': output channel {} out of range (out_channels={})", def.key, ch, cfg.out_channels);
+            bail!("Chain {idx}: output channel {} out of range (out_channels={})", ch, cfg.out_channels);
         }
     }
 
     validate_eq_order(&def.nodes)
-        .with_context(|| format!("Chain '{}'", def.key))?;
+        .with_context(|| format!("Chain {idx}"))?;
 
     let nodes: Result<Vec<Box<dyn Device>>> =
         def.nodes.iter().map(|n| build_node(n, cfg)).collect();
-    let chain = Chain::new(def.key.clone(), def.input, def.output, nodes?);
+    let chain = Chain::new(def.input, def.output, nodes?);
     debug!(
-        "Chain '{}': input=[{},{}] output=[{},{}], {} node(s)",
-        chain.key,
+        "Chain {idx}: input=[{},{}] output=[{},{}], {} node(s)",
         chain.input[0], chain.input[1],
         chain.output[0], chain.output[1],
         chain.nodes.len()
@@ -406,9 +400,8 @@ fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
         {
             if eq_pos < mix_pos {
                 bail!(
-                    "EQ node '{}' (position {}) appears before Mix node '{}' (position {}) \
-                     which has dry={dry:.2}. EQ before Mix with dry>0 causes phase artefacts \
-                     on the analogue bypass signal. Move EQ after Mix, or set Mix dry=0.",
+                    "EQ '{}' (pos {}) before Mix '{}' (pos {}) with dry={dry:.2}: \
+                     causes phase artefacts on analogue bypass. Move EQ after Mix, or set Mix dry=0.",
                     eq_node.key, eq_pos, mix_node.key, mix_pos
                 );
             }
@@ -421,12 +414,12 @@ pub fn load_file(path: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read patch file '{path}'"))?;
     let def: PatchDef = serde_json::from_str(&text).context("patch JSON parse error")?;
-    def.chains.iter().map(|c| build_chain(c, cfg)).collect()
+    def.chains.iter().enumerate().map(|(i, c)| build_chain(i, c, cfg)).collect()
 }
 
 pub fn load_str(json: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {
     let def: PatchDef = serde_json::from_str(json).context("patch JSON parse error")?;
-    def.chains.iter().map(|c| build_chain(c, cfg)).collect()
+    def.chains.iter().enumerate().map(|(i, c)| build_chain(i, c, cfg)).collect()
 }
 
 /// Parse a JSON value into a `ParamValue`.

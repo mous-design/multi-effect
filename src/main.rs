@@ -2,6 +2,7 @@ mod config;
 mod control;
 mod effects;
 mod engine;
+mod http;
 mod logging;
 mod save;
 
@@ -68,6 +69,9 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Reload notifier (HTTP /api/reload → same logic as SIGHUP) ---
+    let reload_notify = Arc::new(tokio::sync::Notify::new());
+
     // --- Event bus (pub/sub: TCP, MIDI, serial → subscribers) ---
     let bus = new_event_bus();
 
@@ -116,6 +120,7 @@ async fn main() -> Result<()> {
     {
         let mut pc_rx           = bus.subscribe();
         let patch_tx_pc         = Arc::clone(&patch_tx);
+        let patch_state_pc      = Arc::clone(&patch_state);
         let cfg_pc              = Arc::clone(&cfg);
         let controller_arcs_pc  = Arc::clone(&controller_arcs);
         let build_cfg_pc        = build_cfg;
@@ -133,9 +138,11 @@ async fn main() -> Result<()> {
                 let chains_val = serde_json::json!({"chains": preset.chains});
                 match engine::patch::load_str(&chains_val.to_string(), &build_cfg_pc) {
                     Ok(chains) => {
+                        let json = engine::patch::chains_to_json(&chains);
                         if patch_tx_pc.lock().unwrap().push(chains).is_err() {
                             tracing::warn!("patch channel full, preset {slot} not loaded");
                         } else {
+                            patch_state_pc.lock().unwrap().apply_patch(json);
                             // Clear all device mappings, then apply new preset's controllers.
                             for arc in controller_arcs_pc.values() {
                                 *arc.write().unwrap() = ControllerDef::default();
@@ -360,7 +367,103 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Block until Ctrl-C
+    // --- HTTP server ---
+    {
+        let http_port = { cfg.lock().unwrap().http_port };
+        if http_port != 0 {
+            let http_state = http::AppState {
+                patch_state:   Arc::clone(&patch_state),
+                patch_tx:      Arc::clone(&patch_tx),
+                build_cfg,
+                bus:           bus.clone(),
+                cfg:           Arc::clone(&cfg),
+                reload_notify: Arc::clone(&reload_notify),
+            };
+            let ui_dist = "ui/dist";
+            let router = http::router(http_state, ui_dist);
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
+            info!("HTTP server on http://0.0.0.0:{http_port}");
+            tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                axum::serve(listener, router).await.unwrap();
+            });
+        }
+    }
+
+    // --- Signal loop: SIGINT/Ctrl-C → shutdown, SIGHUP → reload config ---
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sig_int  = signal(SignalKind::interrupt())?;
+        let mut sig_term = signal(SignalKind::terminate())?;
+        let mut sig_hup  = signal(SignalKind::hangup())?;
+
+        loop {
+            tokio::select! {
+                _ = sig_int.recv()           => { info!("SIGINT received, shutting down."); break; }
+                _ = sig_term.recv()          => { info!("SIGTERM received, shutting down."); break; }
+                _ = reload_notify.notified() => { info!("Reload requested via HTTP."); }
+                _ = sig_hup.recv()           => { info!("SIGHUP received."); }
+            }
+            // Reload config (reached after notify or SIGHUP, not after break).
+            let config_path = cfg.lock().unwrap().config_path.clone();
+            match Config::load(&config_path) {
+                Err(e) => warn!("reload: config load failed: {e}"),
+                Ok(mut new_cfg) => {
+                    new_cfg.config_path = config_path;
+                    {
+                        let old = cfg.lock().unwrap();
+                        if new_cfg.device       != old.device       { warn!("reload: 'device' changed — restart required"); }
+                        if new_cfg.sample_rate  != old.sample_rate  { warn!("reload: 'sample_rate' changed — restart required"); }
+                        if new_cfg.buffer_size  != old.buffer_size  { warn!("reload: 'buffer_size' changed — restart required"); }
+                        if new_cfg.in_channels  != old.in_channels  { warn!("reload: 'in_channels' changed — restart required"); }
+                        if new_cfg.out_channels != old.out_channels { warn!("reload: 'out_channels' changed — restart required"); }
+                        if new_cfg.http_port    != old.http_port    { warn!("reload: 'http_port' changed — restart required"); }
+                    }
+                    let state_path  = new_cfg.effective_state_save_path();
+                    let controllers = new_cfg.active_preset_entry()
+                        .map(|p| p.controllers.clone())
+                        .unwrap_or_default();
+                    if let Ok(mut s) = patch_state.lock() {
+                        if let Err(e) = s.save() { warn!("reload: state save failed: {e}"); }
+                    }
+                    *cfg.lock().unwrap() = new_cfg;
+                    let chains_result = if !state_path.as_os_str().is_empty() && state_path.exists() {
+                        info!("reload: loading state from {}", state_path.display());
+                        engine::patch::load_file(state_path.to_str().unwrap(), &build_cfg)
+                    } else {
+                        let preset_json = cfg.lock().unwrap()
+                            .startup_chains_json().unwrap_or(None)
+                            .unwrap_or_else(|| r#"{"chains":[]}"#.into());
+                        engine::patch::load_str(&preset_json, &build_cfg)
+                    };
+                    match chains_result {
+                        Ok(chains) => {
+                            let json = engine::patch::chains_to_json(&chains);
+                            if patch_tx.lock().unwrap().push(chains).is_err() {
+                                warn!("reload: patch channel full");
+                            } else {
+                                patch_state.lock().unwrap().apply_patch(json);
+                                for arc in controller_arcs.values() {
+                                    *arc.write().unwrap() = ControllerDef::default();
+                                }
+                                for ctrl_def in controllers {
+                                    if let Some(arc) = controller_arcs.get(&ctrl_def.device) {
+                                        *arc.write().unwrap() = ctrl_def;
+                                    }
+                                }
+                                info!("reload: done.");
+                            }
+                        }
+                        Err(e) => warn!("reload: chain build error: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
 
     // Save state on shutdown
