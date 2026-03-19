@@ -1,5 +1,7 @@
 # multi-effect
 
+![Status: WIP](https://img.shields.io/badge/status-WIP-orange)
+
 Real-time audio effect daemon for CPAL.
 
 Signal path: ADC → Rust engine → DAC. The dry signal is mixed in analogue — the engine outputs wet signal only.
