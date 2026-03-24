@@ -112,13 +112,13 @@ impl Device for Delay {
         m
     }
 
-    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
-        for (e, &d) in eff.iter_mut().zip(dry.iter()) {
+    fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
+        for e in eff.iter_mut() {
             for ch in 0..2 {
-                let inp = d[ch] + e[ch];
+                let inp = e[ch];
                 let delayed = self.bufs[ch].read_at(self.delay_samples);
                 self.bufs[ch].write(inp + delayed * self.feedback);
-                e[ch] = inp * (1.0 - self.wet[ch]) + delayed * self.wet[ch];
+                e[ch] = inp + delayed * self.wet[ch];
             }
         }
     }

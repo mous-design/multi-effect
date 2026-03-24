@@ -15,11 +15,13 @@ use crate::logging;
 /// Build-time parameters derived from `Config`, passed to the patch factory.
 #[derive(Clone, Copy)]
 pub struct BuildConfig {
-    pub sample_rate:        f32,
-    pub in_channels:        usize,
-    pub out_channels:       usize,
-    pub delay_max_seconds:  f32,
-    pub looper_max_seconds: f32,
+    pub sample_rate:         f32,
+    pub in_channels:         usize,
+    pub out_channels:        usize,
+    pub delay_max_seconds:   f32,
+    pub looper_max_seconds:  f32,
+    /// Maximum number of overdub layers (0 = limited only by memory).
+    pub looper_max_buffers:  usize,
 }
 
 impl From<&Config> for BuildConfig {
@@ -30,6 +32,7 @@ impl From<&Config> for BuildConfig {
             out_channels:       cfg.out_channels as usize,
             delay_max_seconds:  cfg.delay_max_seconds,
             looper_max_seconds: cfg.looper_max_seconds,
+            looper_max_buffers: cfg.looper_max_buffers,
         }
     }
 }
@@ -82,9 +85,13 @@ pub struct Config {
     #[serde(default = "Config::default_delay_max_seconds")]
     pub delay_max_seconds: f32,
 
-    /// Maximum loop length in seconds (determines looper buffer size at startup)
+    /// Maximum loop length in seconds (initial buffer size for buffer[0])
     #[serde(default = "Config::default_looper_max_seconds")]
     pub looper_max_seconds: f32,
+
+    /// Maximum number of overdub layers (0 = limited only by memory, default 8)
+    #[serde(default = "Config::default_looper_max_buffers")]
+    pub looper_max_buffers: usize,
 
     /// Startup chains (used when no preset is active).  Empty = none.
     #[serde(default)]
@@ -132,6 +139,7 @@ pub struct Config {
 impl Config {
     fn default_delay_max_seconds()   -> f32    { 2.0  }
     fn default_looper_max_seconds()  -> f32    { 30.0 }
+    fn default_looper_max_buffers()  -> usize  { 8    }
     fn default_log_target()          -> String { "stderr".into() }
     fn default_state_save_interval() -> u64    { 300 }
     fn default_state_save_path()     -> String { "/tmp/multi-effect-state.json".into() }
@@ -141,8 +149,12 @@ impl Config {
         let text = fs::read_to_string(path)
             .with_context(|| format!("cannot read config file '{path}'"))?;
         match Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("") {
-            "json" => serde_json::from_str(&text).context("config JSON parse error"),
-            other  => bail!("unsupported config format '.{other}' (use .json)"),
+            "json" => {
+                let mut v: Value = serde_json::from_str(&text).context("config JSON parse error")?;
+                coerce_whole_floats(&mut v);
+                serde_json::from_value(v).context("config JSON parse error")
+            }
+            other => bail!("unsupported config format '.{other}' (use .json)"),
         }
     }
 
@@ -207,7 +219,9 @@ impl Config {
         if self.config_path.is_empty() { return Ok(()); }
         let path = Path::new(&self.config_path);
         let tmp  = path.with_extension("json.tmp");
-        let text = serde_json::to_string_pretty(self).context("config serialize")?;
+        let mut v = serde_json::to_value(self).context("config serialize")?;
+        crate::save::round_floats(&mut v);
+        let text = serde_json::to_string_pretty(&v).context("config serialize")?;
         fs::write(&tmp, &text)?;
         fs::rename(&tmp, path)?;
         Ok(())
@@ -236,6 +250,24 @@ impl Config {
 
         let build_cfg = BuildConfig::from(&cfg);
         Ok((cfg, build_cfg))
+    }
+}
+
+/// Convert float JSON numbers that are whole numbers back to integers (e.g. 1.0 → 1).
+/// Repairs config files that were incorrectly serialized with integer fields as floats.
+fn coerce_whole_floats(v: &mut Value) {
+    match v {
+        Value::Number(n) if n.is_f64() => {
+            if let Some(f) = n.as_f64() {
+                if f.fract() == 0.0 && f >= 0.0 && f < u64::MAX as f64 {
+                    *n = serde_json::Number::from(f as u64);
+                }
+            }
+        }
+        Value::Number(_) => {}
+        Value::Array(arr) => arr.iter_mut().for_each(coerce_whole_floats),
+        Value::Object(obj) => obj.values_mut().for_each(coerce_whole_floats),
+        _ => {}
     }
 }
 
@@ -304,6 +336,7 @@ impl Default for Config {
             verbose:              false,
             delay_max_seconds:    Self::default_delay_max_seconds(),
             looper_max_seconds:   Self::default_looper_max_seconds(),
+            looper_max_buffers:   Self::default_looper_max_buffers(),
             config_path:          String::new(),
             skip_state:           false,
             http_port:            Self::default_http_port(),

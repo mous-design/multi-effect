@@ -2,11 +2,12 @@ pub mod device;
 pub mod patch;
 pub mod ring_buffer;
 
+use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use crate::control::ControlMessage;
 use crate::engine::device::ParamValue;
-use crate::engine::patch::Chain;
+use crate::engine::patch::{Chain, chains_to_json};
 use rtrb::Consumer;
 
 /// The central audio processing unit.
@@ -29,6 +30,10 @@ pub struct AudioEngine {
 
     /// Receives full patch swaps.
     patch_rx: Consumer<Vec<Chain>>,
+
+    /// Shared live-state snapshot, updated every ~100 blocks (for GET /api/state).
+    live_state: Arc<Mutex<serde_json::Value>>,
+    block_count: u32,
 }
 
 impl AudioEngine {
@@ -40,11 +45,15 @@ impl AudioEngine {
         buffer_size: usize,
         control_rx: Consumer<ControlMessage>,
         patch_rx: Consumer<Vec<Chain>>,
+        live_state: Arc<Mutex<serde_json::Value>>,
     ) -> Self {
         for chain in &mut chains {
             chain.prepare(buffer_size);
         }
-        Self { chains, in_channels, out_channels, sample_rate, buffer_size, control_rx, patch_rx }
+        Self {
+            chains, in_channels, out_channels, sample_rate, buffer_size,
+            control_rx, patch_rx, live_state, block_count: 0,
+        }
     }
 
     /// Process one audio block.  Called from the CPAL callback.
@@ -64,6 +73,15 @@ impl AudioEngine {
         let block_size = output.len() / self.out_channels;
         for chain in &mut self.chains {
             chain.process(block_size, self.in_channels, self.out_channels, input, output);
+        }
+
+        // Push a live-state snapshot roughly every 100 blocks (~65ms at 96kHz/256).
+        // try_lock never blocks — skip this update cycle if the HTTP thread holds the lock.
+        self.block_count = self.block_count.wrapping_add(1);
+        if self.block_count % 100 == 0 {
+            if let Ok(mut g) = self.live_state.try_lock() {
+                *g = chains_to_json(&self.chains);
+            }
         }
     }
 
@@ -101,6 +119,14 @@ impl AudioEngine {
                 ControlMessage::NoteOff { note } => {
                     for chain in &mut self.chains { chain.on_note_off(note); }
                 }
+                ControlMessage::Action { path, action } => {
+                    let handled = self.chains.iter_mut().any(|c| c.dispatch_action(&path, &action).is_ok());
+                    if !handled {
+                        warn!("ACTION '{path}' '{action}': no handler");
+                    }
+                }
+                // NodeEvent is fired directly by nodes (e.g. Looper) via their stored EventBus.
+                ControlMessage::NodeEvent { .. } => {}
             }
         }
     }

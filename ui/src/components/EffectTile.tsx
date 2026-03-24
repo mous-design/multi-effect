@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NodeDef } from '../types';
+import { postAction } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { t } from '../i18n';
 
-const PARAM_META: Record<string, { min: number; max: number; unit?: string }> = {
+export const PARAM_META: Record<string, { min: number; max: number; unit?: string }> = {
   wet:       { min: 0,    max: 1              },
   dry:       { min: 0,    max: 1              },
   gain:      { min: 0,    max: 4              },
@@ -23,7 +24,7 @@ const PARAM_META: Record<string, { min: number; max: number; unit?: string }> = 
   loop_gain: { min: 0,    max: 4              },
 };
 
-const SKIP_PARAMS = new Set(['key', 'type', 'active']);
+const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 'loop_secs', 'pos_secs', '_wrap_ts']);
 
 const PARAM_ORDER: Record<string, string[]> = {
   mix:      ['gain', 'pan', 'dry', 'wet'],
@@ -37,7 +38,27 @@ const DEFAULT_HIDDEN: Record<string, string[]> = {
   eq_param: ['q'],
   eq_low:   ['freq'],
   eq_high:  ['freq'],
+  looper:   ['transport'],
 };
+
+function EyeIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <ellipse cx="6" cy="6" rx="5" ry="3.5" />
+      <circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <ellipse cx="6" cy="6" rx="5" ry="3.5" />
+      <circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none" />
+      <line x1="2" y1="2" x2="10" y2="10" />
+    </svg>
+  );
+}
 
 function scalarOf(val: unknown): number | null {
   if (typeof val === 'number') return val;
@@ -74,13 +95,58 @@ function saveHidden(preset: string, nodeKey: string, hidden: Set<string>) {
 interface Props {
   node: NodeDef;
   presetName: string;
+  delayMaxSeconds?: number;
   onSet: (path: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
 }
 
-export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
+const LOOPING = new Set(['Playing', 'Overdub']);
+
+function useLooperTimer(node: NodeDef): string {
+  const looperState = String(node['state'] ?? 'Idle');
+  const loopSecs    = Number(node['loop_secs'] ?? 0);
+  const posSecs     = Number(node['pos_secs']  ?? 0);
+  const wrapTs      = Number(node['_wrap_ts']  ?? 0);
+  const isRunning   = looperState === 'Recording' || looperState === 'Playing' || looperState === 'Overdub';
+
+  const [displaySecs, setDisplaySecs] = useState(0);
+  const syncRef      = useRef<{ time: number; pos: number }>({ time: Date.now(), pos: 0 });
+  const displayRef   = useRef(0);
+  const prevStateRef = useRef(looperState);
+
+  useEffect(() => {
+    const prevState = prevStateRef.current;
+    prevStateRef.current = looperState;
+
+    // Playing ↔ Overdub: timer is continuous, don't snap to stale posSecs.
+    // Use the last displayed position as sync anchor instead.
+    const loopingTransition = LOOPING.has(prevState) && LOOPING.has(looperState) && looperState !== prevState;
+    const startPos = loopingTransition ? displayRef.current : posSecs;
+
+    syncRef.current = { time: Date.now(), pos: startPos };
+    if (!isRunning) {
+      setDisplaySecs(looperState === 'Idle' ? 0 : startPos);
+      return;
+    }
+    const id = setInterval(() => {
+      const elapsed = syncRef.current.pos + (Date.now() - syncRef.current.time) / 1000;
+      displayRef.current = elapsed;
+      setDisplaySecs(elapsed);
+    }, 100);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [looperState, posSecs, wrapTs]);
+
+  if (looperState === 'Idle' || (looperState === 'Stop' && loopSecs === 0)) return '-.--';
+  const sInt   = Math.floor(displaySecs);
+  const sTenth = Math.floor((displaySecs * 10) % 10);
+  return `${sInt}.${sTenth}`;
+}
+
+export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete }: Props) {
   const [hidden, setHidden] = useState(() => loadHidden(presetName, node.key, node.type));
   const [expanded, setExpanded] = useState(false);
+  const looperTime = useLooperTimer(node);
 
   useEffect(() => {
     setHidden(loadHidden(presetName, node.key, node.type));
@@ -91,7 +157,19 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
   const active = hasActive ? !!node.active : true;
 
   const allParams = getOrderedParams(node);
-  const hiddenCount = allParams.filter(([k]) => hidden.has(k)).length;
+  const isLooper = node.type === 'looper';
+
+  // Seek scrubber: only active when looper is in Stop state
+  const looperStateVal = isLooper ? String((node as Record<string, unknown>)['state'] ?? 'Idle') : '';
+  const [seekEditing, setSeekEditing] = useState(false);
+  const [seekInput, setSeekInput]     = useState('');
+  const seekDragRef = useRef<{ startY: number; startPos: number; moved: boolean } | null>(null);
+
+  useEffect(() => {
+    if (isLooper && looperStateVal !== 'Stop') setSeekEditing(false);
+  }, [isLooper, looperStateVal]);
+  const transportHidden = hidden.has('transport');
+  const hiddenCount = allParams.filter(([k]) => hidden.has(k)).length + (isLooper && transportHidden ? 1 : 0);
 
   function hide(param: string) {
     const next = new Set(hidden);
@@ -114,7 +192,10 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
     }
     const scalar = scalarOf(val);
     if (scalar !== null) {
-      const meta = PARAM_META[param] ?? { min: 0, max: 1 };
+      const meta = { ...(PARAM_META[param] ?? { min: 0, max: 1 }) };
+      if (param === 'time' && node.type === 'delay' && delayMaxSeconds !== undefined) {
+        meta.max = delayMaxSeconds;
+      }
       return <Knob nodeKey={node.key} param={param}
         value={scalar} min={meta.min} max={meta.max}
         label={t(`param.${param}`)} unit={meta.unit}
@@ -134,27 +215,148 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
         <span className="tile-type">{t(`type.${node.type}`)}</span>
         <button className="tile-delete" onClick={() => onDelete(node.key)} title="Delete">×</button>
       </div>
-      <div className="tile-params">
-        {(expanded ? allParams : visibleParams).map(([param, val]) => {
-          const isHidden = hidden.has(param);
-          const ctrl = renderControl(param, val);
-          if (!ctrl) return null;
-          return (
-            <div key={param} className={`param-cell${isHidden ? ' param-hidden' : ''}`}>
-              {ctrl}
-              {isHidden
-                ? <button className="param-show-btn" onClick={() => show(param)} title={t('ui.show_param')}>+</button>
-                : <button className="param-hide-btn" onClick={() => hide(param)} title={t('ui.hide_param')}>−</button>
-              }
-            </div>
-          );
-        })}
-      </div>
-      <div className="tile-footer">
+      <div className="tile-body">
+        <div className="tile-params">
+          {isLooper && (expanded || !transportHidden) && (() => {
+            const nd          = node as Record<string, unknown>;
+            const looperState = String(nd['state'] ?? 'Idle');
+            const overdubs    = Number(nd['overdub_count'] ?? 0);
+            const canUndo     = looperState === 'Overdub' || overdubs > 0;
+            const isIdle      = looperState === 'Idle';
+            const isRecording = looperState === 'Recording';
+            const isStop      = looperState === 'Stop';
+            const loopSecs    = Number(nd['loop_secs'] ?? 0);
+            const posSecs     = Number(nd['pos_secs']  ?? 0);
+            return (
+              <div className={`param-cell looper-transport${transportHidden ? ' param-hidden' : ''}`}>
+                <div className="looper-transport-inner">
+                  <div className="looper-state-row">
+                    <span className="looper-state-label">{looperState}</span>
+                  </div>
+                  <div className="looper-buttons">
+                    <button className="looper-btn"
+                      disabled={isRecording}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={() => postAction(`${node.key}.action`, 'rec')}>
+                      {t('looper.rec')}
+                    </button>
+                    <button className="looper-btn"
+                      disabled={isIdle}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={() => postAction(`${node.key}.action`, 'play')}>
+                      {t('looper.play')}
+                    </button>
+                    <button className="looper-btn"
+                      disabled={isIdle}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={() => postAction(`${node.key}.action`, 'pause-stop')}>
+                      {t('looper.stop')}
+                    </button>
+                  </div>
+                  {seekEditing
+                    ? <input
+                        className="looper-time looper-time-edit"
+                        type="number"
+                        step="0.1"
+                        min={0}
+                        max={loopSecs}
+                        value={seekInput}
+                        onChange={e => setSeekInput(e.target.value)}
+                        onBlur={() => {
+                          const v = Math.max(0, Math.min(loopSecs, parseFloat(seekInput) || 0));
+                          onSet(`${node.key}.pos_secs`, v);
+                          setSeekEditing(false);
+                        }}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                          if (e.key === 'Escape') setSeekEditing(false);
+                        }}
+                        onMouseDown={e => e.stopPropagation()}
+                        // eslint-disable-next-line jsx-a11y/no-autofocus
+                        autoFocus
+                      />
+                    : <div
+                        className={`looper-time${isStop ? ' looper-time-seekable' : ''}`}
+                        onMouseDown={!isStop ? undefined : e => {
+                          e.stopPropagation();
+                          const startPos = posSecs;
+                          const sensitivity = loopSecs > 0 ? loopSecs / 200 : 0.1;
+                          seekDragRef.current = { startY: e.clientY, startPos, moved: false };
+                          const onMove = (me: MouseEvent) => {
+                            if (!seekDragRef.current) return;
+                            const dy = seekDragRef.current.startY - me.clientY;
+                            if (Math.abs(dy) > 3) seekDragRef.current.moved = true;
+                            const newPos = Math.max(0, Math.min(loopSecs, startPos + dy * sensitivity));
+                            onSet(`${node.key}.pos_secs`, newPos);
+                          };
+                          const onUp = () => {
+                            if (seekDragRef.current && !seekDragRef.current.moved) {
+                              setSeekInput(startPos.toFixed(1));
+                              setSeekEditing(true);
+                            }
+                            seekDragRef.current = null;
+                            document.removeEventListener('mousemove', onMove);
+                            document.removeEventListener('mouseup', onUp);
+                          };
+                          document.addEventListener('mousemove', onMove);
+                          document.addEventListener('mouseup', onUp);
+                        }}
+                      >
+                        {looperTime}
+                      </div>
+                  }
+                  <div className="looper-layers-row">
+                    <button className="looper-btn looper-undo-btn"
+                      disabled={!canUndo}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={() => postAction(`${node.key}.action`, 'undo')}>
+                      {t('looper.undo')} ({overdubs})
+                    </button>
+                    <button className="looper-btn"
+                      disabled={isIdle}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={() => postAction(`${node.key}.action`, 'reset')}>
+                      {t('looper.reset')}
+                    </button>
+                  </div>
+                </div>
+                <button className="param-vis-btn"
+                  title={transportHidden ? t('ui.show_param') : t('ui.hide_param')}
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={() => transportHidden ? show('transport') : hide('transport')}>
+                  {transportHidden ? <EyeIcon /> : <EyeOffIcon />}
+                </button>
+              </div>
+            );
+          })()}
+          {(expanded ? allParams : visibleParams).map(([param, val]) => {
+            const isHidden = hidden.has(param);
+            const ctrl = renderControl(param, val);
+            if (!ctrl) return null;
+            return (
+              <div key={param} className={`param-cell${isHidden ? ' param-hidden' : ''}`}>
+                {ctrl}
+                <button
+                  className="param-vis-btn"
+                  title={isHidden ? t('ui.show_param') : t('ui.hide_param')}
+                  onMouseDown={e => e.stopPropagation()}
+                  onClick={() => isHidden ? show(param) : hide(param)}
+                >
+                  {isHidden ? <EyeIcon /> : <EyeOffIcon />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
         {hiddenCount > 0 && (
-          <button className="tile-expand" onClick={() => setExpanded(e => !e)}>
-            {expanded ? '▴' : `▾ ${hiddenCount}`}
-          </button>
+          <div className="tile-sidebar">
+            <button className="tile-expand" onClick={() => setExpanded(e => !e)}>
+              {expanded
+                ? <span className="tile-expand-arrow">◂</span>
+                : <><span className="tile-expand-arrow">▸</span><span className="tile-expand-count">{hiddenCount}</span></>
+              }
+            </button>
+          </div>
         )}
       </div>
     </div>

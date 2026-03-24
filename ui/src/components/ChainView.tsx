@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
-import { ChainDef, NodeDef } from '../types';
+import { ChainDef, DeviceMap, NodeDef } from '../types';
 import { EffectTile } from './EffectTile';
+import { MappingsPanel } from './MappingsPanel';
 import { t } from '../i18n';
 
 const EQ_TYPES = new Set(['eq_param', 'eq_low', 'eq_high']);
@@ -34,14 +35,14 @@ function itemKey(item: NodeItem): string {
   return Array.isArray(item) ? item.map(n => n.key).join('|') : item.key;
 }
 
-const EFFECT_TYPES = ['delay', 'reverb', 'chorus', 'harmonizer', 'looper', 'mix', 'eq_param', 'eq_low', 'eq_high'];
+const EFFECT_TYPES = ['delay', 'reverb', 'chorus', 'looper', 'mix', 'eq_param', 'eq_low', 'eq_high'];
 
 const DEFAULT_PARAMS: Record<string, object> = {
   delay:      { time: 0.3, feedback: 0.4, wet: 0.5, active: true },
   reverb:     { room_size: 0.5, damping: 0.5, wet: 0.3, active: true },
   chorus:     { rate_hz: 1.0, depth_ms: 8, wet: 0.3, active: true },
   harmonizer: { root: 57, wet: 0.5, vel_sense: 0.0, active: true },
-  looper:     { loop_gain: 1.0, active: true },
+  looper:     { wet: 1.0, decay: 1.0, active: true },
   mix:        { dry: 0.0, wet: 1.0, gain: 1.0, pan: 0.0, active: true },
   eq_param:   { freq: 1000, gain_db: 0, q: 1.0, active: true },
   eq_low:     { freq: 200,  gain_db: 0, active: true },
@@ -52,6 +53,9 @@ interface Props {
   chainIdx: number;
   chain: ChainDef;
   presetName: string;
+  devices: DeviceMap;
+  allNodes: NodeDef[];
+  delayMaxSeconds: number;
   onSet: (path: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
   onReorder: (chainIdx: number, newNodes: NodeDef[]) => void;
@@ -60,8 +64,12 @@ interface Props {
   onRouting: (chainIdx: number) => void;
 }
 
-export function ChainView({ chainIdx, chain, presetName, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting }: Props) {
+export function ChainView({ chainIdx, chain, presetName, devices, allNodes, delayMaxSeconds, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting }: Props) {
   const items = groupNodes(chain.nodes);
+  const presetNum = parseInt(presetName, 10);
+
+  const [mappingsOpen, setMappingsOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Drag state
   const [dragIndex, setDragIndex] = useState<number | null>(null);
@@ -143,15 +151,45 @@ export function ChainView({ chainIdx, chain, presetName, onSet, onDelete, onReor
   return (
     <div className="chain">
       <div className="chain-header">
+        <button
+          className={`chain-caret${mappingsOpen ? ' chain-caret-active' : ''}`}
+          onClick={() => { setMappingsOpen(o => !o); setConfirmDelete(false); }}
+          title={t('ui.ctrl_mappings')}
+        >
+          <svg width="14" height="12" viewBox="0 0 14 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <line x1="0" y1="2"  x2="14" y2="2"  />
+            <line x1="0" y1="6"  x2="14" y2="6"  />
+            <line x1="0" y1="10" x2="14" y2="10" />
+            <circle cx="9" cy="2"  r="2" fill="currentColor" stroke="none" />
+            <circle cx="4" cy="6"  r="2" fill="currentColor" stroke="none" />
+            <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
         <button className="chain-routing-btn" onClick={() => onRouting(chainIdx)} title="Edit routing">
           in [{chain.input.join(',')}] → out [{chain.output.join(',')}]
         </button>
-        <button
-          className="tile-delete chain-delete"
-          onClick={() => onDeleteChain(chainIdx)}
-          title="Delete chain"
-        >×</button>
+        {confirmDelete ? (
+          <div className="chain-confirm-group">
+            <span className="chain-confirm-text">{t('ui.confirm_delete_chain')}</span>
+            <button className="chain-confirm-yes" onClick={() => { setConfirmDelete(false); onDeleteChain(chainIdx); }}>✓</button>
+            <button className="chain-confirm-no"  onClick={() => setConfirmDelete(false)}>✗</button>
+          </div>
+        ) : (
+          <button
+            className="tile-delete chain-delete"
+            onClick={() => chain.nodes.length === 0 ? onDeleteChain(chainIdx) : setConfirmDelete(true)}
+            title="Delete chain"
+          >×</button>
+        )}
       </div>
+      {mappingsOpen && (
+        <MappingsPanel
+          presetNum={presetNum}
+          devices={devices}
+          allNodes={allNodes}
+          onClose={() => setMappingsOpen(false)}
+        />
+      )}
       <div className="chain-nodes">
         {items.map((item, idx) => {
           const key = itemKey(item);
@@ -178,12 +216,12 @@ export function ChainView({ chainIdx, chain, presetName, onSet, onDelete, onReor
                 <div className="eq-group-wrapper">
                   {item.map((node) => (
                     <div key={node.key} className="eq-band-wrapper">
-                      <EffectTile node={node} presetName={presetName} onSet={onSet} onDelete={onDelete} />
+                      <EffectTile node={node} presetName={presetName} delayMaxSeconds={delayMaxSeconds} onSet={onSet} onDelete={onDelete} />
                     </div>
                   ))}
                 </div>
               ) : (
-                <EffectTile node={item} presetName={presetName} onSet={onSet} onDelete={onDelete} />
+                <EffectTile node={item} presetName={presetName} delayMaxSeconds={delayMaxSeconds} onSet={onSet} onDelete={onDelete} />
               )}
             </div>
           );
@@ -191,7 +229,7 @@ export function ChainView({ chainIdx, chain, presetName, onSet, onDelete, onReor
 
         {/* Add node button / form */}
         {!showAddForm ? (
-          <button className="add-node-btn" onClick={handleOpenAddForm} title="Add effect node">+</button>
+          <button className="add-node-btn" onClick={handleOpenAddForm}>＋ new effect</button>
         ) : (
           <div className="add-node-form">
             <select

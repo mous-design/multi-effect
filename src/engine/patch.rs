@@ -212,7 +212,7 @@ impl Chain {
                 input[f * in_channels + in0],
                 input[f * in_channels + in1],
             ];
-            self.eff_buf[f] = [0.0; 2];
+            self.eff_buf[f] = self.dry_buf[f];
         }
 
         // Destructure for disjoint field borrows.
@@ -239,6 +239,12 @@ impl Chain {
         }
     }
 
+    pub fn init_bus(&mut self, bus: &crate::control::EventBus) {
+        for node in &mut self.nodes {
+            node.init_bus(bus);
+        }
+    }
+
     pub fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         // Key-prefix routing: "04-reverb.wet" → node "04-reverb", param "wet"
         if let Some((key, rest)) = param.split_once('.') {
@@ -261,6 +267,29 @@ impl Chain {
             }
         }
         Err(format!("no node handles '{param}'"))
+    }
+
+    pub fn dispatch_action(&mut self, path: &str, action: &str) -> Result<(), String> {
+        // Key-prefix routing: "01-looper.action" → node "01-looper", param "action"
+        if let Some((key, param)) = path.split_once('.') {
+            for node in &mut self.nodes {
+                if node.key() == key {
+                    match node.set_action(param, action) {
+                        Ok(())  => { debug!("ACTION {path} {action}"); return Ok(()); }
+                        Err(e)  => { warn!("{e}"); return Ok(()); }
+                    }
+                }
+            }
+        }
+        // Fallback: try every node
+        for node in &mut self.nodes {
+            match node.set_action(path, action) {
+                Ok(()) => { debug!("ACTION {path} {action}"); return Ok(()); }
+                Err(e) if !e.contains("unknown action") => { warn!("{e}"); return Ok(()); }
+                Err(_) => {}
+            }
+        }
+        Err(format!("no node handles action '{path}'"))
     }
 
     #[allow(dead_code)]
@@ -347,9 +376,13 @@ fn apply_params<P: Parameterized>(
 ) -> Result<()> {
     for (k, v) in params {
         if matches!(k.as_str(), "key" | "type") { continue; }
-        let pv = parse_param_value(v)
-            .with_context(|| format!("node '{node_key}': param '{k}'"))?;
-        if let Err(e) = target.set_param(k, pv) { warn!("{e}"); }
+        // Skip values that cannot be mapped to a ParamValue (e.g. state strings like "Idle").
+        // These are read-only runtime fields that live_state may include but are not settable.
+        let pv = match parse_param_value(v) {
+            Ok(pv) => pv,
+            Err(_)  => { continue; }
+        };
+        if let Err(e) = target.set_param(k, pv) { warn!("node '{node_key}': {e}"); }
     }
     Ok(())
 }
@@ -357,7 +390,7 @@ fn apply_params<P: Parameterized>(
 fn build_node(def: &NodeDef, cfg: &BuildConfig) -> Result<Box<dyn Device>> {
     let mut device: Box<dyn Device> = match def.device_type.as_str() {
         "mix"        => Box::new(Mix::new(&def.key)),
-        "looper"     => Box::new(Looper::new(&def.key, cfg.sample_rate, cfg.looper_max_seconds)),
+        "looper"     => Box::new(Looper::new(&def.key, cfg.sample_rate, cfg.looper_max_seconds, cfg.looper_max_buffers)),
         "delay"      => Box::new(Delay::new(&def.key, cfg.sample_rate, cfg.delay_max_seconds)),
         "reverb"     => Box::new(Reverb::new(&def.key, cfg.sample_rate)),
         "chorus"     => Box::new(Chorus::new(&def.key, cfg.sample_rate)),
@@ -408,13 +441,6 @@ fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub fn load_file(path: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("cannot read patch file '{path}'"))?;
-    let def: PatchDef = serde_json::from_str(&text).context("patch JSON parse error")?;
-    def.chains.iter().enumerate().map(|(i, c)| build_chain(i, c, cfg)).collect()
 }
 
 pub fn load_str(json: &str, cfg: &BuildConfig) -> Result<Vec<Chain>> {

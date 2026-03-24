@@ -3,6 +3,15 @@ export async function fetchState() {
   return res.json();
 }
 
+export async function postAction(target: string, action: string): Promise<boolean> {
+  const res = await fetch('/api/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target, action }),
+  });
+  return res.ok;
+}
+
 export async function fetchConfig(): Promise<{
   in_channels: number; out_channels: number;
   sample_rate: number; buffer_size: number; device: string;
@@ -41,6 +50,7 @@ export async function saveConfig(cfg: {
   device: string;
   in_channels: number;
   out_channels: number;
+  delay_max_seconds: number;
 }): Promise<boolean> {
   const res = await fetch('/api/config', {
     method: 'POST',
@@ -61,6 +71,54 @@ export function savePreset(n: number) {
 
 export function switchPreset(n: number) {
   fetch(`/api/preset/${n}`, { method: 'POST' });
+}
+
+export async function deletePreset(n: number): Promise<boolean> {
+  const res = await fetch(`/api/preset/${n}`, { method: 'DELETE' });
+  return res.ok;
+}
+
+export async function fetchDevices(): Promise<Record<string, any>> {
+  const res = await fetch('/api/devices');
+  return res.json();
+}
+
+export async function putDevice(alias: string, def: object): Promise<boolean> {
+  const res = await fetch(`/api/devices/${encodeURIComponent(alias)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(def),
+  });
+  return res.ok;
+}
+
+export async function fetchControllers(n: number): Promise<import('./types').ControllerDef[]> {
+  const res = await fetch(`/api/preset/${n}/controllers`);
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function putControllers(n: number, controllers: import('./types').ControllerDef[]): Promise<boolean> {
+  const res = await fetch(`/api/preset/${n}/controllers`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(controllers),
+  });
+  return res.ok;
+}
+
+export async function renameDevice(oldAlias: string, newAlias: string, def: object): Promise<boolean> {
+  const res = await fetch(`/api/devices/${encodeURIComponent(oldAlias)}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_alias: newAlias, ...def }),
+  });
+  return res.ok;
+}
+
+export async function deleteDevice(alias: string): Promise<boolean> {
+  const res = await fetch(`/api/devices/${encodeURIComponent(alias)}`, { method: 'DELETE' });
+  return res.ok;
 }
 
 export function createWs(

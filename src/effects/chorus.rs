@@ -90,21 +90,21 @@ impl Device for Chorus {
         m
     }
 
-    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
+    fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
         let phase_inc = self.rate_hz * TAU / self.sample_rate;
         let center = self.depth_ms * self.sample_rate / 1000.0;
         let mod_depth = center * 0.5;
         let cap = self.bufs[0].capacity() as f32;
 
-        for (e, &d) in eff.iter_mut().zip(dry.iter()) {
+        for e in eff.iter_mut() {
             for ch in 0..2 {
-                let inp = d[ch] + e[ch];
+                let inp = e[ch];
                 self.bufs[ch].write(inp);
 
                 let lfo = self.lfo_phase[ch].sin();
                 let offset = (center + lfo * mod_depth).clamp(1.0, cap - 1.0);
 
-                e[ch] = inp * (1.0 - self.wet[ch]) + self.bufs[ch].read_lerp(offset) * self.wet[ch];
+                e[ch] = inp + self.bufs[ch].read_lerp(offset) * self.wet[ch];
 
                 self.lfo_phase[ch] += phase_inc;
                 if self.lfo_phase[ch] >= TAU {

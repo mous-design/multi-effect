@@ -18,6 +18,7 @@ use tracing::{info, warn};
 use config::Config;
 use control::{ControlMessage, NetworkControl, SerialControl, new_event_bus};
 use control::mapping::{ControllerDef, DeviceDef};
+use tokio::sync::watch;
 use control::midi::{MidiControl, MidiOutControl};
 use engine::patch::Chain;
 use engine::AudioEngine;
@@ -27,20 +28,33 @@ async fn main() -> Result<()> {
     // --- Config + CLI overrides (initialises logging internally) ---
     let (cfg, build_cfg) = Config::from_args()?;
 
-    // --- Determine startup chains: saved state → active preset → top-level chains ---
+    // --- Determine startup chains: config structure + saved params overlay ---
     let state_path = cfg.effective_state_save_path();
-    let chains: Vec<Chain> = if !cfg.skip_state && state_path.exists() {
-        info!("Loading saved state: {}", state_path.display());
-        engine::patch::load_file(state_path.to_str().unwrap(), &build_cfg)
-            .with_context(|| format!("failed to load state '{}'", state_path.display()))?
+    let structure_json = cfg.startup_chains_json()
+        .context("failed to serialize startup chains")?
+        .ok_or_else(|| anyhow::anyhow!("no chains in config (no presets and no 'chains' key)"))?;
+    let merged_json = if !cfg.skip_state && state_path.exists() {
+        info!("Loading saved state (params overlay): {}", state_path.display());
+        match std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        {
+            Some(saved) => {
+                let structure: serde_json::Value = serde_json::from_str(&structure_json)
+                    .context("failed to parse startup chains json")?;
+                save::merge_state_params(&structure, &saved).to_string()
+            }
+            None => {
+                info!("Could not read state file, using config structure");
+                structure_json
+            }
+        }
     } else {
-        let json = cfg.startup_chains_json()
-            .context("failed to serialize startup chains")?
-            .ok_or_else(|| anyhow::anyhow!("no chains in config (no presets and no 'chains' key)"))?;
         info!("No saved state, loading chains from config");
-        engine::patch::load_str(&json, &build_cfg)
-            .context("failed to build startup chains")?
+        structure_json
     };
+    let mut chains: Vec<Chain> = engine::patch::load_str(&merged_json, &build_cfg)
+        .context("failed to build startup chains")?;
 
     // Extract what we need before moving cfg into the Arc.
     let devices              = cfg.devices.clone();
@@ -69,6 +83,16 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --- Per-device active-state watch channels ---
+    // Receivers are passed to device tasks; senders live in AppState for HTTP-triggered deactivation.
+    let device_active_map: HashMap<String, watch::Sender<bool>> = devices.iter()
+        .map(|(alias, def)| {
+            let (tx, _rx) = watch::channel(def.is_active());
+            (alias.clone(), tx)
+        })
+        .collect();
+    let device_active = Arc::new(Mutex::new(device_active_map));
+
     // --- Reload notifier (HTTP /api/reload → same logic as SIGHUP) ---
     let reload_notify = Arc::new(tokio::sync::Notify::new());
 
@@ -83,11 +107,13 @@ async fn main() -> Result<()> {
     let patch_tx   = Arc::new(Mutex::new(patch_tx));
 
     // Bridge task: event bus → rtrb → audio thread
+    // LiveState is not forwarded: it travels from audio → HTTP, never the reverse.
     {
         let mut bridge_rx = bus.subscribe();
         let control_tx_bridge = Arc::clone(&control_tx);
         tokio::spawn(async move {
             while let Ok(msg) = bridge_rx.recv().await {
+                if matches!(msg, ControlMessage::NodeEvent { .. }) { continue; }
                 if let Ok(mut tx) = control_tx_bridge.lock() {
                     if tx.push(msg).is_err() {
                         tracing::warn!("audio control channel full, message dropped");
@@ -119,6 +145,7 @@ async fn main() -> Result<()> {
     // Preset-switch task: ProgramChange → swap chains + controller mappings
     {
         let mut pc_rx           = bus.subscribe();
+        let bus_pc              = bus.clone();
         let patch_tx_pc         = Arc::clone(&patch_tx);
         let patch_state_pc      = Arc::clone(&patch_state);
         let cfg_pc              = Arc::clone(&cfg);
@@ -137,7 +164,8 @@ async fn main() -> Result<()> {
                 // Build new chains
                 let chains_val = serde_json::json!({"chains": preset.chains});
                 match engine::patch::load_str(&chains_val.to_string(), &build_cfg_pc) {
-                    Ok(chains) => {
+                    Ok(mut chains) => {
+                        for chain in &mut chains { chain.init_bus(&bus_pc); }
                         let json = engine::patch::chains_to_json(&chains);
                         if patch_tx_pc.lock().unwrap().push(chains).is_err() {
                             tracing::warn!("patch channel full, preset {slot} not loaded");
@@ -163,6 +191,17 @@ async fn main() -> Result<()> {
         });
     }
 
+    // --- Shared live-state (audio engine → HTTP/WS) ---
+    // Pre-populate from patch_state so GET /api/state is never null on first page load.
+    let live_state = std::sync::Arc::new(std::sync::Mutex::new(
+        patch_state.lock().unwrap().json.clone()
+    ));
+
+    // Give nodes (e.g. Looper) access to the event bus so they can fire events directly.
+    for chain in &mut chains {
+        chain.init_bus(&bus);
+    }
+
     // --- Audio engine ---
     let mut engine = AudioEngine::new(
         chains,
@@ -175,6 +214,7 @@ async fn main() -> Result<()> {
         },
         control_rx,
         patch_rx,
+        std::sync::Arc::clone(&live_state),
     );
 
     // --- CPAL: find devices ---
@@ -294,6 +334,11 @@ async fn main() -> Result<()> {
             None      => continue, // should not happen
         };
 
+        let active_rx = match device_active.lock().unwrap().get(alias) {
+            Some(tx) => tx.subscribe(),
+            None     => continue, // should not happen
+        };
+
         match dev_def {
             DeviceDef::Serial { dev, baud, fallback, .. } => {
                 let serial = SerialControl::new(
@@ -309,14 +354,15 @@ async fn main() -> Result<()> {
                 let patch_tx_serial = Arc::clone(&patch_tx);
                 let alias_s = alias.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serial.run(patch_tx_serial).await {
+                    if let Err(e) = serial.run(patch_tx_serial, active_rx).await {
                         tracing::error!("Serial '{alias_s}': {e}");
                     }
                 });
             }
 
-            DeviceDef::Net { port, fallback, .. } => {
+            DeviceDef::Net { host, port, fallback, .. } => {
                 let net = NetworkControl::new(
+                    host.clone(),
                     *port,
                     *fallback,
                     build_cfg,
@@ -328,7 +374,7 @@ async fn main() -> Result<()> {
                 let patch_tx_net = Arc::clone(&patch_tx);
                 let alias_s = alias.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = net.run(patch_tx_net).await {
+                    if let Err(e) = net.run(patch_tx_net, active_rx).await {
                         tracing::error!("Network '{alias_s}': {e}");
                     }
                 });
@@ -372,12 +418,16 @@ async fn main() -> Result<()> {
         let http_port = { cfg.lock().unwrap().http_port };
         if http_port != 0 {
             let http_state = http::AppState {
-                patch_state:   Arc::clone(&patch_state),
-                patch_tx:      Arc::clone(&patch_tx),
+                patch_state:     Arc::clone(&patch_state),
+                patch_tx:        Arc::clone(&patch_tx),
                 build_cfg,
-                bus:           bus.clone(),
-                cfg:           Arc::clone(&cfg),
-                reload_notify: Arc::clone(&reload_notify),
+                bus:             bus.clone(),
+                cfg:             Arc::clone(&cfg),
+                reload_notify:   Arc::clone(&reload_notify),
+                device_active:   Arc::clone(&device_active),
+                controller_arcs: Arc::clone(&controller_arcs),
+                live_state:      std::sync::Arc::clone(&live_state),
+                preset_dirty:    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             };
             let ui_dist = "ui/dist";
             let router = http::router(http_state, ui_dist);
@@ -429,17 +479,31 @@ async fn main() -> Result<()> {
                         if let Err(e) = s.save() { warn!("reload: state save failed: {e}"); }
                     }
                     *cfg.lock().unwrap() = new_cfg;
-                    let chains_result = if !state_path.as_os_str().is_empty() && state_path.exists() {
-                        info!("reload: loading state from {}", state_path.display());
-                        engine::patch::load_file(state_path.to_str().unwrap(), &build_cfg)
-                    } else {
-                        let preset_json = cfg.lock().unwrap()
+                    let chains_result = {
+                        let structure_json = cfg.lock().unwrap()
                             .startup_chains_json().unwrap_or(None)
                             .unwrap_or_else(|| r#"{"chains":[]}"#.into());
-                        engine::patch::load_str(&preset_json, &build_cfg)
+                        let merged = if !state_path.as_os_str().is_empty() && state_path.exists() {
+                            info!("reload: overlaying saved params from {}", state_path.display());
+                            match std::fs::read_to_string(&state_path)
+                                .ok()
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            {
+                                Some(saved) => {
+                                    let structure: serde_json::Value =
+                                        serde_json::from_str(&structure_json).unwrap_or_default();
+                                    save::merge_state_params(&structure, &saved).to_string()
+                                }
+                                None => structure_json,
+                            }
+                        } else {
+                            structure_json
+                        };
+                        engine::patch::load_str(&merged, &build_cfg)
                     };
                     match chains_result {
-                        Ok(chains) => {
+                        Ok(mut chains) => {
+                            for chain in &mut chains { chain.init_bus(&bus); }
                             let json = engine::patch::chains_to_json(&chains);
                             if patch_tx.lock().unwrap().push(chains).is_err() {
                                 warn!("reload: patch channel full");

@@ -5,6 +5,7 @@ use rtrb::Producer;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 use crate::config::{BuildConfig, Config};
 use crate::control::{apply_ctrl, outbound_line, ControlMessage, EventBus};
@@ -33,6 +34,7 @@ use crate::save::PatchState;
 ///
 /// Multiple clients per port are handled concurrently via `tokio::spawn`.
 pub struct NetworkControl {
+    host:        String,
     port:        u16,
     fallback:    bool,
     build_cfg:   BuildConfig,
@@ -44,6 +46,7 @@ pub struct NetworkControl {
 
 impl NetworkControl {
     pub fn new(
+        host:        String,
         port:        u16,
         fallback:    bool,
         build_cfg:   BuildConfig,
@@ -52,33 +55,46 @@ impl NetworkControl {
         bus:         EventBus,
         mappings:    Arc<RwLock<ControllerDef>>,
     ) -> Self {
-        Self { port, fallback, build_cfg, patch_state, cfg, bus, mappings }
+        Self { host, port, fallback, build_cfg, patch_state, cfg, bus, mappings }
     }
 
     pub async fn run(
         self,
         patch_tx: Arc<Mutex<Producer<Vec<Chain>>>>,
+        mut active_rx: watch::Receiver<bool>,
     ) -> Result<()> {
-        let listener = TcpListener::bind(("0.0.0.0", self.port)).await?;
-        tracing::info!("Control server listening on port {}", self.port);
+        if !*active_rx.borrow() { return Ok(()); }
+
+        let listener = TcpListener::bind((self.host.as_str(), self.port)).await?;
+        tracing::info!("Control server listening on {}:{}", self.host, self.port);
 
         loop {
-            let (socket, addr) = listener.accept().await?;
-            tracing::info!("Control connection from {addr}");
+            tokio::select! {
+                result = listener.accept() => {
+                    let (socket, addr) = result?;
+                    tracing::info!("Control connection from {addr}");
 
-            let patch_tx    = Arc::clone(&patch_tx);
-            let build_cfg   = self.build_cfg;
-            let patch_state = Arc::clone(&self.patch_state);
-            let cfg         = Arc::clone(&self.cfg);
-            let bus         = self.bus.clone();
-            let mappings    = Arc::clone(&self.mappings);
-            let fallback    = self.fallback;
+                    let patch_tx    = Arc::clone(&patch_tx);
+                    let build_cfg   = self.build_cfg;
+                    let patch_state = Arc::clone(&self.patch_state);
+                    let cfg         = Arc::clone(&self.cfg);
+                    let bus         = self.bus.clone();
+                    let mappings    = Arc::clone(&self.mappings);
+                    let fallback    = self.fallback;
 
-            tokio::spawn(async move {
-                if let Err(e) = handle_client(socket, bus, patch_tx, build_cfg, patch_state, cfg, mappings, fallback).await {
-                    tracing::warn!("Client {addr}: {e}");
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_client(socket, bus, patch_tx, build_cfg, patch_state, cfg, mappings, fallback).await {
+                            tracing::warn!("Client {addr}: {e}");
+                        }
+                    });
                 }
-            });
+                _ = active_rx.changed() => {
+                    if !*active_rx.borrow() {
+                        tracing::info!("Net control on :{} deactivated", self.port);
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 }
@@ -109,8 +125,10 @@ async fn handle_client(
                 }
                 ControlMessage::ProgramChange(n) => format!("PROGRAM {n}\n"),
                 ControlMessage::Reset            => "RESET\n".to_string(),
-                ControlMessage::NoteOn  { .. }
-                | ControlMessage::NoteOff { .. } => continue,
+                ControlMessage::NoteOn       { .. }
+                | ControlMessage::NoteOff    { .. }
+                | ControlMessage::Action     { .. }
+                | ControlMessage::NodeEvent { .. } => continue,
             };
             if writer_out.lock().await.write_all(line.as_bytes()).await.is_err() {
                 break; // client disconnected
@@ -158,11 +176,16 @@ pub(crate) fn handle_command(
             let (path, val_str) = rest
                 .split_once(' ')
                 .ok_or("usage: SET <key.param> <value>")?;
-            let value: f32 = val_str
-                .trim()
-                .parse()
-                .map_err(|_| "value must be a float")?;
-            bus.send(ControlMessage::SetParam { path: path.to_string(), value }).ok();
+            let val_str = val_str.trim();
+            if let Ok(value) = val_str.parse::<f32>() {
+                bus.send(ControlMessage::SetParam { path: path.to_string(), value }).ok();
+            } else {
+                // Non-numeric value → action dispatch (e.g. "SET 01-looper.action rec")
+                bus.send(ControlMessage::Action {
+                    path:   path.to_string(),
+                    action: val_str.to_string(),
+                }).ok();
+            }
             Ok(())
         }
 

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use rtrb::Producer;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::watch;
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{info, warn};
 
@@ -52,18 +53,25 @@ impl SerialControl {
         Self { device, baud, fallback, build_cfg, patch_state, cfg, bus, mappings }
     }
 
-    pub async fn run(self, patch_tx: Arc<Mutex<Producer<Vec<Chain>>>>) -> Result<()> {
+    pub async fn run(self, patch_tx: Arc<Mutex<Producer<Vec<Chain>>>>, mut active_rx: watch::Receiver<bool>) -> Result<()> {
         // Destructure so fields can be reused across reconnect iterations.
         let Self { device, baud, fallback, build_cfg, patch_state, cfg, bus, mappings } = self;
 
         loop {
+            // Exit immediately if deactivated.
+            if !*active_rx.borrow() { return Ok(()); }
+
             // Open port — retry until available (handles cold-start and hot-plug).
             let port = loop {
                 match tokio_serial::new(&device, baud).open_native_async() {
                     Ok(p)  => break p,
                     Err(e) => {
                         tracing::debug!("Serial '{device}': {e} — retrying in 5s");
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                            _ = active_rx.changed() => {}
+                        }
+                        if !*active_rx.borrow() { return Ok(()); }
                     }
                 }
             };
@@ -84,8 +92,10 @@ impl SerialControl {
                         }
                         ControlMessage::ProgramChange(n) => format!("PROGRAM {n}\n"),
                         ControlMessage::Reset            => "RESET\n".to_string(),
-                        ControlMessage::NoteOn  { .. }
-                        | ControlMessage::NoteOff { .. } => continue,
+                        ControlMessage::NoteOn       { .. }
+                        | ControlMessage::NoteOff    { .. }
+                        | ControlMessage::Action     { .. }
+                        | ControlMessage::NodeEvent { .. } => continue,
                     };
                     if writer.write_all(line.as_bytes()).await.is_err() {
                         break; // port closed — outbound task ends, inbound loop will catch it too
@@ -118,7 +128,11 @@ impl SerialControl {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = active_rx.changed() => {}
+            }
+            if !*active_rx.borrow() { return Ok(()); }
         }
     }
 }

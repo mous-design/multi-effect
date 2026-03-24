@@ -175,12 +175,12 @@ impl Device for Reverb {
         m
     }
 
-    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
+    fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
         let num_combs = self.combs[0].len() as f32;
 
-        for (e, &d) in eff.iter_mut().zip(dry.iter()) {
-            let inp = [d[0] + e[0], d[1] + e[1]];
-            // Mono mix of (dry + prev_eff); L/R decorrelate via different delay tunings.
+        for e in eff.iter_mut() {
+            let inp = *e;
+            // Mono mix of current signal; L/R decorrelate via different delay tunings.
             let reverb_in = (inp[0] + inp[1]) * 0.5;
 
             for ch in 0..2 {
@@ -194,7 +194,7 @@ impl Device for Reverb {
                     sig = ap.process(sig);
                 }
 
-                e[ch] = inp[ch] * (1.0 - self.wet[ch]) + sig * self.wet[ch] / num_combs;
+                e[ch] = inp[ch] + sig * self.wet[ch] / num_combs;
             }
         }
     }

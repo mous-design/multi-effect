@@ -222,15 +222,14 @@ impl Device for Harmonizer {
         m
     }
 
-    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
+    fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
         let gs   = self.grain_size;
         let half = self.half_grain;
         let n    = self.buf_size;
 
-        for i in 0..dry.len().min(eff.len()) {
-            // Capture input (dry + accumulated effect) into ring buffer
+        for i in 0..eff.len() {
             let prev_eff = eff[i];
-            let inp      = [dry[i][0] + prev_eff[0], dry[i][1] + prev_eff[1]];
+            let inp      = prev_eff;
             self.input_buf[self.write_pos] = inp;
             self.write_pos = (self.write_pos + 1) % n;
             let wp = self.write_pos;
@@ -298,10 +297,10 @@ impl Device for Harmonizer {
             // Remove fully silent voices
             self.voices.retain(|v| v.sustaining || v.release > 0.0);
 
-            // Standard wet/dry blend: at wet=0 → pass inp unchanged, at wet=1 → only harmonized voices
+            // Additive blend: wet controls how much harmony is added on top of inp
             eff[i] = [
-                inp[0] * (1.0 - self.wet[0]) + mix[0] * self.wet[0],
-                inp[1] * (1.0 - self.wet[1]) + mix[1] * self.wet[1],
+                inp[0] + mix[0] * self.wet[0],
+                inp[1] + mix[1] * self.wet[1],
             ];
 
             // Rate-limited debug: log once per second when voices are active

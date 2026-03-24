@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 fn default_ctrl()           -> [f32; 2]   { [0.0, 127.0]   }
 fn default_param()          -> [f32; 2]   { [0.0, 1.0]     }
 fn default_baud()           -> u32        { 115_200         }
+fn default_host()           -> String     { "0.0.0.0".into() }
 fn default_true()           -> bool       { true            }
 fn default_channel()        -> MidiChannel { MidiChannel::Omni }
 fn default_midi_out_channel() -> u8       { 1               }
@@ -150,6 +151,8 @@ pub enum DeviceDef {
 
     /// TCP server — accepts `CTRL`, `SET`, `UPDATE`, `PATCH`, `RESET`, `PROGRAM`.
     Net {
+        #[serde(default = "default_host")]
+        host: String,
         port: u16,
         #[serde(default = "default_true")]
         fallback: bool,

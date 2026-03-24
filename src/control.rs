@@ -27,6 +27,24 @@ pub enum ControlMessage {
 
     /// MIDI Note Off — forwarded to all Device nodes in all chains.
     NoteOff { note: u8 },
+
+    /// Dispatch a named action string to a device parameter.
+    /// `path` has the form `"01-looper.action"` or just `"01-looper"`.
+    /// Used for looper combined actions: "rec", "play", "stop", "reset",
+    /// "rec-play-stop-rec", etc.
+    Action { path: String, action: String },
+
+    /// A generic event emitted by a node (e.g. Looper state change, loop wrap).
+    /// Consumed by the WebSocket layer to push to the UI.
+    /// Never forwarded to the audio thread.
+    NodeEvent {
+        /// The originating node's key, e.g. `"05-looper"`.
+        key: String,
+        /// Event name, e.g. `"looper_state"` or `"loop_wrap"`.
+        event: String,
+        /// Event payload as a JSON object.
+        data: serde_json::Value,
+    },
 }
 
 /// Broadcast channel used as the central pub/sub event bus.

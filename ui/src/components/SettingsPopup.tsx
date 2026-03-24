@@ -11,6 +11,7 @@ interface AudioConfig {
   device: string;
   in_channels: number;
   out_channels: number;
+  delay_max_seconds: number;
 }
 
 interface Props {
@@ -20,16 +21,17 @@ interface Props {
 }
 
 export function SettingsPopup({ config, onSave, onClose }: Props) {
-  const [sample_rate,  setSampleRate]  = useState(config.sample_rate);
-  const [buffer_size,  setBufferSize]  = useState(config.buffer_size);
-  const [device,       setDevice]      = useState(config.device);
-  const [in_channels,  setInChannels]  = useState(config.in_channels);
-  const [out_channels, setOutChannels] = useState(config.out_channels);
+  const [sample_rate,        setSampleRate]       = useState(config.sample_rate);
+  const [buffer_size,        setBufferSize]        = useState(config.buffer_size);
+  const [device,             setDevice]            = useState(config.device);
+  const [in_channels,        setInChannels]        = useState(config.in_channels);
+  const [out_channels,       setOutChannels]       = useState(config.out_channels);
+  const [delay_max_seconds,  setDelayMaxSeconds]   = useState(config.delay_max_seconds);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState(false);
 
   async function handleSave() {
-    const ok = await onSave({ sample_rate, buffer_size, device, in_channels, out_channels });
+    const ok = await onSave({ sample_rate, buffer_size, device, in_channels, out_channels, delay_max_seconds });
     if (ok) { setSaved(true); setError(false); }
     else    { setError(true); }
   }
@@ -80,6 +82,14 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
               <td colSpan={2}>
                 <input type="number" min={1} max={32} value={out_channels}
                   onChange={e => setOutChannels(Number(e.target.value))}
+                  className="preset-input" />
+              </td>
+            </tr>
+            <tr>
+              <td className="routing-label">{t('ui.delay_max')}</td>
+              <td colSpan={2}>
+                <input type="number" min={0.1} max={30} step={0.1} value={delay_max_seconds}
+                  onChange={e => setDelayMaxSeconds(Number(e.target.value))}
                   className="preset-input" />
               </td>
             </tr>

@@ -167,10 +167,10 @@ impl Device for Eq {
         m
     }
 
-    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
-        for (e, &d) in eff.iter_mut().zip(dry.iter()) {
+    fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
+        for e in eff.iter_mut() {
             for ch in 0..2 {
-                let x = d[ch] + e[ch];
+                let x = e[ch];
                 let y = self.b0 * x + self.w[ch][0];
                 self.w[ch][0] = self.b1 * x - self.a1 * y + self.w[ch][1];
                 self.w[ch][1] = self.b2 * x - self.a2 * y;

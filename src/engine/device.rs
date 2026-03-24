@@ -97,6 +97,13 @@ pub trait Parameterized {
         let _ = param;
         None
     }
+
+    /// Dispatch a named action string (e.g. "rec", "play", "rec-play-stop-rec").
+    /// Only meaningful for nodes that have an action-based interface (e.g. Looper).
+    fn set_action(&mut self, param: &str, action: &str) -> Result<(), String> {
+        let _ = (param, action);
+        Err(format!("unknown action '{param}'"))
+    }
 }
 
 /// Allow `Box<dyn Device>` to be used where `Parameterized` is expected.
@@ -106,6 +113,9 @@ impl Parameterized for Box<dyn Device> {
     }
     fn get_param(&self, param: &str) -> Option<f32> {
         (**self).get_param(param)
+    }
+    fn set_action(&mut self, param: &str, action: &str) -> Result<(), String> {
+        (**self).set_action(param, action)
     }
 }
 
@@ -169,4 +179,8 @@ pub trait Device: Parameterized + Send + Sync {
     fn on_note_off(&mut self, note: u8) {
         let _ = note;
     }
+
+    /// Called once after the node is built and added to a chain.
+    /// Nodes that want to emit events (e.g. Looper) store the bus here.
+    fn init_bus(&mut self, _bus: &crate::control::EventBus) {}
 }

@@ -1,11 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
-import { AppState, ChainDef, NodeDef } from './types';
+import { AppState, ChainDef, DeviceMap, NodeDef } from './types';
 import { ChainView } from './components/ChainView';
 import { Toasts, Toast } from './components/Toasts';
 import { ChainRoutingPopup } from './components/ChainRoutingPopup';
 import { SettingsPopup } from './components/SettingsPopup';
-import { fetchState, fetchPresets, fetchConfig, setParam, patchChains, savePreset, saveConfig, switchPreset, createWs } from './api';
+import { DevicesPage } from './components/DevicesPage';
+import { fetchState, fetchPresets, fetchConfig, fetchDevices, setParam, patchChains, savePreset, saveConfig, switchPreset, deletePreset, createWs } from './api';
 import { t } from './i18n';
+
+function DevicesIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <rect x="1" y="4" width="14" height="8" rx="1.5" />
+      <line x1="4" y1="4" x2="4" y2="12" />
+      <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
 
 function getInitialTheme() {
   return localStorage.getItem('theme') === 'light' ? 'light' : 'dark';
@@ -17,7 +28,7 @@ export default function App() {
   const [theme, setTheme] = useState(getInitialTheme);
 
   // Audio config (channel counts etc.)
-  const [audioConfig, setAudioConfig] = useState({ in_channels: 2, out_channels: 2, sample_rate: 48000, buffer_size: 256, device: 'default' });
+  const [audioConfig, setAudioConfig] = useState({ in_channels: 2, out_channels: 2, sample_rate: 48000, buffer_size: 256, device: 'default', delay_max_seconds: 2.0 });
 
   // Chain routing popup: index into state.chains
   const [routingIdx, setRoutingIdx] = useState<number | null>(null);
@@ -25,6 +36,28 @@ export default function App() {
   // Available presets + active preset
   const [presets, setPresets] = useState<number[]>([]);
   const [activePreset, setActivePreset] = useState(1);
+
+  // Devices map (for controller mappings)
+  const [devices, setDevices] = useState<DeviceMap>({});
+
+  // Dirty flag: unsaved param changes
+  const [isDirty, setIsDirty] = useState(false);
+
+  // Page routing — hash-based: #devices / '' = home
+  function pageFromHash(): 'home' | 'devices' {
+    return window.location.hash === '#devices' ? 'devices' : 'home';
+  }
+  const [page, setPage] = useState<'home' | 'devices'>(pageFromHash);
+
+  useEffect(() => {
+    const handler = () => setPage(pageFromHash());
+    window.addEventListener('hashchange', handler);
+    return () => window.removeEventListener('hashchange', handler);
+  }, []);
+
+  function navigateTo(p: 'home' | 'devices') {
+    window.location.hash = p === 'devices' ? 'devices' : '';
+  }
 
   // Settings popup
   const [showSettings, setShowSettings] = useState(false);
@@ -49,6 +82,9 @@ export default function App() {
     setToasts(prev => prev.filter(t => t.id !== id));
   }
 
+  // Delete preset confirm state
+  const [confirmDeletePreset, setConfirmDeletePreset] = useState(false);
+
   // New chain form state
   const [showNewChain, setShowNewChain] = useState(false);
   const [newChainInput, setNewChainInput] = useState('1,1');
@@ -63,9 +99,16 @@ export default function App() {
   const stateRef = useRef<AppState | null>(null);
   stateRef.current = state;
 
+  // Apply fetched state — also picks up the server-side dirty flag so it survives reloads.
+  const applyFetchedState = (data: any) => {
+    setState({ chains: data.chains ?? [] });
+    if (typeof data.is_dirty === 'boolean') setIsDirty(data.is_dirty);
+  };
+
   useEffect(() => {
-    fetchState().then(setState);
-    fetchConfig().then(cfg => setAudioConfig({ in_channels: cfg.in_channels, out_channels: cfg.out_channels, sample_rate: cfg.sample_rate, buffer_size: cfg.buffer_size, device: cfg.device }));
+    fetchState().then(applyFetchedState);
+    fetchDevices().then(setDevices);
+    fetchConfig().then(cfg => setAudioConfig({ in_channels: cfg.in_channels, out_channels: cfg.out_channels, sample_rate: cfg.sample_rate, buffer_size: cfg.buffer_size, device: cfg.device, delay_max_seconds: cfg.delay_max_seconds }));
     fetchPresets().then(({ presets, active }) => {
       setPresets(presets);
       if (active !== 0) setActivePreset(active);
@@ -77,6 +120,7 @@ export default function App() {
         if (msg.type === 'set' && stateRef.current) {
           const [nodeKey, param] = (msg.path as string).split('.');
           if (!nodeKey || !param) return;
+          setIsDirty(true);
           setState(prev => {
             if (!prev) return prev;
             return {
@@ -89,11 +133,45 @@ export default function App() {
               })),
             };
           });
+        } else if (msg.type === 'node_event') {
+          const { key, event, data } = msg as { key: string; event: string; data: Record<string, unknown> };
+          if (event === 'looper_state') {
+            const { state: looperState, loop_ms, pos_ms, overdub_count } = data as { state: string; loop_ms: number; pos_ms: number; overdub_count: number };
+            setState(prev => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                chains: prev.chains.map(chain => ({
+                  ...chain,
+                  nodes: chain.nodes.map(node =>
+                    node.key === key
+                      ? { ...node, state: looperState, loop_secs: loop_ms / 1000, pos_secs: pos_ms / 1000, overdub_count }
+                      : node
+                  ),
+                })),
+              };
+            });
+          } else if (event === 'loop_wrap') {
+            // Sync JS timer to 0 at loop boundary.
+            // _wrap_ts always changes (even when pos_secs is already 0) so the useEffect re-runs.
+            setState(prev => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                chains: prev.chains.map(chain => ({
+                  ...chain,
+                  nodes: chain.nodes.map(node =>
+                    node.key === key ? { ...node, pos_secs: 0, _wrap_ts: Date.now() } : node
+                  ),
+                })),
+              };
+            });
+          }
         } else if (msg.type === 'preset') {
           if (msg.n) setActivePreset(Number(msg.n));
-          fetchState().then(setState);
+          applyFetchedState(msg);
         } else if (msg.type === 'reset') {
-          fetchState().then(setState);
+          fetchState().then(applyFetchedState);
         }
       },
       () => setConnected(true),
@@ -105,6 +183,7 @@ export default function App() {
   const handleSet = (path: string, value: number | boolean) => {
     const [nodeKey, param] = path.split('.');
     if (!nodeKey || !param) return;
+    setIsDirty(true);
     setState(prev => {
       if (!prev) return prev;
       return {
@@ -131,6 +210,7 @@ export default function App() {
       })),
     };
     setState(next);
+    setIsDirty(true);
     patchChains(next.chains).then(ok => {
       if (!ok) { setState(prev); addToast(t('error.delete_node')); }
     });
@@ -144,6 +224,7 @@ export default function App() {
       chains: prev.chains.map((chain, i) => i === chainIdx ? { ...chain, nodes: newNodes } : chain),
     };
     setState(next);
+    setIsDirty(true);
     patchChains(next.chains).then(ok => {
       if (!ok) { setState(prev); addToast(t('error.reorder')); }
     });
@@ -159,6 +240,7 @@ export default function App() {
       ),
     };
     setState(next);
+    setIsDirty(true);
     patchChains(next.chains).then(ok => {
       if (!ok) { setState(prev); addToast(t('error.add_node')); }
     });
@@ -180,6 +262,7 @@ export default function App() {
     if (!prev) return;
     const next = { ...prev, chains: prev.chains.filter((_, i) => i !== chainIdx) };
     setState(next);
+    setIsDirty(true);
     patchChains(next.chains).then(ok => {
       if (!ok) { setState(prev); addToast(t('error.delete_chain')); }
     });
@@ -211,12 +294,29 @@ export default function App() {
     setShowNewChain(true);
   }
 
+  const handleDeletePreset = async () => {
+    const ok = await deletePreset(activePreset);
+    if (!ok) return;
+    setConfirmDeletePreset(false);
+    const remaining = presets.filter(n => n !== activePreset);
+    setPresets(remaining);
+    if (remaining.length > 0) {
+      const next = remaining[0];
+      setActivePreset(next);
+      switchPreset(next);
+      fetchState().then(applyFetchedState);
+    } else {
+      setState({ chains: [] });
+    }
+  };
+
   const handleSwitchPreset = (n: number) => {
     if (!presets.includes(n)) {
       addToast(t('error.preset_missing', n));
       return;
     }
     setActivePreset(n);
+    setIsDirty(false);
     switchPreset(n);
   };
 
@@ -229,17 +329,29 @@ export default function App() {
     setShowSavePopup(false);
     await savePreset(savePresetNum);
     setActivePreset(savePresetNum);
+    setIsDirty(false);
     setSavedFeedback(true);
     setTimeout(() => setSavedFeedback(false), 2000);
     fetchPresets().then(({ presets }) => setPresets(presets));
   };
 
+  const handleQuickSave = async () => {
+    await savePreset(activePreset);
+    setIsDirty(false);
+    setSavedFeedback(true);
+    setTimeout(() => setSavedFeedback(false), 2000);
+  };
+
   const routingChain = routingIdx !== null && state ? state.chains[routingIdx] : null;
+
+  if (page === 'devices') {
+    return <DevicesPage onHome={() => navigateTo('home')} />;
+  }
 
   return (
     <div className="app">
       <header className="app-header">
-        <h1>multi-effect</h1>
+        <h1 className="app-title-link" onClick={() => navigateTo('home')}>multi-effect</h1>
         <div className={`status ${connected ? 'connected' : 'disconnected'}`}>
           <span className="status-dot" />
           {connected ? t('ui.live') : t('ui.reconnecting')}
@@ -253,17 +365,23 @@ export default function App() {
             className="preset-select"
           >
             {presets.map(n => (
-              <option key={n} value={n}>{n}</option>
+              <option key={n} value={n}>{n === activePreset && isDirty ? `${n}*` : n}</option>
             ))}
           </select>
-          <button className="preset-save-btn" onClick={handleOpenSavePopup}>
-            {savedFeedback ? t('ui.saved') : t('ui.save')}
+          <button className="preset-save-btn" onClick={handleQuickSave} title={t('ui.save_quick')}>
+            {savedFeedback ? t('ui.saved') : t('ui.save_quick')}
+          </button>
+          <button className="preset-save-btn" onClick={handleOpenSavePopup} title={t('ui.save')}>
+            {t('ui.save')}
+          </button>
+          <button className="devices-btn" onClick={() => navigateTo('devices')} title={t('ui.devices')}>
+            <DevicesIcon />
           </button>
           <button className="settings-btn" onClick={() => setShowSettings(true)} title={t('ui.settings')}>⚙</button>
+          <button className="theme-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+            {theme === 'dark' ? '🌙' : '☀️'}
+          </button>
         </div>
-        <button className="theme-btn" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
-          {theme === 'dark' ? '🌙' : '☀️'}
-        </button>
       </header>
 
       {showSavePopup && (
@@ -294,7 +412,16 @@ export default function App() {
           config={audioConfig}
           onSave={async (cfg) => {
             const ok = await saveConfig(cfg);
-            if (ok) setAudioConfig(cfg);
+            if (ok) {
+              setAudioConfig(cfg);
+              if (state && cfg.delay_max_seconds < audioConfig.delay_max_seconds) {
+                state.chains.forEach(chain => chain.nodes.forEach(node => {
+                  if (node.type === 'delay' && typeof node.time === 'number' && node.time > cfg.delay_max_seconds) {
+                    handleSet(`${node.key}.time`, cfg.delay_max_seconds);
+                  }
+                }));
+              }
+            }
             return ok;
           }}
           onClose={() => setShowSettings(false)}
@@ -318,6 +445,9 @@ export default function App() {
             chainIdx={chainIdx}
             chain={chain}
             presetName={String(activePreset)}
+            devices={devices}
+            allNodes={state.chains.flatMap(c => c.nodes)}
+            delayMaxSeconds={audioConfig.delay_max_seconds}
             onSet={handleSet}
             onDelete={handleDelete}
             onReorder={handleReorder}
@@ -327,29 +457,43 @@ export default function App() {
           />
         ))}
 
-        {/* New chain */}
-        {!showNewChain ? (
-          <button className="new-chain-btn" onClick={handleOpenNewChain}>{t('ui.new_chain')}</button>
-        ) : (
-          <div className="new-chain-form">
-            <label>{t('ui.input_ch')}</label>
-            <input
-              type="text"
-              value={newChainInput}
-              onChange={e => setNewChainInput(e.target.value)}
-              placeholder="1,1"
-            />
-            <label>{t('ui.output_ch')}</label>
-            <input
-              type="text"
-              value={newChainOutput}
-              onChange={e => setNewChainOutput(e.target.value)}
-              placeholder="1,2"
-            />
-            <button onClick={handleNewChain}>{t('ui.create')}</button>
-            <button onClick={() => setShowNewChain(false)}>{t('ui.cancel')}</button>
-          </div>
-        )}
+        {/* Bottom bar: new chain (left) + delete preset (right) */}
+        <div className="preset-bottom-bar">
+          {!showNewChain ? (
+            <button className="new-chain-btn" onClick={handleOpenNewChain}>{t('ui.new_chain')}</button>
+          ) : (
+            <div className="new-chain-form">
+              <label>{t('ui.input_ch')}</label>
+              <input
+                type="text"
+                value={newChainInput}
+                onChange={e => setNewChainInput(e.target.value)}
+                placeholder="1,1"
+              />
+              <label>{t('ui.output_ch')}</label>
+              <input
+                type="text"
+                value={newChainOutput}
+                onChange={e => setNewChainOutput(e.target.value)}
+                placeholder="1,2"
+              />
+              <button onClick={handleNewChain}>{t('ui.create')}</button>
+              <button onClick={() => setShowNewChain(false)}>{t('ui.cancel')}</button>
+            </div>
+          )}
+          {confirmDeletePreset ? (
+            <div className="chain-confirm-group">
+              <span className="chain-confirm-text">{t('ui.confirm_delete_preset')}</span>
+              <button className="chain-confirm-yes" onClick={handleDeletePreset}>✓</button>
+              <button className="chain-confirm-no" onClick={() => setConfirmDeletePreset(false)}>✗</button>
+            </div>
+          ) : (
+            <button
+              className="new-chain-btn"
+              onClick={() => state?.chains.length === 0 ? handleDeletePreset() : setConfirmDeletePreset(true)}
+            >{t('ui.delete_preset')}</button>
+          )}
+        </div>
       </main>
     </div>
   );
