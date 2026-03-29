@@ -413,21 +413,106 @@ async fn main() -> Result<()> {
         });
     }
 
+    // --- Compare-mode state (shared between compare task and HTTP AppState) ---
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let preset_dirty     = Arc::new(AtomicBool::new(false));
+    let is_comparing     = Arc::new(AtomicBool::new(false));
+    let compare_snapshot: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+
+    // Compare task: handles Compare messages from foot pedal or UI.
+    {
+        let mut cmp_rx       = bus.subscribe();
+        let bus_cmp          = bus.clone();
+        let patch_tx_cmp     = Arc::clone(&patch_tx);
+        let patch_state_cmp  = Arc::clone(&patch_state);
+        let cfg_cmp          = Arc::clone(&cfg);
+        let preset_dirty_cmp = Arc::clone(&preset_dirty);
+        let is_comparing_cmp = Arc::clone(&is_comparing);
+        let snapshot_cmp     = Arc::clone(&compare_snapshot);
+
+        tokio::spawn(async move {
+            while let Ok(msg) = cmp_rx.recv().await {
+                if !matches!(msg, ControlMessage::Compare) { continue; }
+
+                let comparing = is_comparing_cmp.load(Ordering::Relaxed);
+                let dirty     = preset_dirty_cmp.load(Ordering::Relaxed);
+
+                if !comparing && !dirty {
+                    continue; // nothing to compare — ignore
+                }
+
+                if !comparing {
+                    // Snapshot dirty chains, load saved preset.
+                    let dirty_json = patch_state_cmp.lock().unwrap().json.clone();
+                    *snapshot_cmp.lock().unwrap() = Some(dirty_json);
+
+                    let active = cfg_cmp.lock().unwrap().active_preset;
+                    let preset_val = cfg_cmp.lock().unwrap()
+                        .presets.get(&active)
+                        .map(|p| serde_json::json!({ "chains": p.chains }));
+
+                    if let Some(val) = preset_val {
+                        match engine::patch::load_str(&val.to_string(), &build_cfg) {
+                            Ok(mut chains) => {
+                                for chain in &mut chains { chain.init_bus(&bus_cmp); }
+                                if patch_tx_cmp.lock().unwrap().push(chains).is_ok() {
+                                    patch_state_cmp.lock().unwrap().apply_patch(val.clone());
+                                    preset_dirty_cmp.store(false, Ordering::Relaxed);
+                                    is_comparing_cmp.store(true, Ordering::Relaxed);
+                                    bus_cmp.send(ControlMessage::CompareChanged {
+                                        chains: val["chains"].clone(),
+                                        is_dirty: false,
+                                        is_comparing: true,
+                                    }).ok();
+                                    info!("Compare: entered — showing saved preset {active}");
+                                }
+                            }
+                            Err(e) => warn!("Compare: preset build error: {e}"),
+                        }
+                    }
+                } else {
+                    // Restore dirty snapshot.
+                    if let Some(dirty_json) = snapshot_cmp.lock().unwrap().take() {
+                        match engine::patch::load_str(&dirty_json.to_string(), &build_cfg) {
+                            Ok(mut chains) => {
+                                for chain in &mut chains { chain.init_bus(&bus_cmp); }
+                                if patch_tx_cmp.lock().unwrap().push(chains).is_ok() {
+                                    patch_state_cmp.lock().unwrap().apply_patch(dirty_json.clone());
+                                    preset_dirty_cmp.store(true, Ordering::Relaxed);
+                                    is_comparing_cmp.store(false, Ordering::Relaxed);
+                                    bus_cmp.send(ControlMessage::CompareChanged {
+                                        chains: dirty_json["chains"].clone(),
+                                        is_dirty: true,
+                                        is_comparing: false,
+                                    }).ok();
+                                    info!("Compare: restored dirty state");
+                                }
+                            }
+                            Err(e) => warn!("Compare: snapshot restore error: {e}"),
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // --- HTTP server ---
     {
         let http_port = { cfg.lock().unwrap().http_port };
         if http_port != 0 {
             let http_state = http::AppState {
-                patch_state:     Arc::clone(&patch_state),
-                patch_tx:        Arc::clone(&patch_tx),
+                patch_state:      Arc::clone(&patch_state),
+                patch_tx:         Arc::clone(&patch_tx),
                 build_cfg,
-                bus:             bus.clone(),
-                cfg:             Arc::clone(&cfg),
-                reload_notify:   Arc::clone(&reload_notify),
-                device_active:   Arc::clone(&device_active),
-                controller_arcs: Arc::clone(&controller_arcs),
-                live_state:      std::sync::Arc::clone(&live_state),
-                preset_dirty:    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                bus:              bus.clone(),
+                cfg:              Arc::clone(&cfg),
+                reload_notify:    Arc::clone(&reload_notify),
+                device_active:    Arc::clone(&device_active),
+                controller_arcs:  Arc::clone(&controller_arcs),
+                live_state:       std::sync::Arc::clone(&live_state),
+                preset_dirty:     Arc::clone(&preset_dirty),
+                compare_snapshot: Arc::clone(&compare_snapshot),
+                is_comparing:     Arc::clone(&is_comparing),
             };
             let ui_dist = "ui/dist";
             let router = http::router(http_state, ui_dist);

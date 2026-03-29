@@ -5,8 +5,17 @@ import { Toasts, Toast } from './components/Toasts';
 import { ChainRoutingPopup } from './components/ChainRoutingPopup';
 import { SettingsPopup } from './components/SettingsPopup';
 import { DevicesPage } from './components/DevicesPage';
-import { fetchState, fetchPresets, fetchConfig, fetchDevices, setParam, patchChains, savePreset, saveConfig, switchPreset, deletePreset, createWs } from './api';
+import { fetchState, fetchPresets, fetchConfig, fetchDevices, setParam, patchChains, savePreset, saveConfig, switchPreset, deletePreset, createWs, postCompare } from './api';
 import { t } from './i18n';
+
+function SpeakerIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="currentColor">
+      <path d="M1 4.5h2.5L7 2v9L3.5 8.5H1z"/>
+      <path d="M9 3.5a4 4 0 010 6" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
+    </svg>
+  );
+}
 
 function DevicesIcon() {
   return (
@@ -42,6 +51,9 @@ export default function App() {
 
   // Dirty flag: unsaved param changes
   const [isDirty, setIsDirty] = useState(false);
+
+  // Compare mode: toggling between dirty state and saved preset
+  const [isComparing, setIsComparing] = useState(false);
 
   // Page routing — hash-based: #devices / '' = home
   function pageFromHash(): 'home' | 'devices' {
@@ -103,6 +115,7 @@ export default function App() {
   const applyFetchedState = (data: any) => {
     setState({ chains: data.chains ?? [] });
     if (typeof data.is_dirty === 'boolean') setIsDirty(data.is_dirty);
+    if (typeof data.is_comparing === 'boolean') setIsComparing(data.is_comparing);
   };
 
   useEffect(() => {
@@ -167,8 +180,13 @@ export default function App() {
               };
             });
           }
+        } else if (msg.type === 'compare') {
+          setState({ chains: msg.chains ?? [] });
+          if (typeof msg.is_dirty === 'boolean') setIsDirty(msg.is_dirty);
+          if (typeof msg.is_comparing === 'boolean') setIsComparing(msg.is_comparing);
         } else if (msg.type === 'preset') {
           if (msg.n) setActivePreset(Number(msg.n));
+          setIsComparing(false);
           applyFetchedState(msg);
         } else if (msg.type === 'reset') {
           fetchState().then(applyFetchedState);
@@ -317,6 +335,7 @@ export default function App() {
     }
     setActivePreset(n);
     setIsDirty(false);
+    setIsComparing(false);
     switchPreset(n);
   };
 
@@ -368,6 +387,14 @@ export default function App() {
               <option key={n} value={n}>{n === activePreset && isDirty ? `${n}*` : n}</option>
             ))}
           </select>
+          <button
+            className={`compare-btn${isComparing ? ' compare-btn-active' : ''}`}
+            onClick={() => postCompare()}
+            disabled={!isDirty && !isComparing}
+            title={isComparing ? `Comparing with preset ${activePreset} — click to restore edits` : `Compare with saved preset ${activePreset}`}
+          >
+            <SpeakerIcon /> {activePreset}
+          </button>
           <button className="preset-save-btn" onClick={handleQuickSave} title={t('ui.save_quick')}>
             {savedFeedback ? t('ui.saved') : t('ui.save_quick')}
           </button>

@@ -45,6 +45,17 @@ pub enum ControlMessage {
         /// Event payload as a JSON object.
         data: serde_json::Value,
     },
+
+    /// Toggle compare mode: swap between dirty state and saved preset.
+    /// Sent by foot pedal (serial/net `COMPARE` command) or the UI.
+    Compare,
+
+    /// Notification broadcast to WS clients when compare mode changes.
+    CompareChanged {
+        chains:      serde_json::Value,
+        is_dirty:    bool,
+        is_comparing: bool,
+    },
 }
 
 /// Broadcast channel used as the central pub/sub event bus.

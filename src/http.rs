@@ -38,12 +38,17 @@ pub struct AppState {
     /// Live state snapshot from the audio engine, updated every ~100 blocks.
     pub live_state:      Arc<std::sync::Mutex<serde_json::Value>>,
     /// True when params have been changed since the last save.  Survives browser reloads.
-    pub preset_dirty:    Arc<AtomicBool>,
+    pub preset_dirty:     Arc<AtomicBool>,
+    /// Snapshot of dirty chains while in compare mode.
+    pub compare_snapshot: Arc<Mutex<Option<serde_json::Value>>>,
+    /// True while the user is listening to the saved preset for comparison.
+    pub is_comparing:     Arc<AtomicBool>,
 }
 
 pub fn router(state: AppState, ui_dist_path: &str) -> Router {
     Router::new()
         .route("/api/state",           get(get_state))
+        .route("/api/compare",         post(post_compare))
         .route("/api/config",          get(get_config))
         .route("/api/config",          post(post_config))
         .route("/api/reload",          post(post_reload))
@@ -71,7 +76,8 @@ async fn get_state(State(s): State<AppState>) -> Json<serde_json::Value> {
         let live = s.live_state.lock().unwrap();
         if !live.is_null() { live.clone() } else { s.patch_state.lock().unwrap().json.clone() }
     };
-    json["is_dirty"] = serde_json::json!(s.preset_dirty.load(Ordering::Relaxed));
+    json["is_dirty"]    = serde_json::json!(s.preset_dirty.load(Ordering::Relaxed));
+    json["is_comparing"] = serde_json::json!(s.is_comparing.load(Ordering::Relaxed));
     Json(json)
 }
 
@@ -126,12 +132,23 @@ struct SetBody {
     value: serde_json::Value,
 }
 
+async fn post_compare(State(s): State<AppState>) -> StatusCode {
+    s.bus.send(ControlMessage::Compare).ok();
+    StatusCode::OK
+}
+
 async fn post_set(State(s): State<AppState>, Json(body): Json<SetBody>) -> StatusCode {
     let value: f32 = match &body.value {
         serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0) as f32,
         serde_json::Value::Bool(b)   => if *b { 1.0 } else { 0.0 },
         _ => return StatusCode::BAD_REQUEST,
     };
+    // Any edit while comparing exits compare mode (edit goes on top of current state).
+    if s.is_comparing.swap(false, Ordering::Relaxed) {
+        s.compare_snapshot.lock().unwrap().take();
+        let chains = s.patch_state.lock().unwrap().json["chains"].clone();
+        s.bus.send(ControlMessage::CompareChanged { chains, is_dirty: true, is_comparing: false }).ok();
+    }
     s.preset_dirty.store(true, Ordering::Relaxed);
     s.bus.send(ControlMessage::SetParam { path: body.path, value }).ok();
     StatusCode::OK
@@ -166,6 +183,12 @@ async fn post_patch(State(s): State<AppState>, Json(body): Json<serde_json::Valu
                 return StatusCode::SERVICE_UNAVAILABLE;
             }
             s.patch_state.lock().unwrap().apply_patch(json);
+            // Any structural edit while comparing exits compare mode.
+            if s.is_comparing.swap(false, Ordering::Relaxed) {
+                s.compare_snapshot.lock().unwrap().take();
+                let c = s.patch_state.lock().unwrap().json["chains"].clone();
+                s.bus.send(ControlMessage::CompareChanged { chains: c, is_dirty: true, is_comparing: false }).ok();
+            }
             s.preset_dirty.store(true, Ordering::Relaxed);
             StatusCode::OK
         }
@@ -193,6 +216,9 @@ async fn post_preset(State(s): State<AppState>, Path(n): Path<u8>) -> StatusCode
     };
     s.patch_state.lock().unwrap().apply_patch(chains_json);
     s.preset_dirty.store(false, Ordering::Relaxed);
+    // Preset switch always cancels compare mode.
+    s.is_comparing.store(false, Ordering::Relaxed);
+    s.compare_snapshot.lock().unwrap().take();
     s.bus.send(ControlMessage::ProgramChange(n)).ok();
     StatusCode::OK
 }
@@ -208,6 +234,15 @@ async fn post_save_preset(State(s): State<AppState>, Path(n): Path<u8>) -> Statu
             s.patch_state.lock().unwrap().json["chains"].clone()
         }
     };
+    // Saving while comparing: just discard the dirty snapshot and stay clean.
+    // Current state IS the saved preset, no disk write needed.
+    if s.is_comparing.swap(false, Ordering::Relaxed) {
+        s.compare_snapshot.lock().unwrap().take();
+        s.preset_dirty.store(false, Ordering::Relaxed);
+        let chains = s.patch_state.lock().unwrap().json["chains"].clone();
+        s.bus.send(ControlMessage::CompareChanged { chains, is_dirty: false, is_comparing: false }).ok();
+        return StatusCode::OK;
+    }
     crate::save::strip_looper_transient(&mut chains);
     let mut cfg = s.cfg.lock().unwrap();
     cfg.active_preset = n;
@@ -256,6 +291,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     Some(serde_json::json!({ "type": "reset" })),
                 ControlMessage::NodeEvent { key, event, data } =>
                     Some(serde_json::json!({ "type": "node_event", "key": key, "event": event, "data": data })),
+                ControlMessage::CompareChanged { chains, is_dirty, is_comparing } =>
+                    Some(serde_json::json!({ "type": "compare", "chains": chains, "is_dirty": is_dirty, "is_comparing": is_comparing })),
                 _ => None,
             };
             if let Some(j) = json {

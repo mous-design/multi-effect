@@ -121,6 +121,11 @@ export async function deleteDevice(alias: string): Promise<boolean> {
   return res.ok;
 }
 
+export async function postCompare(): Promise<boolean> {
+  const res = await fetch('/api/compare', { method: 'POST' });
+  return res.ok;
+}
+
 export function createWs(
   onMessage: (data: any) => void,
   onConnect: () => void,

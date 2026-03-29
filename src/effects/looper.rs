@@ -54,22 +54,23 @@ pub enum LooperState {
 /// - `buffers[1+overdub_count]` = currently recording (only during Overdub state).
 /// - `overdub_count` counts only overdub layers; 0 means only the base recording exists.
 ///
-/// # Playback formula (decay-weighted layer stack)
+/// # Playback formula
 ///
-/// ```text
-/// total_layers = 1 + overdub_count
-/// out = 0
-/// for layer in 0..total_layers:
-///     out = decay * out + buffers[layer][pos]
-/// ```
-/// Oldest layer (0) gets the most decay applied, newest gets none.
+/// Flat sum of all layers: `out = buf[0][pos] + buf[1][pos] + ...`
+///
+/// # Decay
+///
+/// Only active during Overdub.  Each pass through the loop, every sample in every
+/// active buffer (including the currently-recording one) is multiplied by `decay`
+/// in-place.  After N overdub passes, amplitude is `decay^N`.
+/// Skipped entirely when `decay == 1.0`.
 ///
 /// # Buffer management
 ///
 /// - `buffers[0]` is pre-allocated at `init_len` samples (from `looper_max_seconds`).
 /// - Additional overdub buffers are allocated on demand at `loop_len` each.
 /// - `max_buffers = 0` means unlimited (memory only limit).
-/// - When the stack is full: merge `buffers[0] + decay * buffers[1]` → `buffers[0]`
+/// - When the stack is full: merge `buffers[0] + buffers[1]` → `buffers[0]`
 ///   using the pre-computed `merge_buf` (swapped in, O(1)), then shift the stack down.
 ///   The freed slot becomes the new recording buffer.
 /// - All buffers are zero-filled on allocation (OS lazy-zeroed pages — no dropout risk).
@@ -79,7 +80,7 @@ pub enum LooperState {
 /// | Param   | Range   | Default | Description                                  |
 /// |---------|---------|---------|----------------------------------------------|
 /// | `wet`   | 0.0–4.0 | 1.0     | Output gain for loop playback                |
-/// | `decay` | 0.0–1.0 | 1.0     | Per-layer decay multiplier in playback sum   |
+/// | `decay` | 0.0–1.0 | 1.0     | Per-sample decay applied each loop pass      |
 /// | `action`| string  | —       | See actions — dispatched via set_action      |
 pub struct Looper {
     pub key:    String,
@@ -236,7 +237,8 @@ impl Looper {
                 self.try_start_overdub();
             }
             LooperState::Overdub => {
-                // Already overdubbing — finish current layer, start next
+                // Commit current layer and start a new one.
+                // If the stack is full, try_start_overdub merges the two oldest layers.
                 self.finish_overdub_layer();
                 self.try_start_overdub();
             }
@@ -402,9 +404,14 @@ impl Looper {
         // New recording layer index = 1 + overdub_count (base at 0, overdubs at 1..)
         let need   = 1 + self.overdub_count;
         let at_max = self.max_buffers > 0 && need >= self.max_buffers;
-
-        if at_max || !self.try_alloc_layer(need) {
-            self.do_merge();
+        if at_max {
+            self.do_merge(); // collapses oldest two layers; decrements overdub_count
+        } else {
+            self.try_alloc_layer(need);
+            // Ensure merge_buf is sized so the per-sample maintenance in process() runs.
+            // Necessary when entering overdub from Recording state (loop_len just set,
+            // init_merge_buf not yet called on this path).
+            self.init_merge_buf();
         }
         self.state = LooperState::Overdub;
     }
@@ -426,31 +433,56 @@ impl Looper {
         self.init_merge_buf();
     }
 
-    /// Swap merge_buf into buffers[0], shift the remaining layers down,
-    /// and prepare a fresh recording buffer at buffers[1+overdub_count].
+    /// Merge buffers[0] + decay*buffers[1] into buffers[0], shift the remaining
+    /// layers down, and prepare a fresh recording slot at buffers[1+overdub_count].
+    /// Called when the layer stack is full. Decrements overdub_count because two
+    /// layers are collapsed into one — the recording slot stays within bounds.
     fn do_merge(&mut self) {
-        let total = 1 + self.overdub_count;
-        if total < 2 { return; } // need at least base + 1 overdub to merge
+        if self.overdub_count < 1 { return; }
 
-        // Swap merge_buf (= old buf[0]+decay*buf[1]) into buffers[0]
-        std::mem::swap(&mut self.merge_buf, &mut self.buffers[0]);
+        let total = 1 + self.overdub_count; // index of the needed recording slot
 
-        // Rotate buffers[1..=total] left: [b1, b2, b3] → [b2, b3, b1]
-        // After rotation, buffers[total] = old b1 → becomes fresh recording buffer
-        if total < self.buffers.len() {
-            self.buffers[1..=total].rotate_left(1);
-        }
-
-        // Zero-fill the new recording slot (was old buffers[1], now at index total)
-        if total < self.buffers.len() {
-            self.buffers[total].fill([0.0f32; 2]);
-        } else {
+        // Ensure buffers[total] exists; needed as a temporary cell for the rotation.
+        while self.buffers.len() <= total {
             self.buffers.push(vec![[0.0f32; 2]; self.loop_len]);
         }
 
-        // overdub_count stays the same (two layers merged into one, one slot freed)
-        // Reset merge_buf (will be recomputed sample-by-sample during next overdub)
-        self.merge_buf.fill([0.0f32; 2]);
+        // Merge buffers[0] + decay*buffers[1] → buffers[0], using pre-computed merge_buf.
+        if self.merge_buf.len() == self.loop_len {
+            std::mem::swap(&mut self.merge_buf, &mut self.buffers[0]);
+        } else {
+            // merge_buf not ready (e.g. only one overdub layer): compute inline.
+            for i in 0..self.loop_len.min(self.buffers[0].len()).min(self.buffers[1].len()) {
+                let b0 = self.buffers[0][i];
+                let b1 = self.buffers[1][i];
+                self.buffers[0][i] = [b0[0] + b1[0], b0[1] + b1[1]];
+            }
+        }
+
+        // Rotate buffers[1..=total] left: old overdub1 ends up at buffers[total].
+        // buffers[total-1] (= new recording slot after overdub_count decrement) becomes
+        // the zero-filled placeholder we pushed above.
+        self.buffers[1..=total].rotate_left(1);
+
+        // Zero-fill buffers[total] (was old overdub1's buffer, now unused after rotation).
+        self.buffers[total].fill([0.0f32; 2]);
+
+        // Two layers collapsed into one: decrement so recording slot stays in bounds.
+        self.overdub_count -= 1;
+
+        // Pre-compute merge_buf = new buf[0] + decay * new buf[1].
+        // This keeps merge_buf valid even if the next merge happens immediately
+        // (e.g. user presses Rec twice in quick succession with no audio samples in between).
+        // The per-sample maintenance in the process loop will keep it updated thereafter.
+        let n = self.loop_len.min(self.buffers[0].len()).min(self.buffers[1].len());
+        let mut new_merge = vec![[0.0f32; 2]; self.loop_len];
+        for i in 0..n {
+            new_merge[i] = [
+                self.buffers[0][i][0] + self.buffers[1][i][0],
+                self.buffers[0][i][1] + self.buffers[1][i][1],
+            ];
+        }
+        self.merge_buf = new_merge;
     }
 
     fn init_merge_buf(&mut self) {
@@ -463,17 +495,13 @@ impl Looper {
     // Playback helper
     // -----------------------------------------------------------------------
 
-    /// Decay-weighted sum of all playback layers at position `pos`.
-    /// Formula: out = decay^(n-1)*buf[0] + decay^(n-2)*buf[1] + ... + buf[n-1]
+    /// Flat sum of all playback layers at position `pos`.
     fn playback_frame(&self, pos: usize, layer_count: usize) -> Frame {
         let mut out = [0.0f32; 2];
         for i in 0..layer_count {
             if pos < self.buffers[i].len() {
                 let b = self.buffers[i][pos];
-                out = [
-                    out[0] * self.decay + b[0],
-                    out[1] * self.decay + b[1],
-                ];
+                out = [out[0] + b[0], out[1] + b[1]];
             }
         }
         out
@@ -591,6 +619,7 @@ impl Device for Looper {
         m.insert("decay".into(),         self.decay.into());
         m.insert("state".into(),         format!("{:?}", self.state).into());
         m.insert("overdub_count".into(), (self.overdub_count as f64).into());
+        m.insert("max_buffers".into(),   (self.max_buffers as f64).into());
         let loop_secs = if self.sample_rate > 0.0 && self.loop_len > 0 {
             self.loop_len as f32 / self.sample_rate
         } else { 0.0 };
@@ -661,31 +690,53 @@ impl Device for Looper {
                         let pos = self.current_pos;
                         let rec = 1 + self.overdub_count; // recording into buffers[rec]
 
-                        // Record into current overdub buffer, with baked fade-in
+                        // Apply decay in-place to all layers including the recording buffer.
+                        // Do this BEFORE reading prev_rec so previous iterations of this
+                        // overdub also decay each pass.
+                        if self.decay < 1.0 {
+                            for i in 0..self.buffers.len().min(rec + 1) {
+                                if pos < self.buffers[i].len() {
+                                    self.buffers[i][pos][0] *= self.decay;
+                                    self.buffers[i][pos][1] *= self.decay;
+                                }
+                            }
+                        }
+
+                        // Read current overdub buffer BEFORE writing so we hear previous
+                        // iterations of this recording session in the playback mix.
+                        let prev_rec = if rec < self.buffers.len() && pos < self.buffers[rec].len() {
+                            self.buffers[rec][pos]
+                        } else {
+                            [0.0; 2]
+                        };
+
+                        // Accumulate into current overdub buffer (additive across loop iterations).
+                        // Fade-in ramp on first LOOP_FADE_SAMPLES to avoid a click at entry.
                         if rec < self.buffers.len() && pos < self.buffers[rec].len() {
                             let gain = if pos < LOOP_FADE_SAMPLES {
                                 (pos + 1) as f32 * LOOP_FADE_STEP
                             } else {
                                 1.0
                             };
-                            self.buffers[rec][pos] = [inp[0] * gain, inp[1] * gain];
+                            self.buffers[rec][pos][0] += inp[0] * gain;
+                            self.buffers[rec][pos][1] += inp[1] * gain;
                         }
 
-                        // Always maintain merge_buf = buf[0] + decay * buf[1]
-                        if self.overdub_count >= 1 && pos < self.merge_buf.len()
+                        // Always maintain merge_buf = buf[0] + buf[1].
+                        // Must run even at overdub_count == 0 (first overdub): buf[1] is
+                        // being accumulated and merge_buf needs to be ready for do_merge.
+                        if pos < self.merge_buf.len()
                             && pos < self.buffers[0].len() && pos < self.buffers[1].len()
                         {
                             let b0 = self.buffers[0][pos];
                             let b1 = self.buffers[1][pos];
-                            self.merge_buf[pos] = [
-                                b0[0] + self.decay * b1[0],
-                                b0[1] + self.decay * b1[1],
-                            ];
+                            self.merge_buf[pos] = [b0[0] + b1[0], b0[1] + b1[1]];
                         }
 
-                        // Playback: all completed layers (not the one currently recording)
+                        // Playback: all completed layers + previous iterations of current overdub.
                         let total    = 1 + self.overdub_count;
-                        let loop_out = self.playback_frame(pos, total);
+                        let base_out = self.playback_frame(pos, total);
+                        let loop_out = [base_out[0] + prev_rec[0], base_out[1] + prev_rec[1]];
                         let gain     = self.advance_fade();
                         eff[i] = [
                             prev_eff[0] + loop_out[0] * self.wet * gain,
@@ -697,24 +748,16 @@ impl Device for Looper {
                             self.finish_overdub_layer();
                             self.state    = LooperState::Stop;
                             self.stopping = false;
+                            self.fire_state(); // update UI with final overdub_count
                         } else {
                             self.current_pos += 1;
                             if self.current_pos >= self.loop_len {
-                                // at-end: finish recording this layer, start next
+                                // at-end: keep accumulating into the same buffer.
+                                // Layer is only committed when the user presses Rec again.
                                 self.current_pos = 0;
-                                self.finish_overdub_layer(); // overdub_count incremented here
-                                // Notify UI: count changed, timer resets.
-                                // Send looper_state first (count update), then loop_wrap (timer sync).
-                                self.fire_state();
                                 self.fire_event("loop_wrap", serde_json::json!({
                                     "loop_ms": self.loop_ms()
                                 }));
-                                let need   = 1 + self.overdub_count;
-                                let at_max = self.max_buffers > 0 && need >= self.max_buffers;
-                                if at_max || !self.try_alloc_layer(need) {
-                                    self.do_merge();
-                                }
-                                // Stay in Overdub state
                             }
                         }
                     }

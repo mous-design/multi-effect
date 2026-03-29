@@ -5,7 +5,7 @@ import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { t } from '../i18n';
 
-export const PARAM_META: Record<string, { min: number; max: number; unit?: string }> = {
+export const PARAM_META: Record<string, { min: number; max: number; unit?: string; log?: boolean }> = {
   wet:       { min: 0,    max: 1              },
   dry:       { min: 0,    max: 1              },
   gain:      { min: 0,    max: 4              },
@@ -18,13 +18,13 @@ export const PARAM_META: Record<string, { min: number; max: number; unit?: strin
   depth_ms:  { min: 0,    max: 30,  unit: 'ms' },
   root:      { min: 0,    max: 127            },
   vel_sense: { min: 0,    max: 1              },
-  freq:      { min: 50,   max: 10000, unit: 'Hz' },
+  freq:      { min: 50,   max: 10000, unit: 'Hz', log: true },
   gain_db:   { min: -15,  max: 15,  unit: 'dB' },
   q:         { min: 0.1,  max: 5              },
   loop_gain: { min: 0,    max: 4              },
 };
 
-const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 'loop_secs', 'pos_secs', '_wrap_ts']);
+const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 'max_buffers', 'loop_secs', 'pos_secs', '_wrap_ts']);
 
 const PARAM_ORDER: Record<string, string[]> = {
   mix:      ['gain', 'pan', 'dry', 'wet'],
@@ -56,6 +56,15 @@ function EyeOffIcon() {
       <ellipse cx="6" cy="6" rx="5" ry="3.5" />
       <circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none" />
       <line x1="2" y1="2" x2="10" y2="10" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="10" height="13" viewBox="0 0 10 13" fill="currentColor">
+      <rect x="0" y="0" width="3.5" height="13" rx="1"/>
+      <rect x="6.5" y="0" width="3.5" height="13" rx="1"/>
     </svg>
   );
 }
@@ -198,7 +207,7 @@ export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete 
       }
       return <Knob nodeKey={node.key} param={param}
         value={scalar} min={meta.min} max={meta.max}
-        label={t(`param.${param}`)} unit={meta.unit}
+        label={t(`param.${param}`)} unit={meta.unit} log={meta.log}
         onSet={(p, v) => onSet(p, v)} />;
     }
     return null;
@@ -221,99 +230,116 @@ export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete 
             const nd          = node as Record<string, unknown>;
             const looperState = String(nd['state'] ?? 'Idle');
             const overdubs    = Number(nd['overdub_count'] ?? 0);
-            const canUndo     = looperState === 'Overdub' || overdubs > 0;
+            const maxBufs     = Number(nd['max_buffers']  ?? 0);
             const isIdle      = looperState === 'Idle';
             const isRecording = looperState === 'Recording';
+            const isPlaying   = looperState === 'Playing';
+            const isOverdub   = looperState === 'Overdub';
+            // During Overdub, a layer is being recorded but not yet counted — show +1
+            const displayOverdubs = isOverdub ? overdubs + 1 : overdubs;
+            const atMerge     = maxBufs > 0 && displayOverdubs >= maxBufs;
+            const canUndo     = isRecording || isOverdub || overdubs > 0;
             const isStop      = looperState === 'Stop';
             const loopSecs    = Number(nd['loop_secs'] ?? 0);
             const posSecs     = Number(nd['pos_secs']  ?? 0);
+
+            const recActive   = isRecording || isOverdub;
+            const recClass    = `looper-btn${isRecording ? ' looper-btn-rec' : isOverdub ? ' looper-btn-overdub' : ''}`;
+            const recTitle    = isRecording ? 'Pause recording' : isOverdub ? 'Pause overdub' : isIdle ? 'Start recording' : 'Record overdub';
+
+            const playClass   = `looper-btn${isPlaying ? ' looper-btn-play' : ''}`;
+            const playTitle   = isPlaying ? 'Pause playback' : 'Play';
+
             return (
               <div className={`param-cell looper-transport${transportHidden ? ' param-hidden' : ''}`}>
                 <div className="looper-transport-inner">
-                  <div className="looper-state-row">
-                    <span className="looper-state-label">{looperState}</span>
-                  </div>
                   <div className="looper-buttons">
-                    <button className="looper-btn"
-                      disabled={isRecording}
+                    <button className={recClass}
+                      disabled={isPlaying}
+                      title={recTitle}
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, 'rec')}>
-                      {t('looper.rec')}
+                      onClick={() => postAction(`${node.key}.action`, recActive ? 'pause' : 'rec')}>
+                      {recActive ? <PauseIcon /> : t('looper.rec')}
+                    </button>
+                    <button className={playClass}
+                      disabled={isIdle}
+                      title={playTitle}
+                      onMouseDown={e => e.stopPropagation()}
+                      onClick={() => postAction(`${node.key}.action`, isPlaying ? 'pause' : 'play')}>
+                      {isPlaying ? <PauseIcon /> : '▶'}
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}
+                      title="Stop (go to start)"
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, 'play')}>
-                      {t('looper.play')}
-                    </button>
-                    <button className="looper-btn"
-                      disabled={isIdle}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, 'pause-stop')}>
-                      {t('looper.stop')}
+                      onClick={() => postAction(`${node.key}.action`, 'stop')}>
+                      ■
                     </button>
                   </div>
-                  {seekEditing
-                    ? <input
-                        className="looper-time looper-time-edit"
-                        type="number"
-                        step="0.1"
-                        min={0}
-                        max={loopSecs}
-                        value={seekInput}
-                        onChange={e => setSeekInput(e.target.value)}
-                        onBlur={() => {
-                          const v = Math.max(0, Math.min(loopSecs, parseFloat(seekInput) || 0));
-                          onSet(`${node.key}.pos_secs`, v);
-                          setSeekEditing(false);
-                        }}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                          if (e.key === 'Escape') setSeekEditing(false);
-                        }}
-                        onMouseDown={e => e.stopPropagation()}
-                        // eslint-disable-next-line jsx-a11y/no-autofocus
-                        autoFocus
-                      />
-                    : <div
-                        className={`looper-time${isStop ? ' looper-time-seekable' : ''}`}
-                        onMouseDown={!isStop ? undefined : e => {
-                          e.stopPropagation();
-                          const startPos = posSecs;
-                          const sensitivity = loopSecs > 0 ? loopSecs / 200 : 0.1;
-                          seekDragRef.current = { startY: e.clientY, startPos, moved: false };
-                          const onMove = (me: MouseEvent) => {
-                            if (!seekDragRef.current) return;
-                            const dy = seekDragRef.current.startY - me.clientY;
-                            if (Math.abs(dy) > 3) seekDragRef.current.moved = true;
-                            const newPos = Math.max(0, Math.min(loopSecs, startPos + dy * sensitivity));
-                            onSet(`${node.key}.pos_secs`, newPos);
-                          };
-                          const onUp = () => {
-                            if (seekDragRef.current && !seekDragRef.current.moved) {
-                              setSeekInput(startPos.toFixed(1));
-                              setSeekEditing(true);
-                            }
-                            seekDragRef.current = null;
-                            document.removeEventListener('mousemove', onMove);
-                            document.removeEventListener('mouseup', onUp);
-                          };
-                          document.addEventListener('mousemove', onMove);
-                          document.addEventListener('mouseup', onUp);
-                        }}
-                      >
-                        {looperTime}
-                      </div>
-                  }
-                  <div className="looper-layers-row">
+                  <div className="looper-bottom-row">
+                    {seekEditing
+                      ? <input
+                          className="looper-time looper-time-edit"
+                          type="number"
+                          step="0.1"
+                          min={0}
+                          max={loopSecs}
+                          value={seekInput}
+                          onChange={e => setSeekInput(e.target.value)}
+                          onBlur={() => {
+                            const v = Math.max(0, Math.min(loopSecs, parseFloat(seekInput) || 0));
+                            onSet(`${node.key}.pos_secs`, v);
+                            setSeekEditing(false);
+                          }}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                            if (e.key === 'Escape') setSeekEditing(false);
+                          }}
+                          onMouseDown={e => e.stopPropagation()}
+                          // eslint-disable-next-line jsx-a11y/no-autofocus
+                          autoFocus
+                        />
+                      : <div
+                          className={`looper-time${isStop ? ' looper-time-seekable' : ''}`}
+                          title={isStop ? 'Drag or click to seek' : undefined}
+                          onMouseDown={!isStop ? undefined : e => {
+                            e.stopPropagation();
+                            const startPos = posSecs;
+                            const sensitivity = loopSecs > 0 ? loopSecs / 200 : 0.1;
+                            seekDragRef.current = { startY: e.clientY, startPos, moved: false };
+                            const onMove = (me: MouseEvent) => {
+                              if (!seekDragRef.current) return;
+                              const dy = seekDragRef.current.startY - me.clientY;
+                              if (Math.abs(dy) > 3) seekDragRef.current.moved = true;
+                              const newPos = Math.max(0, Math.min(loopSecs, startPos + dy * sensitivity));
+                              onSet(`${node.key}.pos_secs`, newPos);
+                            };
+                            const onUp = () => {
+                              if (seekDragRef.current && !seekDragRef.current.moved) {
+                                setSeekInput(startPos.toFixed(1));
+                                setSeekEditing(true);
+                              }
+                              seekDragRef.current = null;
+                              document.removeEventListener('mousemove', onMove);
+                              document.removeEventListener('mouseup', onUp);
+                            };
+                            document.addEventListener('mousemove', onMove);
+                            document.addEventListener('mouseup', onUp);
+                          }}
+                        >
+                          {looperTime}
+                        </div>
+                    }
                     <button className="looper-btn looper-undo-btn"
                       disabled={!canUndo}
+                      title={`Undo overdub (${displayOverdubs} layer${displayOverdubs !== 1 ? 's' : ''})`}
                       onMouseDown={e => e.stopPropagation()}
                       onClick={() => postAction(`${node.key}.action`, 'undo')}>
-                      {t('looper.undo')} ({overdubs})
+                      ↩<span className="looper-undo-count" style={atMerge ? { color: 'var(--red, #e05)' } : undefined}>{displayOverdubs}</span>
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}
+                      title="Reset (clear loop)"
                       onMouseDown={e => e.stopPropagation()}
                       onClick={() => postAction(`${node.key}.action`, 'reset')}>
                       {t('looper.reset')}

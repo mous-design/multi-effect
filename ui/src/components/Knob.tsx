@@ -8,6 +8,7 @@ interface KnobProps {
   max: number;
   label: string;
   unit?: string;
+  log?: boolean;
   onSet: (path: string, value: number) => void;
 }
 
@@ -24,11 +25,20 @@ function arcPath(cx: number, cy: number, r: number, startDeg: number, endDeg: nu
   return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} ${sweep} ${x2.toFixed(2)} ${y2.toFixed(2)}`;
 }
 
-export function Knob({ nodeKey, param, value, min, max, label, unit, onSet }: KnobProps) {
+// p ∈ [0,1] → value using logarithmic scale: min * (max/min)^p
+function logToVal(p: number, min: number, max: number) {
+  return min * Math.pow(max / min, Math.max(0, Math.min(1, p)));
+}
+// value → p ∈ [0,1]
+function valToLog(v: number, min: number, max: number) {
+  return Math.log(Math.max(min, v) / min) / Math.log(max / min);
+}
+
+export function Knob({ nodeKey, param, value, min, max, label, unit, log, onSet }: KnobProps) {
   const dragRef = useRef<{ startY: number; startVal: number } | null>(null);
   const cx = 40, cy = 40, r = 28;
   const START = -135, END = 135, RANGE = 270;
-  const norm = Math.max(0, Math.min(1, (value - min) / (max - min)));
+  const norm = log ? valToLog(value, min, max) : Math.max(0, Math.min(1, (value - min) / (max - min)));
   const valueAngle = START + norm * RANGE;
 
   const trackPath = arcPath(cx, cy, r, START, END);
@@ -49,7 +59,13 @@ export function Knob({ nodeKey, param, value, min, max, label, unit, onSet }: Kn
   const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!dragRef.current) return;
     const dy = dragRef.current.startY - e.clientY;
-    const newVal = Math.max(min, Math.min(max, dragRef.current.startVal + dy / 150 * (max - min)));
+    let newVal: number;
+    if (log) {
+      const startNorm = valToLog(dragRef.current.startVal, min, max);
+      newVal = logToVal(startNorm + dy / 150, min, max);
+    } else {
+      newVal = Math.max(min, Math.min(max, dragRef.current.startVal + dy / 150 * (max - min)));
+    }
     onSet(`${nodeKey}.${param}`, newVal);
   };
   const onPointerUp = () => { dragRef.current = null; };

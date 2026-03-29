@@ -72,11 +72,11 @@ pub struct NodeDef {
 /// Final output stage: scales the accumulated effect signal and compensates
 /// for dry bleed in analogue-bypass setups.
 ///
-/// Formula: `out[ch] = eff[ch] * wet[ch] - dry[ch] * (1.0 - dry_param[ch])`
+/// Formula: `out[ch] = (eff[ch] - dry[ch]) * wet[ch] + dry[ch] * dry_param[ch]`
 ///
-/// - `wet`: output level of the accumulated effect chain.  Default: `1.0`.
-/// - `dry`: unity-gain semantics — `1.0` = dry passes through unchanged (digital mode),
-///   `0.0` = dry fully subtracted from digital output (analogue-bypass mode).  Default: `1.0`.
+/// - `wet`: output level of the pure effect signal (eff minus dry).  Default: `1.0`.
+/// - `dry`: output level of the original dry signal.  `1.0` = full dry (digital mode),
+///   `0.0` = no dry output (analogue-bypass mode, hardware adds dry).  Default: `1.0`.
 /// - `gain`: overall output level (post-pan).  Default: `1.0`.
 /// - `pan`:  -1.0 = full left, 0.0 = centre, +1.0 = full right.  Default: `0.0`.
 pub struct Mix {
@@ -143,8 +143,8 @@ impl Device for Mix {
         let pan_l = (1.0 - self.pan).min(1.0);
         let pan_r = (1.0 + self.pan).min(1.0);
         for (e, &d) in eff.iter_mut().zip(dry.iter()) {
-            e[0] = (e[0] * self.wet[0] - d[0] * (1.0 - self.dry[0])) * self.gain * pan_l;
-            e[1] = (e[1] * self.wet[1] - d[1] * (1.0 - self.dry[1])) * self.gain * pan_r;
+            e[0] = ((e[0] - d[0]) * self.wet[0] + d[0] * self.dry[0]) * self.gain * pan_l;
+            e[1] = ((e[1] - d[1]) * self.wet[1] + d[1] * self.dry[1]) * self.gain * pan_r;
         }
     }
     fn reset(&mut self) {}
@@ -204,14 +204,13 @@ impl Chain {
             self.prepare(block_size);
         }
 
-        let in0 = (self.input[0] - 1) as usize;
-        let in1 = (self.input[1] - 1) as usize;
+        // 0 = none (silent input / no output); channels are otherwise 1-based.
+        let read_ch = |ch: u8, frame: usize| -> f32 {
+            if ch > 0 { input[frame * in_channels + (ch - 1) as usize] } else { 0.0 }
+        };
 
         for f in 0..block_size {
-            self.dry_buf[f] = [
-                input[f * in_channels + in0],
-                input[f * in_channels + in1],
-            ];
+            self.dry_buf[f] = [read_ch(self.input[0], f), read_ch(self.input[1], f)];
             self.eff_buf[f] = self.dry_buf[f];
         }
 
@@ -225,11 +224,9 @@ impl Chain {
             }
         }
 
-        let out0 = (self.output[0] - 1) as usize;
-        let out1 = (self.output[1] - 1) as usize;
         for f in 0..block_size {
-            output[f * out_channels + out0] += self.eff_buf[f][0];
-            output[f * out_channels + out1] += self.eff_buf[f][1];
+            if self.output[0] > 0 { output[f * out_channels + (self.output[0] - 1) as usize] += self.eff_buf[f][0]; }
+            if self.output[1] > 0 { output[f * out_channels + (self.output[1] - 1) as usize] += self.eff_buf[f][1]; }
         }
     }
 
@@ -344,12 +341,12 @@ pub fn chains_to_json(chains: &[Chain]) -> serde_json::Value {
 
 pub fn build_chain(idx: usize, def: &ChainDef, cfg: &BuildConfig) -> Result<Chain> {
     for &ch in &def.input {
-        if ch == 0 || ch as usize > cfg.in_channels {
+        if ch > 0 && ch as usize > cfg.in_channels {
             bail!("Chain {idx}: input channel {} out of range (in_channels={})", ch, cfg.in_channels);
         }
     }
     for &ch in &def.output {
-        if ch == 0 || ch as usize > cfg.out_channels {
+        if ch > 0 && ch as usize > cfg.out_channels {
             bail!("Chain {idx}: output channel {} out of range (out_channels={})", ch, cfg.out_channels);
         }
     }

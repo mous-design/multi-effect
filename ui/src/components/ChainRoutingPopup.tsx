@@ -11,7 +11,11 @@ interface Props {
 }
 
 function chOptions(n: number) {
-  return Array.from({ length: n }, (_, i) => i + 1);
+  return [0, ...Array.from({ length: n }, (_, i) => i + 1)];
+}
+
+function chLabel(n: number) {
+  return n === 0 ? '–' : String(n);
 }
 
 export function ChainRoutingPopup({ chain, inChannels, outChannels, onApply, onClose }: Props) {
@@ -36,13 +40,13 @@ export function ChainRoutingPopup({ chain, inChannels, outChannels, onApply, onC
               <td>
                 <label className="routing-ch-label">L</label>
                 <select value={inL} onChange={e => setInL(Number(e.target.value))} className="preset-select">
-                  {chOptions(inChannels).map(n => <option key={n} value={n}>{n}</option>)}
+                  {chOptions(inChannels).map(n => <option key={n} value={n}>{chLabel(n)}</option>)}
                 </select>
               </td>
               <td>
                 <label className="routing-ch-label">R</label>
                 <select value={inR} onChange={e => setInR(Number(e.target.value))} className="preset-select">
-                  {chOptions(inChannels).map(n => <option key={n} value={n}>{n}</option>)}
+                  {chOptions(inChannels).map(n => <option key={n} value={n}>{chLabel(n)}</option>)}
                 </select>
               </td>
             </tr>
@@ -51,13 +55,13 @@ export function ChainRoutingPopup({ chain, inChannels, outChannels, onApply, onC
               <td>
                 <label className="routing-ch-label">L</label>
                 <select value={outL} onChange={e => setOutL(Number(e.target.value))} className="preset-select">
-                  {chOptions(outChannels).map(n => <option key={n} value={n}>{n}</option>)}
+                  {chOptions(outChannels).map(n => <option key={n} value={n}>{chLabel(n)}</option>)}
                 </select>
               </td>
               <td>
                 <label className="routing-ch-label">R</label>
                 <select value={outR} onChange={e => setOutR(Number(e.target.value))} className="preset-select">
-                  {chOptions(outChannels).map(n => <option key={n} value={n}>{n}</option>)}
+                  {chOptions(outChannels).map(n => <option key={n} value={n}>{chLabel(n)}</option>)}
                 </select>
               </td>
             </tr>

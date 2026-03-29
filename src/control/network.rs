@@ -125,10 +125,12 @@ async fn handle_client(
                 }
                 ControlMessage::ProgramChange(n) => format!("PROGRAM {n}\n"),
                 ControlMessage::Reset            => "RESET\n".to_string(),
-                ControlMessage::NoteOn       { .. }
-                | ControlMessage::NoteOff    { .. }
-                | ControlMessage::Action     { .. }
-                | ControlMessage::NodeEvent { .. } => continue,
+                ControlMessage::NoteOn          { .. }
+                | ControlMessage::NoteOff       { .. }
+                | ControlMessage::Action        { .. }
+                | ControlMessage::NodeEvent     { .. }
+                | ControlMessage::Compare
+                | ControlMessage::CompareChanged { .. } => continue,
             };
             if writer_out.lock().await.write_all(line.as_bytes()).await.is_err() {
                 break; // client disconnected
@@ -249,6 +251,11 @@ pub(crate) fn handle_command(
             cfg.lock().map_err(|_| "lock error")?
                 .save_preset(slot, chains_val)
                 .map_err(|e| format!("save error: {e}"))?;
+            Ok(())
+        }
+
+        "COMPARE" => {
+            bus.send(ControlMessage::Compare).ok();
             Ok(())
         }
 

@@ -261,10 +261,12 @@ impl MidiOutControl {
                         let _ = conn.send(&[0xC0 | ch_byte, p]);
                     }
                     ControlMessage::Reset
-                    | ControlMessage::NoteOn      { .. }
-                    | ControlMessage::NoteOff     { .. }
-                    | ControlMessage::Action      { .. }
-                    | ControlMessage::NodeEvent { .. } => {} // not forwarded to MIDI out
+                    | ControlMessage::NoteOn         { .. }
+                    | ControlMessage::NoteOff        { .. }
+                    | ControlMessage::Action         { .. }
+                    | ControlMessage::NodeEvent      { .. }
+                    | ControlMessage::Compare
+                    | ControlMessage::CompareChanged { .. } => {} // not forwarded to MIDI out
                 }
             }
         });

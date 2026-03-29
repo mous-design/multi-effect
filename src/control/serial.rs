@@ -92,10 +92,12 @@ impl SerialControl {
                         }
                         ControlMessage::ProgramChange(n) => format!("PROGRAM {n}\n"),
                         ControlMessage::Reset            => "RESET\n".to_string(),
-                        ControlMessage::NoteOn       { .. }
-                        | ControlMessage::NoteOff    { .. }
-                        | ControlMessage::Action     { .. }
-                        | ControlMessage::NodeEvent { .. } => continue,
+                        ControlMessage::NoteOn          { .. }
+                        | ControlMessage::NoteOff       { .. }
+                        | ControlMessage::Action        { .. }
+                        | ControlMessage::NodeEvent     { .. }
+                        | ControlMessage::Compare
+                        | ControlMessage::CompareChanged { .. } => continue,
                     };
                     if writer.write_all(line.as_bytes()).await.is_err() {
                         break; // port closed — outbound task ends, inbound loop will catch it too

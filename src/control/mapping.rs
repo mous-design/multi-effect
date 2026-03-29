@@ -18,11 +18,16 @@ fn default_midi_out_channel() -> u8       { 1               }
 ///
 /// - `ctrl`:  native controller range (e.g. `[0, 127]` for MIDI CC, `[0, 1023]` for 10-bit ADC).
 /// - `param`: target parameter range.
+/// - `log`:   when `true`, use logarithmic interpolation: `param = param[0] * (param[1]/param[0])^t`.
+///            Useful for frequency parameters where musical spacing is logarithmic.
 ///
-/// Transformation is linear and symmetric:
+/// Linear transformation (default):
 /// ```text
-/// param_val = param[0] + (ctrl_val  - ctrl[0])  / (ctrl[1]  - ctrl[0])  * (param[1] - param[0])
-/// ctrl_val  = ctrl[0]  + (param_val - param[0]) / (param[1] - param[0]) * (ctrl[1]  - ctrl[0])
+/// param_val = param[0] + t * (param[1] - param[0])   where t = (ctrl_val - ctrl[0]) / (ctrl[1] - ctrl[0])
+/// ```
+/// Logarithmic transformation (`log: true`):
+/// ```text
+/// param_val = param[0] * (param[1] / param[0]) ^ t
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlDef {
@@ -37,6 +42,11 @@ pub struct ControlDef {
     #[serde(default = "default_param")]
     pub param: [f32; 2],
 
+    /// Use logarithmic interpolation.  Default: `false`.
+    /// Both `param` values must be positive (non-zero) when enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub log: bool,
+
     /// Decimal places in outbound `CTRL` values.
     /// `0` = integer, `1` = one decimal, etc.
     /// Default: auto — `0` when ctrl range > 100, full float otherwise.
@@ -48,13 +58,22 @@ impl ControlDef {
     /// Map a raw controller value to a parameter value.
     pub fn to_param(&self, ctrl_val: f32) -> f32 {
         let t = ((ctrl_val - self.ctrl[0]) / (self.ctrl[1] - self.ctrl[0])).clamp(0.0, 1.0);
-        self.param[0] + t * (self.param[1] - self.param[0])
+        if self.log && self.param[0] > 0.0 && self.param[1] > 0.0 {
+            self.param[0] * (self.param[1] / self.param[0]).powf(t)
+        } else {
+            self.param[0] + t * (self.param[1] - self.param[0])
+        }
     }
 
     /// Map a parameter value back to a raw controller value.
     pub fn to_ctrl(&self, param_val: f32) -> f32 {
-        let t = ((param_val - self.param[0]) / (self.param[1] - self.param[0])).clamp(0.0, 1.0);
-        self.ctrl[0] + t * (self.ctrl[1] - self.ctrl[0])
+        let t = if self.log && self.param[0] > 0.0 && self.param[1] > 0.0 {
+            (param_val.max(self.param[0]) / self.param[0]).ln()
+                / (self.param[1] / self.param[0]).ln()
+        } else {
+            (param_val - self.param[0]) / (self.param[1] - self.param[0])
+        };
+        self.ctrl[0] + t.clamp(0.0, 1.0) * (self.ctrl[1] - self.ctrl[0])
     }
 
     /// Format the raw controller value for transmission.
