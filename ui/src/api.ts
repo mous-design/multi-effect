@@ -1,10 +1,15 @@
-export async function fetchState() {
-  const res = await fetch('/api/state');
-  return res.json();
+// Global error handler — set by App on mount.
+let onError: (msg: string) => void = console.error;
+export function setApiErrorHandler(fn: (msg: string) => void) { onError = fn; }
+
+async function api(url: string, init?: RequestInit): Promise<Response> {
+    const res = await fetch(url, init).catch(e => { onError(e.message); throw e; });
+    if (!res.ok) onError(`${init?.method ?? 'GET'} ${url}: ${res.status}`);
+    return res;
 }
 
 export async function postAction(target: string, action: string): Promise<boolean> {
-  const res = await fetch('/api/action', {
+  const res = await api('/api/action', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ target, action }),
@@ -17,18 +22,12 @@ export async function fetchConfig(): Promise<{
   sample_rate: number; buffer_size: number; audio_device: string;
   delay_max_seconds: number; looper_max_seconds: number;
 }> {
-  const res = await fetch('/api/config');
+  const res = await api('/api/config');
   return res.json();
 }
 
-export async function fetchPresetDefs(): Promise<{ presets: number[]; active: number }> {
-  const res = await fetch('/api/presets');
-  const data = await res.json();
-  return { presets: data.presets ?? [], active: data.active ?? 0 };
-}
-
 export async function patchChains(chains: object[]): Promise<boolean> {
-  const res = await fetch('/api/patch', {
+  const res = await api('/api/patch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chains }),
@@ -37,7 +36,7 @@ export async function patchChains(chains: object[]): Promise<boolean> {
 }
 
 export function setParam(path: string, value: number | boolean) {
-  fetch('/api/set', {
+  api('/api/set', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path, value }),
@@ -52,7 +51,7 @@ export async function saveConfig(cfg: {
   out_channels: number;
   delay_max_seconds: number;
 }): Promise<boolean> {
-  const res = await fetch('/api/config', {
+  const res = await api('/api/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(cfg),
@@ -61,30 +60,31 @@ export async function saveConfig(cfg: {
 }
 
 export async function reloadConfig(): Promise<boolean> {
-  const res = await fetch('/api/reload', { method: 'POST' });
+  const res = await api('/api/reload', { method: 'POST' });
   return res.ok;
 }
 
 export function savePreset(n: number) {
-  return fetch(`/api/preset/${n}/save`, { method: 'POST' });
+  return api(`/api/preset/${n}/save`, { method: 'POST' });
 }
 
-export function switchPreset(n: number) {
-  fetch(`/api/preset/${n}`, { method: 'POST' });
+export async function switchPreset(n: number): Promise<boolean> {
+  const res = await api(`/api/preset/${n}`, { method: 'POST' });
+  return res.ok;
 }
 
 export async function deletePreset(n: number): Promise<boolean> {
-  const res = await fetch(`/api/preset/${n}`, { method: 'DELETE' });
+  const res = await api(`/api/preset/${n}`, { method: 'DELETE' });
   return res.ok;
 }
 
 export async function fetchDevices(): Promise<Record<string, any>> {
-  const res = await fetch('/api/devices');
+  const res = await api('/api/devices');
   return res.json();
 }
 
 export async function putDevice(alias: string, def: object): Promise<boolean> {
-  const res = await fetch(`/api/devices/${encodeURIComponent(alias)}`, {
+  const res = await api(`/api/devices/${encodeURIComponent(alias)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(def),
@@ -93,13 +93,13 @@ export async function putDevice(alias: string, def: object): Promise<boolean> {
 }
 
 export async function fetchControllers(n: number): Promise<import('./types').ControllerDef[]> {
-  const res = await fetch(`/api/preset/${n}/controllers`);
+  const res = await api(`/api/preset/${n}/controllers`);
   if (!res.ok) return [];
   return res.json();
 }
 
 export async function putControllers(n: number, controllers: import('./types').ControllerDef[]): Promise<boolean> {
-  const res = await fetch(`/api/preset/${n}/controllers`, {
+  const res = await api(`/api/preset/${n}/controllers`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(controllers),
@@ -108,7 +108,7 @@ export async function putControllers(n: number, controllers: import('./types').C
 }
 
 export async function renameDevice(oldAlias: string, newAlias: string, def: object): Promise<boolean> {
-  const res = await fetch(`/api/devices/${encodeURIComponent(oldAlias)}/rename`, {
+  const res = await api(`/api/devices/${encodeURIComponent(oldAlias)}/rename`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ new_alias: newAlias, ...def }),
@@ -117,12 +117,12 @@ export async function renameDevice(oldAlias: string, newAlias: string, def: obje
 }
 
 export async function deleteDevice(alias: string): Promise<boolean> {
-  const res = await fetch(`/api/devices/${encodeURIComponent(alias)}`, { method: 'DELETE' });
+  const res = await api(`/api/devices/${encodeURIComponent(alias)}`, { method: 'DELETE' });
   return res.ok;
 }
 
 export async function postCompare(): Promise<boolean> {
-  const res = await fetch('/api/compare', { method: 'POST' });
+  const res = await api('/api/compare', { method: 'POST' });
   return res.ok;
 }
 

@@ -47,10 +47,21 @@ pub enum ControlMessage {
         data: serde_json::Value,
     },
 
-    /// Toggle compare mode: swap between dirty state and saved preset.
-    /// Sent by foot pedal (serial/net `COMPARE` command) or the UI.
-    #[allow(dead_code)]
-    Compare,
+    /// Full preset loaded (preset switch, compare toggle, reset).
+    /// Pushed to WS so the UI can replace its entire state without re-fetching.
+    PresetLoaded {
+        preset: serde_json::Value,
+        preset_indices: Vec<u8>,
+        state: String,
+    },
+
+    /// Snapshot state changed (e.g. after save: Dirty → Clean).
+    /// Carries updated metadata without the full preset payload.
+    StateChanged {
+        state: String,
+        preset_index: u8,
+        preset_indices: Vec<u8>,
+    },
 }
 
 /// Broadcast channel used as the central pub/sub event bus.

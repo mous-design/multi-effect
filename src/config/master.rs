@@ -239,6 +239,7 @@ impl ConfigMaster {
         self.apply_controllers(&preset.controllers);
         self.snapshot.load_preset(preset, Clean);
         self.cfg.presets.active = slot;
+        self.notify_preset_loaded();
         info!("Loaded preset {slot}");
         Ok(())
     }
@@ -247,8 +248,10 @@ impl ConfigMaster {
         self.snapshot.set_to_slot(slot);
         self.cfg.presets.save_to_slot(self.snapshot.preset.clone());
         self.cfg.presets.active = slot;
+        self.snapshot.preset_indices = self.cfg.presets.indices();
         self.cfg.persist()?;
-        return Ok(());
+        self.notify_state_changed();
+        Ok(())
     }
 
     fn handle_delete_preset(&mut self, slot: u8) -> Result<()> {
@@ -367,6 +370,7 @@ impl ConfigMaster {
             .context("patch channel full, preset not loaded")?;
         self.clear_controllers();
         self.apply_controllers(&self.snapshot.preset.controllers);
+        self.notify_preset_loaded();
         Ok(())
     }
 
@@ -445,6 +449,24 @@ impl ConfigMaster {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+    /// Push a PresetLoaded message on the bus (full preset + state).
+    fn notify_preset_loaded(&self) {
+        self.bus.send(ControlMessage::PresetLoaded {
+            preset: serde_json::to_value(&self.snapshot.preset).unwrap_or_default(),
+            preset_indices: self.snapshot.preset_indices.clone(),
+            state: self.snapshot.state.label().to_string(),
+        }).ok();
+    }
+
+    /// Push a StateChanged message on the bus (metadata only, no preset payload).
+    fn notify_state_changed(&self) {
+        self.bus.send(ControlMessage::StateChanged {
+            state: self.snapshot.state.label().to_string(),
+            preset_index: self.snapshot.preset.index,
+            preset_indices: self.snapshot.preset_indices.clone(),
+        }).ok();
+    }
+
     fn build_chains(&self, chains: &Vec<ChainDef>) -> Result<Vec<Chain>> {
         let mut chains = patch::load_patch_def(chains, &self.cfg)
             .context("build_chains build error")?;

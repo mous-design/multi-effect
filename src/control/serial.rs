@@ -90,7 +90,11 @@ impl SerialControl {
                         | ControlMessage::NoteOff       { .. }
                         | ControlMessage::Action        { .. }
                         | ControlMessage::NodeEvent     { .. }
-                        | ControlMessage::Compare  => continue,
+                        => continue,
+                        ControlMessage::PresetLoaded { ref preset, state: ref s, .. }
+                        => format!("PRESET {}\nSTATE {s}\n", serde_json::to_string(preset).unwrap_or_default()),
+                        ControlMessage::StateChanged { ref state, preset_index, .. }
+                        => format!("STATE {state} {preset_index}\n"),
                     };
                     if writer_out.lock().await.write_all(line.as_bytes()).await.is_err() {
                         break; // port closed — outbound task ends, inbound loop will catch it too

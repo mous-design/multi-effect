@@ -101,12 +101,6 @@ const en: Record<string, string> = {
   'ui.delete_preset':         'Delete preset',
 
   // ── Errors ────────────────────────────────────────────────────────────────
-  'error.save_config':    'Failed to save settings.',
-  'error.delete_node':    'Failed to delete node.',
-  'error.reorder':        'Invalid order: EQ before Mix with analog bypass is not allowed.',
-  'error.add_node':       'Failed to add node.',
-  'error.delete_chain':   'Failed to delete chain.',
-  'error.routing':        'Failed to update chain routing.',
   'error.preset_missing': 'Preset {} does not exist.',
 };
 

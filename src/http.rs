@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot,};
 use tower_http::{cors::CorsLayer, services::ServeDir};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use crate::config::master::ConfigRequest;
 use crate::control::{ControlMessage, EventBus};
 use crate::control::mapping::{ControllerDef, DeviceDef};
@@ -26,27 +26,25 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Send a request to the master and return the result directly.
+    async fn request<T, F>(&self, build: F) -> Result<T>
+    where
+        F: FnOnce(oneshot::Sender<Result<T>>) -> ConfigRequest,
+    {
+        let (tx, rx) = oneshot::channel();
+        self.master_tx.send(build(tx)).await?;
+        rx.await?
+    }
+
+    /// HTTP wrapper around request() — returns (StatusCode, Json).
     async fn ask_master<T, F>(&self, build: F) -> (StatusCode, RespJson)
     where
         T: serde::Serialize,
         F: FnOnce(oneshot::Sender<Result<T>>) -> ConfigRequest,
     {
-        let (tx, rx) = oneshot::channel();
-        let req = build(tx);
-        if let Err(e) = self.master_tx.send(req).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })));
-        }
-        match rx.await {
-            Ok(Ok(val)) =>
-                (StatusCode::OK,
-                Json(serde_json::to_value(val).unwrap_or_default())),
-            Ok(Err(e)) =>
-                (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() }))),
-            Err(e) =>
-                (StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() }))),
+        match self.request(build).await {
+            Ok(val) => (StatusCode::OK, Json(serde_json::to_value(val).unwrap_or_default())),
+            Err(e)  => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
         }
     }
 }
@@ -71,7 +69,6 @@ pub fn router(state: AppState, ui_dist_path: &str) -> Router {
         .route("/api/config",          get(get_config))
         .route("/api/config",          post(post_config))
         .route("/api/reload",          post(post_reload))
-        .route("/api/presets",         get(get_presets))
         .route("/api/set",             post(post_set))
         .route("/api/action",          post(post_action))
         .route("/api/patch",           post(post_patch))
@@ -98,11 +95,6 @@ async fn get_state(State(s): State<AppState>) -> (StatusCode, RespJson) {
 
 async fn get_config(State(s): State<AppState>) -> (StatusCode, RespJson) {
     s.ask_master(|tx| ConfigRequest::GetConfig { resp: tx }).await
-}
-
-async fn get_presets(State(s): State<AppState>) -> (StatusCode, RespJson) {
-    let (status_code, json) = s.ask_master(|tx| ConfigRequest::GetSnapshot { resp: tx }).await;
-    (status_code, Json(serde_json::json!({ "presets": json["preset_indices"], "active": json["preset"]["index"] })))
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +194,22 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let mut bus_rx = state.bus.subscribe();
     let master_tx = state.master_tx.clone();
-// @todo removed PresetLoaded and CompareChanged here, have to move in snapshot-code!
+
+    // Push initial snapshot so the UI can render immediately.
+    if let Ok(snap) = state.request(|tx| ConfigRequest::GetSnapshot { resp: tx }).await {
+        let preset = serde_json::to_value(&snap.preset).unwrap_or_default();
+        let j = serde_json::json!({
+            "type": "preset",
+            "preset": preset,
+            "preset_indices": snap.preset_indices,
+            "state": snap.state.label(),
+        });
+        if sink.send(Message::Text(j.to_string().into())).await.is_err() {
+            warn!("WS client disconnected before initial snapshot");
+            return;
+        }
+    }
+
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = bus_rx.recv().await {
             let json: Option<serde_json::Value> = match msg {
@@ -213,6 +220,10 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     Some(serde_json::json!({ "type": "reset" })),
                 ControlMessage::NodeEvent { key, event, data } =>
                     Some(serde_json::json!({ "type": "node_event", "key": key, "event": event, "data": data })),
+                ControlMessage::PresetLoaded { preset, preset_indices, state } =>
+                    Some(serde_json::json!({ "type": "preset", "preset": preset, "preset_indices": preset_indices, "state": state })),
+                ControlMessage::StateChanged { state, preset_index, preset_indices } =>
+                    Some(serde_json::json!({ "type": "state", "state": state, "preset_index": preset_index, "preset_indices": preset_indices })),
                 _ => None,
             };
             if let Some(j) = json {

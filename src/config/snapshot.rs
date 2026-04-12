@@ -19,6 +19,18 @@ pub enum SnapshotState {
 }
 use SnapshotState::*;
 
+impl SnapshotState {
+    /// Simplified name for external consumers (serial/net/UI).
+    /// Strips the Persisted suffix — controllers don't care about persistence.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Clean | CleanPersisted => "Clean",
+            Dirty | DirtyPersisted => "Dirty",
+            Comparing | ComparingPersisted => "Comparing",
+        }
+    }
+}
+
 /// Read-only snapshot published via watch channel after every mutation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConfigSnapshot {

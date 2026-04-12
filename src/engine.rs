@@ -257,7 +257,8 @@ impl AudioEngine {
                 }
                 // NodeEvent is fired directly by nodes (e.g. Looper) via their stored EventBus.
                 ControlMessage::NodeEvent { .. }
-                | ControlMessage::Compare => {}
+                | ControlMessage::PresetLoaded { .. }
+                | ControlMessage::StateChanged { .. } => {}
             }
         }
     }

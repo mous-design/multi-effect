@@ -5,7 +5,7 @@ import { Toasts, Toast } from './components/Toasts';
 import { ChainRoutingPopup } from './components/ChainRoutingPopup';
 import { SettingsPopup } from './components/SettingsPopup';
 import { DevicesPage } from './components/DevicesPage';
-import { fetchState, fetchPresetDefs, fetchConfig, fetchDevices, setParam, patchChains, savePreset, saveConfig, switchPreset, deletePreset, createWs, postCompare } from './api';
+import { fetchConfig, fetchDevices, setParam, patchChains, savePreset, saveConfig, switchPreset, deletePreset, createWs, postCompare, setApiErrorHandler } from './api';
 import { t } from './i18n';
 
 function SpeakerIcon() {
@@ -93,6 +93,11 @@ export default function App() {
         setToasts(prev => prev.filter(t => t.id !== id));
     };
 
+    // Wire up global API error handler → toast
+    const addToastRef = useRef(addToast);
+    addToastRef.current = addToast;
+    useEffect(() => { setApiErrorHandler(msg => addToastRef.current(msg)); }, []);
+
     // Delete preset confirm state
     const [confirmDeletePreset, setConfirmDeletePreset] = useState(false);
 
@@ -110,22 +115,10 @@ export default function App() {
     const stateRef = useRef<AppState | null>(null);
     stateRef.current = state;
 
-    // Apply fetched state — also picks up the server-side dirty flag so it survives reloads.
-    const applyFetchedState = (data: any) => {
-        setState({ chains: data.chains ?? [] });
-        if (typeof data.is_dirty === 'boolean') setIsDirty(data.is_dirty);
-        if (typeof data.is_comparing === 'boolean') setIsComparing(data.is_comparing);
-    };
-
     useEffect(() => {
-        fetchState().then(applyFetchedState);
+        // No fetchState — initial snapshot arrives via WS on connect.
         fetchDevices().then(setDevices);
         fetchConfig().then(cfg => setAudioConfig({ in_channels: cfg.in_channels, out_channels: cfg.out_channels, sample_rate: cfg.sample_rate, buffer_size: cfg.buffer_size, audio_device: cfg.audio_device, delay_max_seconds: cfg.delay_max_seconds }));
-        fetchPresetDefs().then(({ presets, active }) => {
-            setPresetDefs(presets);
-            if (active !== 0) setActivePreset(active);
-            else if (presets.length > 0) setActivePreset(presets[0]);
-        });
 
         const cleanup = createWs(
             (msg) => {
@@ -179,16 +172,20 @@ export default function App() {
                             };
                         });
                     }
-                } else if (msg.type === 'compare') {
-                    setState({ chains: msg.chains ?? [] });
-                    if (typeof msg.is_dirty === 'boolean') setIsDirty(msg.is_dirty);
-                    if (typeof msg.is_comparing === 'boolean') setIsComparing(msg.is_comparing);
                 } else if (msg.type === 'preset') {
-                    if (msg.n) setActivePreset(Number(msg.n));
-                    setIsComparing(false);
-                    applyFetchedState(msg);
-                } else if (msg.type === 'reset') {
-                    fetchState().then(applyFetchedState);
+                    // Full preset loaded (preset switch, compare toggle)
+                    const preset = msg.preset ?? {};
+                    setState({ chains: preset.chains ?? [] });
+                    if (typeof preset.index === 'number') setActivePreset(preset.index);
+                    if (Array.isArray(msg.preset_indices)) setPresetDefs(msg.preset_indices);
+                    setIsDirty(msg.state === 'Dirty');
+                    setIsComparing(msg.state === 'Comparing');
+                } else if (msg.type === 'state') {
+                    // State change (e.g. save: Dirty → Clean)
+                    setIsDirty(msg.state === 'Dirty');
+                    setIsComparing(msg.state === 'Comparing');
+                    if (typeof msg.preset_index === 'number') setActivePreset(msg.preset_index);
+                    if (Array.isArray(msg.preset_indices)) setPresetDefs(msg.preset_indices);
                 }
             },
             () => setConnected(true),
@@ -229,7 +226,7 @@ export default function App() {
         setState(next);
         setIsDirty(true);
         patchChains(next.chains).then(ok => {
-            if (!ok) { setState(prev); addToast(t('error.delete_node')); }
+            if (!ok) setState(prev);
         });
     };
 
@@ -243,7 +240,7 @@ export default function App() {
         setState(next);
         setIsDirty(true);
         patchChains(next.chains).then(ok => {
-            if (!ok) { setState(prev); addToast(t('error.reorder')); }
+            if (!ok) setState(prev);
         });
     };
 
@@ -259,7 +256,7 @@ export default function App() {
         setState(next);
         setIsDirty(true);
         patchChains(next.chains).then(ok => {
-            if (!ok) { setState(prev); addToast(t('error.add_node')); }
+            if (!ok) setState(prev);
         });
     };
 
@@ -270,7 +267,7 @@ export default function App() {
         setState(next);
         setRoutingIdx(null);
         patchChains(next.chains).then(ok => {
-            if (!ok) { setState(prev); addToast(t('error.routing')); }
+            if (!ok) setState(prev);
         });
     };
 
@@ -281,7 +278,7 @@ export default function App() {
         setState(next);
         setIsDirty(true);
         patchChains(next.chains).then(ok => {
-            if (!ok) { setState(prev); addToast(t('error.delete_chain')); }
+            if (!ok) setState(prev);
         });
     };
 
@@ -321,13 +318,13 @@ export default function App() {
             const next = remaining[0];
             setActivePreset(next);
             switchPreset(next);
-            fetchState().then(applyFetchedState);
+            // Backend will push snapshot via WS after preset switch
         } else {
             setState({ chains: [] });
         }
     };
 
-    const handleSwitchPreset = (n: number) => {
+    const handleSwitchPreset = async (n: number) => {
         if (!presets.includes(n)) {
             addToast(t('error.preset_missing', n));
             return;
@@ -335,29 +332,36 @@ export default function App() {
         setActivePreset(n);
         setIsDirty(false);
         setIsComparing(false);
-        switchPreset(n);
+        await switchPreset(n);
+    };
+
+    const handleCompare = async () => {
+        await postCompare();
     };
 
     const handleOpenSavePopup = () => {
-        setSavePresetNum(activePreset);
+        setSavePresetNum(activePreset || 1);
         setShowSavePopup(true);
     };
 
     const handleConfirmSave = async () => {
         setShowSavePopup(false);
-        await savePreset(savePresetNum);
-        setActivePreset(savePresetNum);
-        setIsDirty(false);
-        setSavedFeedback(true);
-        setTimeout(() => setSavedFeedback(false), 2000);
-        fetchPresetDefs().then(({ presets }) => setPresetDefs(presets));
+        const res = await savePreset(savePresetNum);
+        if (res.ok) {
+            setActivePreset(savePresetNum);
+            setIsDirty(false);
+            setSavedFeedback(true);
+            setTimeout(() => setSavedFeedback(false), 2000);
+        }
     };
 
     const handleQuickSave = async () => {
-        await savePreset(activePreset);
-        setIsDirty(false);
-        setSavedFeedback(true);
-        setTimeout(() => setSavedFeedback(false), 2000);
+        const res = await savePreset(activePreset);
+        if (res.ok) {
+            setIsDirty(false);
+            setSavedFeedback(true);
+            setTimeout(() => setSavedFeedback(false), 2000);
+        }
     };
 
     const routingChain = routingIdx !== null && state ? state.chains[routingIdx] : null;
@@ -388,13 +392,13 @@ export default function App() {
                     </select>
                     <button
                         className={`compare-btn${isComparing ? ' compare-btn-active' : ''}`}
-                        onClick={() => postCompare()}
+                        onClick={handleCompare}
                         disabled={!isDirty && !isComparing}
                         title={isComparing ? `Comparing with preset ${activePreset} — click to restore edits` : `Compare with saved preset ${activePreset}`}
                     >
                         <SpeakerIcon /> {activePreset}
                     </button>
-                    <button className="preset-save-btn" onClick={handleQuickSave} title={t('ui.save_quick')}>
+                    <button className="preset-save-btn" onClick={handleQuickSave} disabled={activePreset === 0 || !isDirty} title={t('ui.save_quick')}>
                         {savedFeedback ? t('ui.saved') : t('ui.save_quick')}
                     </button>
                     <button className="preset-save-btn" onClick={handleOpenSavePopup} title={t('ui.save')}>

@@ -281,7 +281,8 @@ impl MidiOutControl {
                     | ControlMessage::NoteOff        { .. }
                     | ControlMessage::Action         { .. }
                     | ControlMessage::NodeEvent      { .. }
-                    | ControlMessage::Compare
+                    | ControlMessage::PresetLoaded   { .. }
+                    | ControlMessage::StateChanged   { .. }
                                      => {} // not forwarded to MIDI out
                 }
             }

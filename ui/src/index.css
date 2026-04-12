@@ -372,7 +372,8 @@ main { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
   white-space: nowrap;
   height: 32px;
 }
-.preset-save-btn:hover { color: var(--accent); border-color: var(--accent); }
+.preset-save-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.preset-save-btn:disabled { opacity: 0.35; cursor: default; }
 
 .compare-btn {
   background: none;
