@@ -148,9 +148,11 @@ pub trait Device: Parameterized + Send + Sync {
     fn key(&self) -> &str;
 
     /// The node type string used in patch JSON (e.g. "delay", "reverb").
+    #[allow(dead_code)]
     fn type_name(&self) -> &str;
 
     /// Current parameter values as a JSON map (for state serialisation).
+    #[allow(dead_code)]
     fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
         serde_json::Map::new()
     }
@@ -160,7 +162,6 @@ pub trait Device: Parameterized + Send + Sync {
     fn is_active(&self) -> bool { true }
 
     /// MIDI Control Change
-    #[allow(dead_code)]
     fn on_cc(&mut self, controller: u8, value: u8) {
         let _ = (controller, value);
     }

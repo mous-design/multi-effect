@@ -1,0 +1,30 @@
+#!/bin/bash
+
+TASK=$1
+shift
+
+case "$TASK" in
+  build-dev)
+    cargo build
+    ;;
+  build-release)
+    cargo build --release
+    ;;
+  build-ts)
+    cd ui && npm run build
+    ;;
+  "")
+    cargo run
+    ;;
+  -v|-f)
+    cargo run -- "$@"
+    ;;
+  -h|*)
+    echo "Usage: ./run <command>
+where command is one of:
+    build-dev
+    build-release
+    build-ts
+    run [-v] [-f]"
+    ;;
+esac

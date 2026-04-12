@@ -8,7 +8,7 @@ const BUFFER_SIZES = [64, 128, 256, 512, 1024];
 interface AudioConfig {
   sample_rate: number;
   buffer_size: number;
-  device: string;
+  audio_device: string;
   in_channels: number;
   out_channels: number;
   delay_max_seconds: number;
@@ -23,7 +23,7 @@ interface Props {
 export function SettingsPopup({ config, onSave, onClose }: Props) {
   const [sample_rate,        setSampleRate]       = useState(config.sample_rate);
   const [buffer_size,        setBufferSize]        = useState(config.buffer_size);
-  const [device,             setDevice]            = useState(config.device);
+  const [device,             setDevice]            = useState(config.audio_device);
   const [in_channels,        setInChannels]        = useState(config.in_channels);
   const [out_channels,       setOutChannels]       = useState(config.out_channels);
   const [delay_max_seconds,  setDelayMaxSeconds]   = useState(config.delay_max_seconds);
@@ -31,7 +31,7 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
   const [error, setError] = useState(false);
 
   async function handleSave() {
-    const ok = await onSave({ sample_rate, buffer_size, device, in_channels, out_channels, delay_max_seconds });
+    const ok = await onSave({ sample_rate, buffer_size, audio_device: device, in_channels, out_channels, delay_max_seconds });
     if (ok) { setSaved(true); setError(false); }
     else    { setError(true); }
   }

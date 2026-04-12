@@ -2,6 +2,9 @@ use std::sync::{Arc, RwLock};
 
 use tracing::{debug, error, info, warn};
 
+use tokio::sync::mpsc;
+
+use crate::config::master::ConfigRequest;
 use crate::control::{ControlMessage, EventBus};
 use crate::control::mapping::{ControllerDef, MidiChannel};
 
@@ -9,7 +12,7 @@ use crate::control::mapping::{ControllerDef, MidiChannel};
 // MidiControl  (MIDI input)
 // ---------------------------------------------------------------------------
 
-/// Opens a MIDI input port and forwards CC / Program Change events to the event bus.
+/// Opens a MIDI input port and forwards CC / Program Change events to the master.
 ///
 /// CC events are looked up in the active `ControllerDef` mappings.  Unknown CC numbers
 /// are silently ignored (MIDI has no text fallback).
@@ -33,9 +36,9 @@ impl MidiControl {
         Self { device_name, default_channel, mappings }
     }
 
-    /// Open the MIDI input port and start forwarding messages to the bus.
+    /// Open the MIDI input port and start forwarding messages to the master.
     /// Spawns a background thread; returns immediately.
-    pub fn run(self, bus: EventBus) {
+    pub fn run(self, master_tx: mpsc::Sender<ConfigRequest>) {
         let midi_in = match midir::MidiInput::new("multi-effect") {
             Ok(m)  => m,
             Err(e) => { error!("MIDI init error: {e}"); return; }
@@ -144,10 +147,23 @@ impl MidiControl {
                     }
                     _ => None,
                 };
-
-                if let Some(m) = ctrl_msg {
-                    if bus.send(m).is_err() {
-                        warn!("MIDI: no subscribers on event bus, message dropped");
+                
+                let req = match ctrl_msg {
+                    Some(ControlMessage::SetParam { path, value }) =>
+                        Some(ConfigRequest::ApplySet { path, value, resp: None }),
+                    Some(ControlMessage::ProgramChange(p)) =>
+                        Some(ConfigRequest::SwitchPreset { slot: p, resp: None }),
+                    Some(ControlMessage::NoteOn { note, velocity }) =>
+                        Some(ConfigRequest::ApplyControl(ControlMessage::NoteOn { note, velocity })),
+                    Some(ControlMessage::NoteOff { note }) =>
+                        Some(ConfigRequest::ApplyControl(ControlMessage::NoteOff { note })),
+                    _ => None,
+                };
+                // If system locks up on many notes, try_send is the alternative.
+                if let Some(r) = req {
+                    if master_tx.blocking_send(r).is_err() {
+                        warn!("MIDI: master channel closed");
+                        return;
                     }
                 }
             },
@@ -266,7 +282,7 @@ impl MidiOutControl {
                     | ControlMessage::Action         { .. }
                     | ControlMessage::NodeEvent      { .. }
                     | ControlMessage::Compare
-                    | ControlMessage::CompareChanged { .. } => {} // not forwarded to MIDI out
+                                     => {} // not forwarded to MIDI out
                 }
             }
         });

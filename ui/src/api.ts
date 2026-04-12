@@ -14,14 +14,14 @@ export async function postAction(target: string, action: string): Promise<boolea
 
 export async function fetchConfig(): Promise<{
   in_channels: number; out_channels: number;
-  sample_rate: number; buffer_size: number; device: string;
+  sample_rate: number; buffer_size: number; audio_device: string;
   delay_max_seconds: number; looper_max_seconds: number;
 }> {
   const res = await fetch('/api/config');
   return res.json();
 }
 
-export async function fetchPresets(): Promise<{ presets: number[]; active: number }> {
+export async function fetchPresetDefs(): Promise<{ presets: number[]; active: number }> {
   const res = await fetch('/api/presets');
   const data = await res.json();
   return { presets: data.presets ?? [], active: data.active ?? 0 };
@@ -47,7 +47,7 @@ export function setParam(path: string, value: number | boolean) {
 export async function saveConfig(cfg: {
   sample_rate: number;
   buffer_size: number;
-  device: string;
+  audio_device: string;
   in_channels: number;
   out_channels: number;
   delay_max_seconds: number;

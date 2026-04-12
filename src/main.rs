@@ -4,609 +4,75 @@ mod effects;
 mod engine;
 mod http;
 mod logging;
-mod save;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
-
-use anyhow::{Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, SampleRate, StreamConfig};
-use rtrb::RingBuffer;
-use tracing::{info, warn};
+use anyhow::Result;
+use tracing::info;
 
 use config::Config;
-use control::{ControlMessage, NetworkControl, SerialControl, new_event_bus};
-use control::mapping::{ControllerDef, DeviceDef};
-use tokio::sync::watch;
-use control::midi::{MidiControl, MidiOutControl};
-use engine::patch::Chain;
-use engine::AudioEngine;
+use config::master;
+use config::master::ConfigRequest;
+use config::snapshot::ConfigSnapshot;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // --- Config + CLI overrides (initialises logging internally) ---
-    let (cfg, build_cfg) = Config::from_args()?;
+    let (cfg, verbose, skip_state) = Config::from_args()?;
 
-    // --- Determine startup chains: config structure + saved params overlay ---
-    let state_path = cfg.effective_state_save_path();
-    let structure_json = cfg.startup_chains_json()
-        .context("failed to serialize startup chains")?
-        .ok_or_else(|| anyhow::anyhow!("no chains in config (no presets and no 'chains' key)"))?;
-    let merged_json = if !cfg.skip_state && state_path.exists() {
-        info!("Loading saved state (params overlay): {}", state_path.display());
-        match std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        {
-            Some(saved) => {
-                let structure: serde_json::Value = serde_json::from_str(&structure_json)
-                    .context("failed to parse startup chains json")?;
-                save::merge_state_params(&structure, &saved).to_string()
-            }
-            None => {
-                info!("Could not read state file, using config structure");
-                structure_json
-            }
-        }
-    } else {
-        info!("No saved state, loading chains from config");
-        structure_json
-    };
-    let mut chains: Vec<Chain> = engine::patch::load_str(&merged_json, &build_cfg)
-        .context("failed to build startup chains")?;
-
-    // Extract what we need before moving cfg into the Arc.
-    let devices              = cfg.devices.clone();
-    let startup_controllers  = cfg.startup_controllers();
-    let state_save_interval  = cfg.state_save_interval;
-
-    // --- Shared config (preset management, SAVE_PRESET) ---
-    let cfg = Arc::new(Mutex::new(cfg));
-
-    // --- Per-device shared ControllerDef Arcs ---
-    // One Arc<RwLock<ControllerDef>> per device alias.  The HashMap itself is
-    // immutable after construction; the inner Arcs are swapped on preset change.
-    let controller_arcs: Arc<HashMap<String, Arc<RwLock<ControllerDef>>>> = {
-        let map = devices.keys()
-            .map(|alias| (alias.clone(), Arc::new(RwLock::new(ControllerDef::default()))))
-            .collect();
-        Arc::new(map)
-    };
-
-    // Apply startup controller mappings (from active preset).
-    for ctrl_def in startup_controllers {
-        if let Some(arc) = controller_arcs.get(&ctrl_def.device) {
-            *arc.write().unwrap() = ctrl_def;
-        } else {
-            warn!("Startup: controller references unknown device '{}' — skipping", ctrl_def.device);
-        }
+    if skip_state {
+        ConfigSnapshot::remove_state_file(&cfg.state_save_path)?;
     }
 
-    // --- Per-device active-state watch channels ---
-    // Receivers are passed to device tasks; senders live in AppState for HTTP-triggered deactivation.
-    let device_active_map: HashMap<String, watch::Sender<bool>> = devices.iter()
-        .map(|(alias, def)| {
-            let (tx, _rx) = watch::channel(def.is_active());
-            (alias.clone(), tx)
-        })
-        .collect();
-    let device_active = Arc::new(Mutex::new(device_active_map));
-
-    // --- Reload notifier (HTTP /api/reload → same logic as SIGHUP) ---
-    let reload_notify = Arc::new(tokio::sync::Notify::new());
-
-    // --- Event bus (pub/sub: TCP, MIDI, serial → subscribers) ---
-    let bus = new_event_bus();
-
-    // --- Channels ---
-    let (control_tx, control_rx) = RingBuffer::<ControlMessage>::new(64);
-    let (patch_tx,   patch_rx)   = RingBuffer::<Vec<Chain>>::new(4);
-
-    let control_tx = Arc::new(Mutex::new(control_tx));
-    let patch_tx   = Arc::new(Mutex::new(patch_tx));
-
-    // Bridge task: event bus → rtrb → audio thread
-    // LiveState is not forwarded: it travels from audio → HTTP, never the reverse.
-    {
-        let mut bridge_rx = bus.subscribe();
-        let control_tx_bridge = Arc::clone(&control_tx);
-        tokio::spawn(async move {
-            while let Ok(msg) = bridge_rx.recv().await {
-                if matches!(msg, ControlMessage::NodeEvent { .. }) { continue; }
-                if let Ok(mut tx) = control_tx_bridge.lock() {
-                    if tx.push(msg).is_err() {
-                        tracing::warn!("audio control channel full, message dropped");
-                    }
-                }
-            }
-        });
-    }
-
-    // --- Patch state for persistence ---
-    let initial_json = engine::patch::chains_to_json(&chains);
-    let patch_state  = Arc::new(Mutex::new(save::PatchState::new(initial_json, Some(state_path))));
-
-    // State-updater task: event bus → PatchState (handles SET)
-    {
-        let mut state_rx = bus.subscribe();
-        let ps_bus = Arc::clone(&patch_state);
-        tokio::spawn(async move {
-            while let Ok(msg) = state_rx.recv().await {
-                if let ControlMessage::SetParam { path, value } = msg {
-                    if let Ok(mut s) = ps_bus.lock() {
-                        s.apply_set(&path, value);
-                    }
-                }
-            }
-        });
-    }
-
-    // Preset-switch task: ProgramChange → swap chains + controller mappings
-    {
-        let mut pc_rx           = bus.subscribe();
-        let bus_pc              = bus.clone();
-        let patch_tx_pc         = Arc::clone(&patch_tx);
-        let patch_state_pc      = Arc::clone(&patch_state);
-        let cfg_pc              = Arc::clone(&cfg);
-        let controller_arcs_pc  = Arc::clone(&controller_arcs);
-        let build_cfg_pc        = build_cfg;
-        tokio::spawn(async move {
-            while let Ok(msg) = pc_rx.recv().await {
-                let ControlMessage::ProgramChange(slot) = msg else { continue };
-
-                let preset = cfg_pc.lock().unwrap().presets.get(&slot).cloned();
-                let Some(preset) = preset else {
-                    warn!("Preset {slot} not found");
-                    continue;
-                };
-
-                // Build new chains
-                let chains_val = serde_json::json!({"chains": preset.chains});
-                match engine::patch::load_str(&chains_val.to_string(), &build_cfg_pc) {
-                    Ok(mut chains) => {
-                        for chain in &mut chains { chain.init_bus(&bus_pc); }
-                        let json = engine::patch::chains_to_json(&chains);
-                        if patch_tx_pc.lock().unwrap().push(chains).is_err() {
-                            tracing::warn!("patch channel full, preset {slot} not loaded");
-                        } else {
-                            patch_state_pc.lock().unwrap().apply_patch(json);
-                            // Clear all device mappings, then apply new preset's controllers.
-                            for arc in controller_arcs_pc.values() {
-                                *arc.write().unwrap() = ControllerDef::default();
-                            }
-                            for ctrl_def in preset.controllers {
-                                if let Some(arc) = controller_arcs_pc.get(&ctrl_def.device) {
-                                    *arc.write().unwrap() = ctrl_def;
-                                } else {
-                                    warn!("Preset {slot}: controller references unknown device '{}' — skipping", ctrl_def.device);
-                                }
-                            }
-                            info!("Loaded preset {slot}");
-                        }
-                    }
-                    Err(e) => warn!("Preset {slot} build error: {e}"),
-                }
-            }
-        });
-    }
-
-    // --- Shared live-state (audio engine → HTTP/WS) ---
-    // Pre-populate from patch_state so GET /api/state is never null on first page load.
-    let live_state = std::sync::Arc::new(std::sync::Mutex::new(
-        patch_state.lock().unwrap().json.clone()
-    ));
-
-    // Give nodes (e.g. Looper) access to the event bus so they can fire events directly.
-    for chain in &mut chains {
-        chain.init_bus(&bus);
-    }
+    logging::init(&cfg.log_target, verbose)?;
 
     // --- Audio engine ---
-    let mut engine = AudioEngine::new(
-        chains,
-        build_cfg.in_channels,
-        build_cfg.out_channels,
-        build_cfg.sample_rate as u32,
-        {
-            let c = cfg.lock().unwrap();
-            c.buffer_size
-        },
-        control_rx,
-        patch_rx,
-        std::sync::Arc::clone(&live_state),
-    );
+    let (audio_handle, audio_streams) = engine::AudioEngine::build(
+        cfg.in_channels, cfg.out_channels, cfg.sample_rate, cfg.buffer_size, cfg.audio_device.clone())?;
+    audio_streams.play()?;
 
-    // --- CPAL: find devices ---
-    let host = cpal::default_host();
+    // Extract what we need before moving cfg into the master.
+    let http_port          = cfg.http_port;
+    let state_save_interval = cfg.state_save_interval;
 
-    let (device_name, in_channels, out_channels, sample_rate, buffer_size) = {
-        let c = cfg.lock().unwrap();
-        (c.device.clone(), c.in_channels, c.out_channels, c.sample_rate, c.buffer_size)
-    };
+    // --- Spawn ConfigMaster ---
+    let (master_tx, bus) = master::spawn(cfg, audio_handle)?;
 
-    let in_device = match device_name.as_str() {
-        "default" => host.default_input_device().context("no default input device")?,
-        name => host
-            .input_devices()?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .with_context(|| format!("input device '{name}' not found"))?,
-    };
-
-    let out_device = match device_name.as_str() {
-        "default" => host.default_output_device().context("no default output device")?,
-        name => host
-            .output_devices()?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .with_context(|| format!("output device '{name}' not found"))?,
-    };
-
-    info!("Input:  {}", in_device.name().unwrap_or_default());
-    info!("Output: {}", out_device.name().unwrap_or_default());
-
-    // Validate device configs against what we're about to request.
-    if let Ok(dc) = in_device.default_input_config() {
-        if dc.sample_rate().0 != sample_rate {
-            warn!("input device default sample rate is {}Hz, requesting {}Hz — stream build may fail",
-                dc.sample_rate().0, sample_rate);
-        }
-        if in_channels > dc.channels() {
-            warn!("input device supports {} channels by default, requesting {} — stream build may fail",
-                dc.channels(), in_channels);
-        }
-    }
-    if let Ok(dc) = out_device.default_output_config() {
-        if dc.sample_rate().0 != sample_rate {
-            warn!("output device default sample rate is {}Hz, requesting {}Hz — stream build may fail",
-                dc.sample_rate().0, sample_rate);
-        }
-        if out_channels > dc.channels() {
-            warn!("output device supports {} channels by default, requesting {} — stream build may fail",
-                dc.channels(), out_channels);
-        }
+    if http_port > 0 {
+        http::run(http_port, master_tx.clone(), bus.clone());
     }
 
-    let in_config = StreamConfig {
-        channels:    in_channels,
-        sample_rate: SampleRate(sample_rate),
-        buffer_size: BufferSize::Fixed(buffer_size as u32),
-    };
-    let out_config = StreamConfig {
-        channels:    out_channels,
-        sample_rate: SampleRate(sample_rate),
-        buffer_size: BufferSize::Fixed(buffer_size as u32),
-    };
+        // let mut chains = engine::patch::load_from_config(&cfg, !skip_state)
+        // .context("failed to build startup chains")?;
 
-    // Ring buffer: sized for input (in_channels × buffer_size).
-    let in_ch  = in_channels  as usize;
-    let out_ch = out_channels as usize;
-    let ring_cap = buffer_size * in_ch * 4;
-    let (mut in_tx, mut in_rx) = RingBuffer::<f32>::new(ring_cap);
 
-    let max_in_samples  = buffer_size * in_ch;
-    let max_out_samples = buffer_size * out_ch;
-    let mut in_buf  = vec![0.0f32; max_in_samples];
-    let mut out_buf = vec![0.0f32; max_out_samples];
 
-    let input_stream = in_device.build_input_stream(
-        &in_config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            for &s in data {
-                let _ = in_tx.push(s);
-            }
-        },
-        |e| tracing::error!("Input stream error: {e}"),
-        None,
-    )?;
-
-    let output_stream = out_device.build_output_stream(
-        &out_config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let n_out = data.len();
-            let n_in  = n_out / out_ch * in_ch;
-            // CoreAudio may give a larger buffer than requested; resize if needed.
-            // This allocation only happens when the buffer size changes, not in steady state.
-            if n_in  > in_buf.len()  { in_buf.resize(n_in,   0.0); }
-            if n_out > out_buf.len() { out_buf.resize(n_out,  0.0); }
-            for s in in_buf[..n_in].iter_mut() {
-                *s = in_rx.pop().unwrap_or(0.0);
-            }
-            engine.process_block(&in_buf[..n_in], &mut out_buf[..n_out]);
-            data.copy_from_slice(&out_buf[..n_out]);
-        },
-        |e| tracing::error!("Output stream error: {e}"),
-        None,
-    )?;
-
-    input_stream.play()?;
-    output_stream.play()?;
-    info!("Audio running.");
-
-    // --- Start control devices ---
-    for (alias, dev_def) in &devices {
-        if !dev_def.is_active() {
-            info!("Device '{alias}': disabled (active: false)");
-            continue;
-        }
-
-        let mappings = match controller_arcs.get(alias) {
-            Some(arc) => Arc::clone(arc),
-            None      => continue, // should not happen
-        };
-
-        let active_rx = match device_active.lock().unwrap().get(alias) {
-            Some(tx) => tx.subscribe(),
-            None     => continue, // should not happen
-        };
-
-        match dev_def {
-            DeviceDef::Serial { dev, baud, fallback, .. } => {
-                let serial = SerialControl::new(
-                    dev.clone(),
-                    *baud,
-                    *fallback,
-                    build_cfg,
-                    Arc::clone(&patch_state),
-                    Arc::clone(&cfg),
-                    bus.clone(),
-                    mappings,
-                );
-                let patch_tx_serial = Arc::clone(&patch_tx);
-                let alias_s = alias.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = serial.run(patch_tx_serial, active_rx).await {
-                        tracing::error!("Serial '{alias_s}': {e}");
-                    }
-                });
-            }
-
-            DeviceDef::Net { host, port, fallback, .. } => {
-                let net = NetworkControl::new(
-                    host.clone(),
-                    *port,
-                    *fallback,
-                    build_cfg,
-                    Arc::clone(&patch_state),
-                    Arc::clone(&cfg),
-                    bus.clone(),
-                    mappings,
-                );
-                let patch_tx_net = Arc::clone(&patch_tx);
-                let alias_s = alias.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = net.run(patch_tx_net, active_rx).await {
-                        tracing::error!("Network '{alias_s}': {e}");
-                    }
-                });
-            }
-
-            DeviceDef::MidiIn { dev, channel, .. } => {
-                let midi = MidiControl::new(dev.clone(), channel.clone(), mappings);
-                midi.run(bus.clone());
-            }
-
-            DeviceDef::MidiOut { dev, channel, .. } => {
-                let midi_out = MidiOutControl::new(dev.clone(), *channel, mappings);
-                midi_out.run(bus.clone());
-            }
-        }
-    }
-
-    // --- Periodic state save task ---
+    // Periodic state save.
     if state_save_interval > 0 {
-        let ps_periodic   = Arc::clone(&patch_state);
-        let interval_secs = state_save_interval;
+        let master_tx_save = master_tx.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(state_save_interval));
             interval.tick().await; // skip first immediate tick
             loop {
                 interval.tick().await;
-                let mut s = ps_periodic.lock().unwrap();
-                if s.dirty {
-                    if let Err(e) = s.save() {
-                        tracing::warn!("periodic state save failed: {e}");
-                    } else {
-                        tracing::debug!("state saved");
-                    }
-                }
+                if master_tx_save.send(ConfigRequest::SaveState).await.is_err() { break; }
             }
         });
     }
 
-    // --- Compare-mode state (shared between compare task and HTTP AppState) ---
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let preset_dirty     = Arc::new(AtomicBool::new(false));
-    let is_comparing     = Arc::new(AtomicBool::new(false));
-    let compare_snapshot: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
 
-    // Compare task: handles Compare messages from foot pedal or UI.
-    {
-        let mut cmp_rx       = bus.subscribe();
-        let bus_cmp          = bus.clone();
-        let patch_tx_cmp     = Arc::clone(&patch_tx);
-        let patch_state_cmp  = Arc::clone(&patch_state);
-        let cfg_cmp          = Arc::clone(&cfg);
-        let preset_dirty_cmp = Arc::clone(&preset_dirty);
-        let is_comparing_cmp = Arc::clone(&is_comparing);
-        let snapshot_cmp     = Arc::clone(&compare_snapshot);
-
-        tokio::spawn(async move {
-            while let Ok(msg) = cmp_rx.recv().await {
-                if !matches!(msg, ControlMessage::Compare) { continue; }
-
-                let comparing = is_comparing_cmp.load(Ordering::Relaxed);
-                let dirty     = preset_dirty_cmp.load(Ordering::Relaxed);
-
-                if !comparing && !dirty {
-                    continue; // nothing to compare — ignore
-                }
-
-                if !comparing {
-                    // Snapshot dirty chains, load saved preset.
-                    let dirty_json = patch_state_cmp.lock().unwrap().json.clone();
-                    *snapshot_cmp.lock().unwrap() = Some(dirty_json);
-
-                    let active = cfg_cmp.lock().unwrap().active_preset;
-                    let preset_val = cfg_cmp.lock().unwrap()
-                        .presets.get(&active)
-                        .map(|p| serde_json::json!({ "chains": p.chains }));
-
-                    if let Some(val) = preset_val {
-                        match engine::patch::load_str(&val.to_string(), &build_cfg) {
-                            Ok(mut chains) => {
-                                for chain in &mut chains { chain.init_bus(&bus_cmp); }
-                                if patch_tx_cmp.lock().unwrap().push(chains).is_ok() {
-                                    patch_state_cmp.lock().unwrap().apply_patch(val.clone());
-                                    preset_dirty_cmp.store(false, Ordering::Relaxed);
-                                    is_comparing_cmp.store(true, Ordering::Relaxed);
-                                    bus_cmp.send(ControlMessage::CompareChanged {
-                                        chains: val["chains"].clone(),
-                                        is_dirty: false,
-                                        is_comparing: true,
-                                    }).ok();
-                                    info!("Compare: entered — showing saved preset {active}");
-                                }
-                            }
-                            Err(e) => warn!("Compare: preset build error: {e}"),
-                        }
-                    }
-                } else {
-                    // Restore dirty snapshot.
-                    if let Some(dirty_json) = snapshot_cmp.lock().unwrap().take() {
-                        match engine::patch::load_str(&dirty_json.to_string(), &build_cfg) {
-                            Ok(mut chains) => {
-                                for chain in &mut chains { chain.init_bus(&bus_cmp); }
-                                if patch_tx_cmp.lock().unwrap().push(chains).is_ok() {
-                                    patch_state_cmp.lock().unwrap().apply_patch(dirty_json.clone());
-                                    preset_dirty_cmp.store(true, Ordering::Relaxed);
-                                    is_comparing_cmp.store(false, Ordering::Relaxed);
-                                    bus_cmp.send(ControlMessage::CompareChanged {
-                                        chains: dirty_json["chains"].clone(),
-                                        is_dirty: true,
-                                        is_comparing: false,
-                                    }).ok();
-                                    info!("Compare: restored dirty state");
-                                }
-                            }
-                            Err(e) => warn!("Compare: snapshot restore error: {e}"),
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    // --- HTTP server ---
-    {
-        let http_port = { cfg.lock().unwrap().http_port };
-        if http_port != 0 {
-            let http_state = http::AppState {
-                patch_state:      Arc::clone(&patch_state),
-                patch_tx:         Arc::clone(&patch_tx),
-                build_cfg,
-                bus:              bus.clone(),
-                cfg:              Arc::clone(&cfg),
-                reload_notify:    Arc::clone(&reload_notify),
-                device_active:    Arc::clone(&device_active),
-                controller_arcs:  Arc::clone(&controller_arcs),
-                live_state:       std::sync::Arc::clone(&live_state),
-                preset_dirty:     Arc::clone(&preset_dirty),
-                compare_snapshot: Arc::clone(&compare_snapshot),
-                is_comparing:     Arc::clone(&is_comparing),
-            };
-            let ui_dist = "ui/dist";
-            let router = http::router(http_state, ui_dist);
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], http_port));
-            info!("HTTP server on http://0.0.0.0:{http_port}");
-            tokio::spawn(async move {
-                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-                axum::serve(listener, router).await.unwrap();
-            });
-        }
-    }
-
-    // --- Signal loop: SIGINT/Ctrl-C → shutdown, SIGHUP → reload config ---
+    // --- Signal loop ---
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-
         let mut sig_int  = signal(SignalKind::interrupt())?;
         let mut sig_term = signal(SignalKind::terminate())?;
         let mut sig_hup  = signal(SignalKind::hangup())?;
 
         loop {
             tokio::select! {
-                _ = sig_int.recv()           => { info!("SIGINT received, shutting down."); break; }
-                _ = sig_term.recv()          => { info!("SIGTERM received, shutting down."); break; }
-                _ = reload_notify.notified() => { info!("Reload requested via HTTP."); }
-                _ = sig_hup.recv()           => { info!("SIGHUP received."); }
-            }
-            // Reload config (reached after notify or SIGHUP, not after break).
-            let config_path = cfg.lock().unwrap().config_path.clone();
-            match Config::load(&config_path) {
-                Err(e) => warn!("reload: config load failed: {e}"),
-                Ok(mut new_cfg) => {
-                    new_cfg.config_path = config_path;
-                    {
-                        let old = cfg.lock().unwrap();
-                        if new_cfg.device       != old.device       { warn!("reload: 'device' changed — restart required"); }
-                        if new_cfg.sample_rate  != old.sample_rate  { warn!("reload: 'sample_rate' changed — restart required"); }
-                        if new_cfg.buffer_size  != old.buffer_size  { warn!("reload: 'buffer_size' changed — restart required"); }
-                        if new_cfg.in_channels  != old.in_channels  { warn!("reload: 'in_channels' changed — restart required"); }
-                        if new_cfg.out_channels != old.out_channels { warn!("reload: 'out_channels' changed — restart required"); }
-                        if new_cfg.http_port    != old.http_port    { warn!("reload: 'http_port' changed — restart required"); }
-                    }
-                    let state_path  = new_cfg.effective_state_save_path();
-                    let controllers = new_cfg.active_preset_entry()
-                        .map(|p| p.controllers.clone())
-                        .unwrap_or_default();
-                    if let Ok(mut s) = patch_state.lock() {
-                        if let Err(e) = s.save() { warn!("reload: state save failed: {e}"); }
-                    }
-                    *cfg.lock().unwrap() = new_cfg;
-                    let chains_result = {
-                        let structure_json = cfg.lock().unwrap()
-                            .startup_chains_json().unwrap_or(None)
-                            .unwrap_or_else(|| r#"{"chains":[]}"#.into());
-                        let merged = if !state_path.as_os_str().is_empty() && state_path.exists() {
-                            info!("reload: overlaying saved params from {}", state_path.display());
-                            match std::fs::read_to_string(&state_path)
-                                .ok()
-                                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                            {
-                                Some(saved) => {
-                                    let structure: serde_json::Value =
-                                        serde_json::from_str(&structure_json).unwrap_or_default();
-                                    save::merge_state_params(&structure, &saved).to_string()
-                                }
-                                None => structure_json,
-                            }
-                        } else {
-                            structure_json
-                        };
-                        engine::patch::load_str(&merged, &build_cfg)
-                    };
-                    match chains_result {
-                        Ok(mut chains) => {
-                            for chain in &mut chains { chain.init_bus(&bus); }
-                            let json = engine::patch::chains_to_json(&chains);
-                            if patch_tx.lock().unwrap().push(chains).is_err() {
-                                warn!("reload: patch channel full");
-                            } else {
-                                patch_state.lock().unwrap().apply_patch(json);
-                                for arc in controller_arcs.values() {
-                                    *arc.write().unwrap() = ControllerDef::default();
-                                }
-                                for ctrl_def in controllers {
-                                    if let Some(arc) = controller_arcs.get(&ctrl_def.device) {
-                                        *arc.write().unwrap() = ctrl_def;
-                                    }
-                                }
-                                info!("reload: done.");
-                            }
-                        }
-                        Err(e) => warn!("reload: chain build error: {e}"),
-                    }
+                _ = sig_int.recv()  => { info!("SIGINT received, shutting down."); break; }
+                _ = sig_term.recv() => { info!("SIGTERM received, shutting down."); break; }
+                _ = sig_hup.recv()  => {
+                    info!("SIGHUP received.");
+                    master_tx.send(ConfigRequest::Reload { resp: None }).await.ok();
                 }
             }
         }
@@ -615,18 +81,10 @@ async fn main() -> Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
 
-    // Save state on shutdown
-    if let Ok(mut s) = patch_state.lock() {
-        if s.dirty {
-            if let Err(e) = s.save() {
-                tracing::warn!("shutdown state save failed: {e}");
-            } else {
-                tracing::info!("state saved");
-            }
-        }
-    }
+    // Shutdown: ask master to save state, then drop the sender to let it exit.
+    master_tx.send(ConfigRequest::SaveState).await.ok();
+    drop(master_tx);
 
     info!("Shutting down.");
-
     Ok(())
 }

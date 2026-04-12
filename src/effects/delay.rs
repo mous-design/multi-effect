@@ -63,6 +63,7 @@ impl Delay {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn time(&self) -> f32 {
         self.delay_samples as f32 / self.sample_rate
     }

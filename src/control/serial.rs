@@ -1,18 +1,15 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use rtrb::Producer;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_serial::SerialPortBuilderExt;
 use tracing::{info, warn};
 
-use crate::config::{BuildConfig, Config};
+use crate::config::master::ConfigRequest;
 use crate::control::{apply_ctrl, outbound_line, ControlMessage, EventBus};
 use crate::control::mapping::ControllerDef;
 use crate::control::network::handle_command;
-use crate::engine::patch::Chain;
-use crate::save::PatchState;
 
 /// Bidirectional USB serial control interface.
 ///
@@ -29,33 +26,29 @@ use crate::save::PatchState;
 /// parameter target, sends `CTRL <channel_id> <raw_value>`.
 /// Otherwise sends `SET <key.param> <value>` (or `PROGRAM`/`RESET`).
 pub struct SerialControl {
-    device:      String,
-    baud:        u32,
-    fallback:    bool,
-    build_cfg:   BuildConfig,
-    patch_state: Arc<Mutex<PatchState>>,
-    cfg:         Arc<Mutex<Config>>,
-    bus:         EventBus,
+    device:    String,
+    baud:      u32,
+    fallback:  bool,
+    bus:       EventBus,
     pub mappings: Arc<RwLock<ControllerDef>>,
+    master_tx: mpsc::Sender<ConfigRequest>,
 }
 
 impl SerialControl {
     pub fn new(
-        device:      String,
-        baud:        u32,
-        fallback:    bool,
-        build_cfg:   BuildConfig,
-        patch_state: Arc<Mutex<PatchState>>,
-        cfg:         Arc<Mutex<Config>>,
-        bus:         EventBus,
-        mappings:    Arc<RwLock<ControllerDef>>,
+        device:    String,
+        baud:      u32,
+        fallback:  bool,
+        bus:       EventBus,
+        mappings:  Arc<RwLock<ControllerDef>>,
+        master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { device, baud, fallback, build_cfg, patch_state, cfg, bus, mappings }
+        Self { device, baud, fallback, bus, mappings, master_tx }
     }
 
-    pub async fn run(self, patch_tx: Arc<Mutex<Producer<Vec<Chain>>>>, mut active_rx: watch::Receiver<bool>) -> Result<()> {
+    pub async fn run(self, mut active_rx: watch::Receiver<bool>) -> Result<()> {
         // Destructure so fields can be reused across reconnect iterations.
-        let Self { device, baud, fallback, build_cfg, patch_state, cfg, bus, mappings } = self;
+        let Self { device, baud, fallback, bus, mappings, master_tx } = self;
 
         loop {
             // Exit immediately if deactivated.
@@ -75,14 +68,15 @@ impl SerialControl {
                     }
                 }
             };
+            info!("Serial '{device}': connected");
 
-            info!("Serial control on {device} at {baud} baud");
+            let (reader, writer) = tokio::io::split(port);
+            let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
-            let (reader, mut writer) = tokio::io::split(port);
-
-            // Outbound: bus events → serial port
+            // Outbound: bus → serial writer (mapped where possible)
             let mut bus_rx   = bus.subscribe();
             let mappings_out = Arc::clone(&mappings);
+            let writer_out   = Arc::clone(&writer);
             tokio::spawn(async move {
                 while let Ok(msg) = bus_rx.recv().await {
                     let line = match &msg {
@@ -96,10 +90,9 @@ impl SerialControl {
                         | ControlMessage::NoteOff       { .. }
                         | ControlMessage::Action        { .. }
                         | ControlMessage::NodeEvent     { .. }
-                        | ControlMessage::Compare
-                        | ControlMessage::CompareChanged { .. } => continue,
+                        | ControlMessage::Compare  => continue,
                     };
-                    if writer.write_all(line.as_bytes()).await.is_err() {
+                    if writer_out.lock().await.write_all(line.as_bytes()).await.is_err() {
                         break; // port closed — outbound task ends, inbound loop will catch it too
                     }
                 }
@@ -115,7 +108,7 @@ impl SerialControl {
                         if line.starts_with("CTRL ") {
                             let cfg = mappings.read().unwrap();
                             apply_ctrl(&line, &cfg, fallback, &bus);
-                        } else if let Err(e) = handle_command(&line, &bus, &patch_tx, &build_cfg, &patch_state, &cfg) {
+                        } else if let Err(e) = handle_command(&line, &bus, &master_tx).await {
                             warn!("Serial command error: {e}");
                         }
                     }
@@ -130,11 +123,11 @@ impl SerialControl {
                 }
             }
 
+            // Reconnect delay
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
                 _ = active_rx.changed() => {}
             }
-            if !*active_rx.borrow() { return Ok(()); }
         }
     }
 }

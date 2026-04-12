@@ -1,17 +1,15 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
-use anyhow::Result;
-use rtrb::Producer;
+use anyhow::{Result, Context, bail};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::config::{BuildConfig, Config};
+use crate::config::master::ConfigRequest;
 use crate::control::{apply_ctrl, outbound_line, ControlMessage, EventBus};
 use crate::control::mapping::ControllerDef;
-use crate::engine::patch::{self, Chain};
-use crate::save::PatchState;
+use crate::engine::patch;
 
 /// Text-based TCP control server.
 ///
@@ -37,30 +35,25 @@ pub struct NetworkControl {
     host:        String,
     port:        u16,
     fallback:    bool,
-    build_cfg:   BuildConfig,
-    patch_state: Arc<Mutex<PatchState>>,
-    cfg:         Arc<Mutex<Config>>,
     bus:         EventBus,
     pub mappings: Arc<RwLock<ControllerDef>>,
+    master_tx:   mpsc::Sender<ConfigRequest>,
 }
 
 impl NetworkControl {
     pub fn new(
-        host:        String,
-        port:        u16,
-        fallback:    bool,
-        build_cfg:   BuildConfig,
-        patch_state: Arc<Mutex<PatchState>>,
-        cfg:         Arc<Mutex<Config>>,
-        bus:         EventBus,
-        mappings:    Arc<RwLock<ControllerDef>>,
+        host:      String,
+        port:      u16,
+        fallback:  bool,
+        bus:       EventBus,
+        mappings:  Arc<RwLock<ControllerDef>>,
+        master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { host, port, fallback, build_cfg, patch_state, cfg, bus, mappings }
+        Self { host, port, fallback, bus, mappings, master_tx }
     }
 
     pub async fn run(
         self,
-        patch_tx: Arc<Mutex<Producer<Vec<Chain>>>>,
         mut active_rx: watch::Receiver<bool>,
     ) -> Result<()> {
         if !*active_rx.borrow() { return Ok(()); }
@@ -74,16 +67,13 @@ impl NetworkControl {
                     let (socket, addr) = result?;
                     tracing::info!("Control connection from {addr}");
 
-                    let patch_tx    = Arc::clone(&patch_tx);
-                    let build_cfg   = self.build_cfg;
-                    let patch_state = Arc::clone(&self.patch_state);
-                    let cfg         = Arc::clone(&self.cfg);
-                    let bus         = self.bus.clone();
-                    let mappings    = Arc::clone(&self.mappings);
-                    let fallback    = self.fallback;
+                    let bus       = self.bus.clone();
+                    let mappings  = Arc::clone(&self.mappings);
+                    let fallback  = self.fallback;
+                    let master_tx = self.master_tx.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_client(socket, bus, patch_tx, build_cfg, patch_state, cfg, mappings, fallback).await {
+                        if let Err(e) = handle_client(socket, bus, mappings, fallback, master_tx).await {
                             tracing::warn!("Client {addr}: {e}");
                         }
                     });
@@ -100,14 +90,11 @@ impl NetworkControl {
 }
 
 async fn handle_client(
-    socket:      TcpStream,
-    bus:         EventBus,
-    patch_tx:    Arc<Mutex<Producer<Vec<Chain>>>>,
-    build_cfg:   BuildConfig,
-    patch_state: Arc<Mutex<PatchState>>,
-    cfg:         Arc<Mutex<Config>>,
-    mappings:    Arc<RwLock<ControllerDef>>,
-    fallback:    bool,
+    socket:    TcpStream,
+    bus:       EventBus,
+    mappings:  Arc<RwLock<ControllerDef>>,
+    fallback:  bool,
+    master_tx: mpsc::Sender<ConfigRequest>,
 ) -> Result<()> {
     let (reader, writer) = socket.into_split();
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
@@ -129,8 +116,8 @@ async fn handle_client(
                 | ControlMessage::NoteOff       { .. }
                 | ControlMessage::Action        { .. }
                 | ControlMessage::NodeEvent     { .. }
-                | ControlMessage::Compare
-                | ControlMessage::CompareChanged { .. } => continue,
+                | ControlMessage::Compare 
+                => continue,
             };
             if writer_out.lock().await.write_all(line.as_bytes()).await.is_err() {
                 break; // client disconnected
@@ -149,7 +136,7 @@ async fn handle_client(
             apply_ctrl(&line, &cfg, fallback, &bus);
             "OK\n".to_string()
         } else {
-            match handle_command(&line, &bus, &patch_tx, &build_cfg, &patch_state, &cfg) {
+            match handle_command(&line, &bus, &master_tx).await {
                 Ok(())  => "OK\n".to_string(),
                 Err(e)  => format!("ERR {e}\n"),
             }
@@ -160,14 +147,11 @@ async fn handle_client(
     Ok(())
 }
 
-pub(crate) fn handle_command(
-    line:        &str,
-    bus:         &EventBus,
-    patch_tx:    &Arc<Mutex<Producer<Vec<Chain>>>>,
-    build_cfg:   &BuildConfig,
-    patch_state: &Arc<Mutex<PatchState>>,
-    cfg:         &Arc<Mutex<Config>>,
-) -> Result<(), String> {
+pub(crate) async fn handle_command(
+    line:      &str,
+    bus:       &EventBus,
+    master_tx: &mpsc::Sender<ConfigRequest>,
+) -> Result<()> {
     let (cmd, rest) = split_cmd(line);
 
     match cmd {
@@ -177,7 +161,7 @@ pub(crate) fn handle_command(
         "SET" => {
             let (path, val_str) = rest
                 .split_once(' ')
-                .ok_or("usage: SET <key.param> <value>")?;
+                .context("usage: SET <key.param> <value>")?;
             let val_str = val_str.trim();
             if let Ok(value) = val_str.parse::<f32>() {
                 bus.send(ControlMessage::SetParam { path: path.to_string(), value }).ok();
@@ -195,11 +179,10 @@ pub(crate) fn handle_command(
         // UPDATE <json-object>
         // ------------------------------------------------------------------
         "UPDATE" => {
-            let v: Value = serde_json::from_str(rest)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let v: Value = serde_json::from_str(rest)?;
             let pairs = patch::flatten_update(&v);
             if pairs.is_empty() {
-                return Err("no numeric values found in update object".into());
+                bail!("no numeric values found in update object");
             }
             for (path, value) in &pairs {
                 bus.send(ControlMessage::SetParam { path: path.clone(), value: *value }).ok();
@@ -208,20 +191,15 @@ pub(crate) fn handle_command(
         }
 
         // ------------------------------------------------------------------
-        // PATCH <json-object>   — too large for broadcast; direct path kept
+        // PATCH <json>
         // ------------------------------------------------------------------
         "PATCH" => {
-            let json_value: Value = serde_json::from_str(rest)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
-            let chains = patch::load_str(rest, build_cfg)
-                .map_err(|e| format!("patch build error: {e}"))?;
-            patch_tx
-                .lock().map_err(|_| "lock error")?
-                .push(chains).map_err(|_| "patch channel full")?;
-            if let Ok(mut s) = patch_state.lock() {
-                s.apply_patch(json_value);
-            }
-            Ok(())
+            let (tx, rx) = oneshot::channel();
+            master_tx.send(ConfigRequest::ApplyPatch {
+                json: rest.to_string(),
+                resp: Some(tx),
+            }).await?;
+            rx.await?
         }
 
         // ------------------------------------------------------------------
@@ -231,35 +209,36 @@ pub(crate) fn handle_command(
         }
 
         "PROGRAM" => {
-            let p: u8 = rest.trim()
+            let slot: u8 = rest.trim()
                 .parse()
-                .map_err(|_| "program number must be 0-127")?;
-            bus.send(ControlMessage::ProgramChange(p)).ok();
-            Ok(())
+                .context("program number must be 0-127")?;
+            let (tx, rx) = oneshot::channel();
+            master_tx.send(ConfigRequest::SwitchPreset { slot, resp: Some(tx) })
+                .await?;
+            bus.send(ControlMessage::ProgramChange(slot)).ok();
+            rx.await?
         }
 
         // ------------------------------------------------------------------
-        // SAVE_PRESET <slot>  — persist current chains to preset slot
+        // SAVE_PRESET <slot>
         // ------------------------------------------------------------------
         "SAVE_PRESET" => {
             let slot: u8 = rest.trim()
                 .parse()
-                .map_err(|_| "slot must be 0-127")?;
-            let chains_val = patch_state
-                .lock().map_err(|_| "lock error")?
-                .json["chains"].clone();
-            cfg.lock().map_err(|_| "lock error")?
-                .save_preset(slot, chains_val)
-                .map_err(|e| format!("save error: {e}"))?;
-            Ok(())
+                .context("slot must be 0-127")?;
+            let (tx, rx) = oneshot::channel();
+            master_tx.send(ConfigRequest::SavePreset { slot, resp: Some(tx) }).await?;
+            rx.await?
         }
 
         "COMPARE" => {
-            bus.send(ControlMessage::Compare).ok();
-            Ok(())
+            let (tx, rx) = oneshot::channel();
+            master_tx.send(ConfigRequest::ToggleCompare { resp: Some(tx) })
+                .await?;
+            rx.await?
         }
 
-        other => Err(format!("unknown command '{other}'")),
+        other => bail!("unknown command '{other}'"),
     }
 }
 

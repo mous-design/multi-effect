@@ -1,3 +1,102 @@
+# Basic design
+• main: cli/config, logging, bus, audio engine, master, http.
+• AudioEngine: owns both rtrbs internally, exposes push_patch() and push_control()
+• Master: owns config, snapshot, controller_map. All interfaces talk to it via master_tx with oneshot responses. Broadcasts changes on bus.
+• Bus: outbound only — hardware controllers listen for deltas
+• No watch channel — Devices gets full state via master_tx request, deltas via bus
+
+# Chains/controllers
+
+## Chains
+### Where chains live
+
+`AudioEngine.chains: Vec<Chain>` — that's the one and only owner of the live DSP chain. It lives on the audio thread.
+
+### How a new patch gets in
+
+1. ConfigMaster builds a new `Vec<Chain>` and calls `audio.push_patch(chains)`
+2. On every audio block, `AudioEngine::install_pending_patch()` pops from internal `patch_rx`
+3. It takes the **latest** one (drains the buffer, keeps only the last), calls `prepare()` on it, then:
+
+```rust
+self.chains = new_chains;
+```
+
+The old `Vec<Chain>` is simply **dropped** — Rust's ownership handles cleanup. The old effects, their delay buffers, looper memory — all freed automatically when the old vec goes out of scope. No explicit "clear" needed.
+
+### How SET reaches audio
+
+ConfigMaster calls `audio.push_control(msg)` which pushes into the internal `control_tx` ring buffer. The audio engine polls `control_rx` each block and calls `set_param` on the matching device. No chain rebuild — just a parameter tweak on the existing live objects.
+
+### Summary: two channels, two purposes
+
+| Channel | Type | Purpose |
+|---|---|---|
+| `control_rx` | `Consumer<ControlMessage>` | Parameter tweaks (SET, NoteOn, Reset) — cheap, no allocation |
+| `patch_rx` | `Consumer<Vec<Chain>>` | Full chain swap (PATCH, preset switch) — new graph replaces old |
+
+Both are lock-free `rtrb` ring buffers owned internally by AudioEngine. ConfigMaster uses `audio.push_control()` and `audio.push_patch()`. The audio thread never blocks. The old chain isn't "cleared" — it's replaced and dropped. That's the Rust way.
+
+## Controllers
+
+### 1. Build (startup, ConfigMaster)
+
+- One `Arc<RwLock<ControllerDef>>` is created per device alias, initially empty (`ControllerDef::default()`)
+- The active preset's controllers are written into the matching Arcs
+- The `controller_map` is owned by ConfigMaster
+
+### 2. Shared with device tasks
+
+When ConfigMaster spawns a device task (serial/MIDI/network), it passes `Arc::clone(controller_map[alias])` to that task. So the device task and the master both point to the **same** `ControllerDef`.
+
+- **Device task reads** it on every incoming message (to translate CTRL → SET)
+- **ConfigMaster writes** it on preset switch (`clear_controllers` + `apply_controllers`)
+
+### 3. Preset switch flow
+
+```
+clear_controllers()   → every Arc gets ControllerDef::default() (empty mappings)
+apply_controllers()   → for each ControllerDef in the new preset,
+                         write it into the matching Arc
+```
+
+The device tasks don't restart — they just see new mappings next time they read the Arc.
+
+### 4. Where they're persisted
+
+In `cfg.presets.items[n].controllers: Vec<ControllerDef>` — saved to disk as part of the preset. The Arcs are runtime-only shared state.
+
+### In short
+
+```
+Config (disk)                Runtime (shared)              Device tasks
+PresetDef.controllers  →  Arc<RwLock<ControllerDef>>  ←  read on every message
+                          ↑ written by ConfigMaster
+                            on preset switch
+```
+
+## Control devices
+### Changes
+Looking at the current code, device changes *are* supported — `handle_put_device`, `handle_delete_device`, `handle_rename_device` all exist. But they don't recreate the Arc. They work differently:
+
+- **Put (new/update)**: If the device becomes active, a new Arc is inserted into `controller_map` and a new task is spawned with it
+- **Delete**: The `watch::Sender` sends `false` to shut down the task, device removed from config
+- **Rename**: Config-level rename, no task restart
+
+So the Arcs are **not** recreated on reload or device changes. They're created once at startup (or when a new device is added via `handle_put_device`), and the device task keeps its reference forever. Only the *contents* get swapped on preset switch.
+
+For property changes on an existing device (like changing baud rate or port) — that's actually a gap right now. The task would need to be stopped and respawned to pick up new connection settings. The `device_active` watch channel gives you the mechanism (send `false`, then respawn), but I don't think `handle_put_device` does that for an already-active device whose properties changed. It only handles the active→inactive and inactive→active transitions.
+
+@todo look at this
+
+### init the controls
+`control.rs` makes sense — it already owns `ControlMessage` and `EventBus`. It's the natural home for the controller runtime setup.
+
+ConfigMaster builds the controller_map internally (via `build_controller_map()` in `control.rs`). On preset switch, `clear_controllers` + `apply_controllers` update the Arcs in place.
+
+@todo implement
+
+
 ### Preset change
 • controller must be able to (up/down, by nr) — todo?
 

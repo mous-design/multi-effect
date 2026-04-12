@@ -222,7 +222,7 @@ impl DeviceDef {
 /// mappings are cleared and replaced with the new preset's `controllers` list.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ControllerDef {
-    /// Alias matching a key in `Config.devices`.
+    /// Alias matching a key in `Config.control_devices`.
     pub device: String,
 
     /// MIDI channel override (MidiIn only).  If absent, inherits the channel from `DeviceDef`.

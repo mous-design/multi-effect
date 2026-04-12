@@ -6,6 +6,7 @@ pub mod serial;
 pub use network::NetworkControl;
 pub use serial::SerialControl;
 
+use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::{debug, warn};
 
@@ -48,24 +49,18 @@ pub enum ControlMessage {
 
     /// Toggle compare mode: swap between dirty state and saved preset.
     /// Sent by foot pedal (serial/net `COMPARE` command) or the UI.
+    #[allow(dead_code)]
     Compare,
-
-    /// Notification broadcast to WS clients when compare mode changes.
-    CompareChanged {
-        chains:      serde_json::Value,
-        is_dirty:    bool,
-        is_comparing: bool,
-    },
 }
 
 /// Broadcast channel used as the central pub/sub event bus.
 /// All control sources (TCP, MIDI, serial) publish here.
 /// All interested parties subscribe via `EventBus::subscribe()`.
-pub type EventBus = tokio::sync::broadcast::Sender<ControlMessage>;
+pub type EventBus = broadcast::Sender<ControlMessage>;
 
 /// Create a new event bus. The returned sender can be cloned for multiple publishers.
 pub fn new_event_bus() -> EventBus {
-    tokio::sync::broadcast::channel::<ControlMessage>(256).0
+    broadcast::channel::<ControlMessage>(256).0
 }
 
 // ---------------------------------------------------------------------------

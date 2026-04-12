@@ -1,10 +1,8 @@
 {
-  "active_preset": 2,
+  "audio_device": "default",
   "buffer_size": 256,
   "chains": [],
-  "delay_max_seconds": 2.0,
-  "device": "default",
-  "devices": {
+  "control_devices": {
     "midi in 1": {
       "active": true,
       "channel": "*",
@@ -32,6 +30,7 @@
       "type": "serial"
     }
   },
+  "delay_max_seconds": 2.0,
   "http_port": 8080,
   "in_channels": 2,
   "log_target": "stderr",
@@ -39,218 +38,16 @@
   "looper_max_seconds": 30.0,
   "out_channels": 2,
   "presets": {
-    "2": {
-      "chains": [
-        {
-          "input": [
-            1,
-            1
-          ],
-          "nodes": [
-            {
-              "active": true,
-              "feedback": 0.4,
-              "key": "02-delay",
-              "time": 0.3,
-              "type": "delay",
-              "wet": [
-                0.472,
-                0.472
-              ]
-            },
-            {
-              "active": true,
-              "depth_ms": 8,
-              "key": "04-chorus",
-              "rate_hz": 1,
-              "type": "chorus",
-              "wet": [
-                0.3,
-                0.3
-              ]
-            },
-            {
-              "active": true,
-              "damping": 0.5,
-              "key": "03-reverb",
-              "room_size": 0.5,
-              "type": "reverb",
-              "wet": [
-                0.3,
-                0.3
-              ]
-            },
-            {
-              "active": true,
-              "dry": [
-                0,
-                0
-              ],
-              "gain": 1,
-              "key": "01-mix",
-              "pan": 0,
-              "type": "mix",
-              "wet": [
-                1,
-                1
-              ]
-            },
-            {
-              "active": true,
-              "decay": 1,
-              "key": "05-looper",
-              "max_buffers": 3,
-              "overdub_count": 0,
-              "type": "looper",
-              "wet": 0.836
-            },
-            {
-              "active": true,
-              "freq": 200,
-              "gain_db": 0,
-              "key": "06-eq_low",
-              "type": "eq_low"
-            },
-            {
-              "active": true,
-              "freq": 81.86,
-              "gain_db": 0,
-              "key": "07-eq_param",
-              "q": 1,
-              "type": "eq_param"
-            },
-            {
-              "active": true,
-              "freq": 8000,
-              "gain_db": 15,
-              "key": "08-eq_high",
-              "type": "eq_high"
-            }
-          ],
-          "output": [
-            1,
-            2
-          ]
-        }
-      ],
-      "controllers": [
-        {
-          "device": "midi in 1",
-          "mappings": {
-            "70": {
-              "ctrl": [
-                0.0,
-                127.0
-              ],
-              "param": [
-                0.0,
-                127.0
-              ],
-              "target": "05-harmonizer.root"
-            }
-          }
-        }
-      ]
-    },
-    "3": {
-      "chains": [
-        {
-          "input": [
-            1,
-            1
-          ],
-          "nodes": [
-            {
-              "active": true,
-              "feedback": 0.4,
-              "key": "02-delay",
-              "time": 0.3,
-              "type": "delay",
-              "wet": [
-                0.472,
-                0.472
-              ]
-            },
-            {
-              "active": true,
-              "depth_ms": 8.0,
-              "key": "04-chorus",
-              "rate_hz": 1.0,
-              "type": "chorus",
-              "wet": [
-                0.3,
-                0.3
-              ]
-            },
-            {
-              "active": true,
-              "damping": 0.5,
-              "key": "03-reverb",
-              "room_size": 0.5,
-              "type": "reverb",
-              "wet": [
-                0.3,
-                0.3
-              ]
-            },
-            {
-              "active": true,
-              "dry": [
-                0.144,
-                0.144
-              ],
-              "gain": 1.0,
-              "key": "01-mix",
-              "pan": 0.0,
-              "type": "mix",
-              "wet": [
-                1.0,
-                1.0
-              ]
-            },
-            {
-              "active": true,
-              "decay": 1.0,
-              "key": "05-looper",
-              "max_buffers": 3.0,
-              "overdub_count": 0.0,
-              "type": "looper",
-              "wet": 0.836
-            },
-            {
-              "active": true,
-              "freq": 200.0,
-              "gain_db": 0.0,
-              "key": "06-eq_low",
-              "type": "eq_low"
-            },
-            {
-              "active": true,
-              "freq": 81.86,
-              "gain_db": 0.0,
-              "key": "07-eq_param",
-              "q": 1.0,
-              "type": "eq_param"
-            },
-            {
-              "active": true,
-              "freq": 8000.0,
-              "gain_db": 15.0,
-              "key": "08-eq_high",
-              "type": "eq_high"
-            }
-          ],
-          "output": [
-            1,
-            2
-          ]
-        }
-      ],
-      "controllers": []
-    }
+    "active": 1,
+    "items": [
+      {
+        "chains": [],
+        "controllers": [],
+        "index": 1
+      }
+    ]
   },
   "sample_rate": 96000,
   "state_save_interval": 300,
-  "state_save_path": "/tmp/multi-effect-state.json",
-  "verbose": true
+  "state_save_path": "/tmp/multi-effect-state.json"
 }
