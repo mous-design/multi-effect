@@ -71,7 +71,7 @@ pub fn router(state: AppState, ui_dist_path: &str) -> Router {
         .route("/api/reload",          post(post_reload))
         .route("/api/set",             post(post_set))
         .route("/api/action",          post(post_action))
-        .route("/api/patch",           post(post_patch))
+        .route("/api/chains",          post(post_chains))
         .route("/api/preset/:n",       post(post_preset))
         .route("/api/preset/:n/save",  post(post_save_preset))
         .route("/api/preset/:n",       delete(delete_preset))
@@ -151,11 +151,11 @@ async fn post_compare(State(s): State<AppState>) -> (StatusCode, RespJson) {
 }
 
 // ---------------------------------------------------------------------------
-// Patch
+// Chains
 // ---------------------------------------------------------------------------
 
-async fn post_patch(State(s): State<AppState>, Json(body): RespJson) -> (StatusCode, RespJson) {
-    s.ask_master(|tx| ConfigRequest::ApplyPatch { json: body.to_string(), resp: Some(tx) }).await
+async fn post_chains(State(s): State<AppState>, Json(body): RespJson) -> (StatusCode, RespJson) {
+    s.ask_master(|tx| ConfigRequest::SetChains { json: body.to_string(), resp: Some(tx) }).await
 }
 
 // ---------------------------------------------------------------------------

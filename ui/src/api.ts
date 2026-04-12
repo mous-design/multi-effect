@@ -26,8 +26,8 @@ export async function fetchConfig(): Promise<{
   return res.json();
 }
 
-export async function patchChains(chains: object[]): Promise<boolean> {
-  const res = await api('/api/patch', {
+export async function setChains(chains: object[]): Promise<boolean> {
+  const res = await api('/api/chains', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chains }),

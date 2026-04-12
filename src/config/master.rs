@@ -43,8 +43,8 @@ pub enum ConfigRequest {
     UpdateControllers { slot: u8, controllers: Vec<ControllerDef>, resp: OptionResp },
     ApplySet          { path: String, value: f32, resp: OptionResp },
 
-    // -- Patch (needs response) --
-    ApplyPatch        { json: String, resp: OptionResp },
+    // -- Chain structure update --
+    SetChains         { json: String, resp: OptionResp },
 
     // -- Fire-and-forget --
     ApplyControl(ControlMessage),
@@ -172,8 +172,8 @@ impl ConfigMaster {
             ConfigRequest::UpdateControllers { slot, controllers, resp } => {
                 Self::respond(resp, self.handle_update_controllers(slot, controllers));
             }
-            ConfigRequest::ApplyPatch { json, resp } => {
-                Self::respond(resp, self.handle_apply_patch(&json));
+            ConfigRequest::SetChains { json, resp } => {
+                Self::respond(resp, self.handle_set_chains(&json));
             }
             ConfigRequest::ApplySet { path, value, resp } => {
                 Self::respond(resp, self.handle_apply_set(&path, value));
@@ -339,17 +339,20 @@ impl ConfigMaster {
         Ok(())
     }
 
-    /// Receive json from websocket, this must be a complete preset!
-    fn handle_apply_patch(&mut self, json: &str) -> Result<()> {
-        let preset: PresetDef = serde_json::from_str(json)?;
+    /// Replace chains in the current preset (add/delete/reorder nodes or chains).
+    fn handle_set_chains(&mut self, json: &str) -> Result<()> {
+        let body: serde_json::Value = serde_json::from_str(json)?;
+        let chain_defs: Vec<ChainDef> = serde_json::from_value(
+            body.get("chains").cloned().unwrap_or_default()
+        )?;
 
-        let chains = self.build_chains(&preset.chains)?;
+        let chains = self.build_chains(&chain_defs)?;
         self.audio.push_patch(chains)
-            .context("patch channel full, preset not loaded")?;
-        self.clear_controllers();
-        self.apply_controllers(&preset.controllers);
-        self.snapshot.load_preset(preset, Dirty);
-        info!("Loaded preset from PATCH");
+            .context("patch channel full, patch not applied")?;
+        self.snapshot.preset.chains = chain_defs;
+        self.snapshot.state = Dirty;
+        self.notify_state_changed();
+        info!("Applied PATCH ({} chains)", self.snapshot.preset.chains.len());
         Ok(())
     }
 

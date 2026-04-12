@@ -21,7 +21,7 @@ use crate::engine::patch;
 /// SET  <key.param> <value>     — set a single parameter, e.g. SET 04-reverb.wet 0.6
 /// CTRL <channel_id> <value>    — mapped control (same as serial CTRL)
 /// UPDATE <json>                — partial patch update
-/// PATCH  <json>                — swap to a new patch (full chain array)
+/// CHAINS <json>                — replace chain structure (full chain array)
 /// RESET                        — reset all effect state
 /// PROGRAM <0-127>              — load preset number
 /// SAVE_PRESET <0-127>          — save current chains to preset slot in config.json
@@ -194,11 +194,11 @@ pub(crate) async fn handle_command(
         }
 
         // ------------------------------------------------------------------
-        // PATCH <json>
+        // CHAINS <json>
         // ------------------------------------------------------------------
-        "PATCH" => {
+        "CHAINS" => {
             let (tx, rx) = oneshot::channel();
-            master_tx.send(ConfigRequest::ApplyPatch {
+            master_tx.send(ConfigRequest::SetChains {
                 json: rest.to_string(),
                 resp: Some(tx),
             }).await?;
