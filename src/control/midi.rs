@@ -12,32 +12,23 @@ use crate::control::mapping::{ControllerDef, MidiChannel};
 // MidiControl  (MIDI input)
 // ---------------------------------------------------------------------------
 
-/// Opens a MIDI input port and forwards CC / Program Change events to the master.
-///
-/// CC events are looked up in the active `ControllerDef` mappings.  Unknown CC numbers
-/// are silently ignored (MIDI has no text fallback).
-///
-/// The `ControllerDef` is held behind an `Arc<RwLock>` so it can be swapped at runtime
-/// when a new preset is loaded.  The channel filter in `ControllerDef.channel` overrides
-/// the device-level default for the duration of the preset.
 pub struct MidiControl {
+    alias:           String,
     device_name:     Option<String>,
-    /// Channel filter from `DeviceDef::MidiIn` — used when the preset doesn't override it.
     default_channel: MidiChannel,
     pub mappings:    Arc<RwLock<ControllerDef>>,
 }
 
 impl MidiControl {
     pub fn new(
+        alias:           String,
         device_name:     Option<String>,
         default_channel: MidiChannel,
         mappings:        Arc<RwLock<ControllerDef>>,
     ) -> Self {
-        Self { device_name, default_channel, mappings }
+        Self { alias, device_name, default_channel, mappings }
     }
 
-    /// Open the MIDI input port and start forwarding messages to the master.
-    /// Spawns a background thread; returns immediately.
     pub fn run(self, master_tx: mpsc::Sender<ConfigRequest>) {
         let midi_in = match midir::MidiInput::new("multi-effect") {
             Ok(m)  => m,
@@ -74,6 +65,7 @@ impl MidiControl {
 
         let default_channel = self.default_channel;
         let mappings        = Arc::clone(&self.mappings);
+        let alias           = self.alias;
 
         let conn = midi_in.connect(
             port,
@@ -95,10 +87,12 @@ impl MidiControl {
                     _         => debug!("MIDI raw: {:02X?}", msg),
                 }
 
+                // Source ID: alias-ch{channel} (ch0 for omni)
+                let source = format!("{alias}-ch{channel}");
+
                 let ctrl_msg = match msg_type {
                     0xB0 if msg.len() >= 3 => {
                         let cfg    = mappings.read().unwrap();
-                        // Use preset channel override if present, otherwise device default.
                         let filter = cfg.channel.as_ref().unwrap_or(&default_channel);
                         if !filter.matches(channel) { return; }
 
@@ -109,57 +103,46 @@ impl MidiControl {
                             Some(ControlMessage::SetParam {
                                 path:  def.target.clone(),
                                 value: mapped,
+                                source: source.clone(),
                             })
                         } else {
-                            None // MIDI: no fallback for unmapped CC
+                            None
                         }
                     }
                     0xC0 if msg.len() >= 2 => {
                         debug!("MIDI ch{channel} Program Change {}", msg[1]);
-                        Some(ControlMessage::ProgramChange(msg[1]))
+                        Some(ControlMessage::ProgramChange { slot: msg[1], source: source.clone() })
                     }
-                    // Note On (velocity 0 = note off per MIDI spec)
                     0x90 if msg.len() >= 3 => {
                         let cfg    = mappings.read().unwrap();
                         let filter = cfg.channel.as_ref().unwrap_or(&default_channel);
-                        if !filter.matches(channel) {
-                            debug!("MIDI ch{channel} NoteOn note={} vel={} — filtered out", msg[1], msg[2]);
-                            return;
-                        }
+                        if !filter.matches(channel) { return; }
                         if msg[2] > 0 {
-                            debug!("MIDI ch{channel} NoteOn note={} vel={} → forwarded", msg[1], msg[2]);
                             Some(ControlMessage::NoteOn { note: msg[1], velocity: msg[2] })
                         } else {
-                            debug!("MIDI ch{channel} NoteOn note={} vel=0 → NoteOff", msg[1]);
                             Some(ControlMessage::NoteOff { note: msg[1] })
                         }
                     }
-                    // Note Off
                     0x80 if msg.len() >= 3 => {
                         let cfg    = mappings.read().unwrap();
                         let filter = cfg.channel.as_ref().unwrap_or(&default_channel);
-                        if !filter.matches(channel) {
-                            debug!("MIDI ch{channel} NoteOff note={} — filtered out", msg[1]);
-                            return;
-                        }
-                        debug!("MIDI ch{channel} NoteOff note={} → forwarded", msg[1]);
+                        if !filter.matches(channel) { return; }
                         Some(ControlMessage::NoteOff { note: msg[1] })
                     }
                     _ => None,
                 };
-                
+
                 let req = match ctrl_msg {
-                    Some(ControlMessage::SetParam { path, value }) =>
-                        Some(ConfigRequest::ApplySet { path, value, resp: None }),
-                    Some(ControlMessage::ProgramChange(p)) =>
-                        Some(ConfigRequest::SwitchPreset { slot: p, resp: None }),
+                    Some(ControlMessage::SetParam { path, value, source }) =>
+                        Some(ConfigRequest::ApplySet { path, value, source, resp: None }),
+                    Some(ControlMessage::ProgramChange { slot, .. }) =>
+                        Some(ConfigRequest::SwitchPreset { slot, resp: None }),
                     Some(ControlMessage::NoteOn { note, velocity }) =>
                         Some(ConfigRequest::ApplyControl(ControlMessage::NoteOn { note, velocity })),
                     Some(ControlMessage::NoteOff { note }) =>
                         Some(ConfigRequest::ApplyControl(ControlMessage::NoteOff { note })),
                     _ => None,
                 };
-                // If system locks up on many notes, try_send is the alternative.
                 if let Some(r) = req {
                     if master_tx.blocking_send(r).is_err() {
                         warn!("MIDI: master channel closed");
@@ -173,7 +156,7 @@ impl MidiControl {
         match conn {
             Ok(conn) => {
                 std::thread::spawn(move || {
-                    let _conn = conn; // keep alive
+                    let _conn = conn;
                     std::thread::park();
                 });
             }
@@ -186,15 +169,8 @@ impl MidiControl {
 // MidiOutControl  (MIDI output)
 // ---------------------------------------------------------------------------
 
-/// Subscribes to the event bus and sends MIDI CC messages for mapped parameter changes.
-///
-/// - `SetParam` with a matching mapping → CC on the configured output channel.
-/// - `ProgramChange`                    → MIDI Program Change on the output channel.
-/// - `Reset`                            → ignored (no MIDI equivalent).
-/// - Unmapped `SetParam`                → silently ignored.
 pub struct MidiOutControl {
     device_name: Option<String>,
-    /// 1-based MIDI channel to send on (from `DeviceDef::MidiOut.channel`).
     out_channel: u8,
     pub mappings: Arc<RwLock<ControllerDef>>,
 }
@@ -208,8 +184,6 @@ impl MidiOutControl {
         Self { device_name, out_channel, mappings }
     }
 
-    /// Open the MIDI output port and start consuming bus events.
-    /// Spawns a background thread; returns immediately.
     pub fn run(self, bus: EventBus) {
         let mut bus_rx = bus.subscribe();
         std::thread::spawn(move || {
@@ -251,18 +225,17 @@ impl MidiOutControl {
                 Err(e) => { error!("MIDI out connect error: {e}"); return; }
             };
 
-            // channel byte: 0-based for MIDI status byte
             let ch_byte = (self.out_channel.saturating_sub(1)) & 0x0F;
             let mappings = self.mappings;
 
             loop {
                 let msg = match bus_rx.blocking_recv() {
                     Ok(m)  => m,
-                    Err(_) => break, // bus closed
+                    Err(_) => break,
                 };
 
                 match msg {
-                    ControlMessage::SetParam { ref path, value } => {
+                    ControlMessage::SetParam { ref path, value, .. } => {
                         let cfg = mappings.read().unwrap();
                         if let Some((cc_str, def)) = cfg.channel_for_target(path) {
                             if let Ok(cc) = cc_str.parse::<u8>() {
@@ -271,19 +244,18 @@ impl MidiOutControl {
                                 let _ = conn.send(&[0xB0 | ch_byte, cc, raw]);
                             }
                         }
-                        // else: silently ignore unmapped params
                     }
-                    ControlMessage::ProgramChange(p) => {
-                        let _ = conn.send(&[0xC0 | ch_byte, p]);
+                    ControlMessage::ProgramChange { slot, .. } => {
+                        let _ = conn.send(&[0xC0 | ch_byte, slot]);
                     }
-                    ControlMessage::Reset
+                    ControlMessage::Reset { .. }
                     | ControlMessage::NoteOn         { .. }
                     | ControlMessage::NoteOff        { .. }
                     | ControlMessage::Action         { .. }
                     | ControlMessage::NodeEvent      { .. }
                     | ControlMessage::PresetLoaded   { .. }
                     | ControlMessage::StateChanged   { .. }
-                                     => {} // not forwarded to MIDI out
+                                     => {}
                 }
             }
         });

@@ -7,7 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::config::master::ConfigRequest;
-use crate::control::{apply_ctrl, outbound_line, ControlMessage, EventBus};
+use crate::control::{apply_ctrl, connection_id, outbound_line, ControlMessage, EventBus};
 use crate::control::mapping::ControllerDef;
 use crate::engine::patch;
 
@@ -32,6 +32,7 @@ use crate::engine::patch;
 ///
 /// Multiple clients per port are handled concurrently via `tokio::spawn`.
 pub struct NetworkControl {
+    alias:       String,
     host:        String,
     port:        u16,
     fallback:    bool,
@@ -42,6 +43,7 @@ pub struct NetworkControl {
 
 impl NetworkControl {
     pub fn new(
+        alias:     String,
         host:      String,
         port:      u16,
         fallback:  bool,
@@ -49,7 +51,7 @@ impl NetworkControl {
         mappings:  Arc<RwLock<ControllerDef>>,
         master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { host, port, fallback, bus, mappings, master_tx }
+        Self { alias, host, port, fallback, bus, mappings, master_tx }
     }
 
     pub async fn run(
@@ -71,9 +73,10 @@ impl NetworkControl {
                     let mappings  = Arc::clone(&self.mappings);
                     let fallback  = self.fallback;
                     let master_tx = self.master_tx.clone();
+                    let alias     = self.alias.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_client(socket, bus, mappings, fallback, master_tx).await {
+                        if let Err(e) = handle_client(socket, bus, mappings, fallback, master_tx, &alias).await {
                             tracing::warn!("Client {addr}: {e}");
                         }
                     });
@@ -95,7 +98,9 @@ async fn handle_client(
     mappings:  Arc<RwLock<ControllerDef>>,
     fallback:  bool,
     master_tx: mpsc::Sender<ConfigRequest>,
+    alias:     &str,
 ) -> Result<()> {
+    let source = connection_id(alias);
     let (reader, writer) = socket.into_split();
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
@@ -103,15 +108,19 @@ async fn handle_client(
     let mut bus_rx    = bus.subscribe();
     let writer_out    = Arc::clone(&writer);
     let mappings_out  = Arc::clone(&mappings);
+    let source_out    = source.clone();
     tokio::spawn(async move {
         while let Ok(msg) = bus_rx.recv().await {
+            // Skip messages originating from this connection
+            if msg.source() == source_out { continue; }
+
             let line = match &msg {
-                ControlMessage::SetParam { path, value } => {
+                ControlMessage::SetParam { path, value, .. } => {
                     let cfg = mappings_out.read().unwrap();
                     outbound_line(path, *value, &cfg)
                 }
-                ControlMessage::ProgramChange(n) => format!("PROGRAM {n}\n"),
-                ControlMessage::Reset            => "RESET\n".to_string(),
+                ControlMessage::ProgramChange { slot, .. } => format!("PROGRAM {slot}\n"),
+                ControlMessage::Reset { .. }               => "RESET\n".to_string(),
                 ControlMessage::NoteOn          { .. }
                 | ControlMessage::NoteOff       { .. }
                 | ControlMessage::Action        { .. }
@@ -136,10 +145,10 @@ async fn handle_client(
 
         let response = if line.starts_with("CTRL ") {
             let cfg = mappings.read().unwrap();
-            apply_ctrl(&line, &cfg, fallback, &bus);
+            apply_ctrl(&line, &cfg, fallback, &bus, &source);
             "OK\n".to_string()
         } else {
-            match handle_command(&line, &bus, &master_tx).await {
+            match handle_command(&line, &bus, &master_tx, &source).await {
                 Ok(())  => "OK\n".to_string(),
                 Err(e)  => format!("ERR {e}\n"),
             }
@@ -154,8 +163,10 @@ pub(crate) async fn handle_command(
     line:      &str,
     bus:       &EventBus,
     master_tx: &mpsc::Sender<ConfigRequest>,
+    source:    &str,
 ) -> Result<()> {
     let (cmd, rest) = split_cmd(line);
+    let src = source.to_string();
 
     match cmd {
         // ------------------------------------------------------------------
@@ -167,12 +178,13 @@ pub(crate) async fn handle_command(
                 .context("usage: SET <key.param> <value>")?;
             let val_str = val_str.trim();
             if let Ok(value) = val_str.parse::<f32>() {
-                bus.send(ControlMessage::SetParam { path: path.to_string(), value }).ok();
+                bus.send(ControlMessage::SetParam { path: path.to_string(), value, source: src }).ok();
             } else {
                 // Non-numeric value → action dispatch (e.g. "SET 01-looper.action rec")
                 bus.send(ControlMessage::Action {
                     path:   path.to_string(),
                     action: val_str.to_string(),
+                    source: src,
                 }).ok();
             }
             Ok(())
@@ -188,7 +200,7 @@ pub(crate) async fn handle_command(
                 bail!("no numeric values found in update object");
             }
             for (path, value) in &pairs {
-                bus.send(ControlMessage::SetParam { path: path.clone(), value: *value }).ok();
+                bus.send(ControlMessage::SetParam { path: path.clone(), value: *value, source: src.clone() }).ok();
             }
             Ok(())
         }
@@ -207,7 +219,7 @@ pub(crate) async fn handle_command(
 
         // ------------------------------------------------------------------
         "RESET" => {
-            bus.send(ControlMessage::Reset).ok();
+            bus.send(ControlMessage::Reset { source: src }).ok();
             Ok(())
         }
 
@@ -218,7 +230,7 @@ pub(crate) async fn handle_command(
             let (tx, rx) = oneshot::channel();
             master_tx.send(ConfigRequest::SwitchPreset { slot, resp: Some(tx) })
                 .await?;
-            bus.send(ControlMessage::ProgramChange(slot)).ok();
+            bus.send(ControlMessage::ProgramChange { slot, source: src }).ok();
             rx.await?
         }
 

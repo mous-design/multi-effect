@@ -17,7 +17,7 @@ case "$TASK" in
     cargo run
     ;;
   -v|-f)
-    cargo run -- "$@"
+    cargo run -- "$TASK" "$@"
     ;;
   -h|*)
     echo "Usage: ./run <command>

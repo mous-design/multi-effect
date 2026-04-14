@@ -231,16 +231,16 @@ impl AudioEngine {
     fn drain_control(&mut self) {
         while let Ok(msg) = self.control_rx.pop() {
             match msg {
-                ControlMessage::SetParam { path, value } => {
+                ControlMessage::SetParam { path, value, ref source } => {
                     let handled = self.chains.iter_mut().any(|c| c.set_param(&path, ParamValue::Float(value)).is_ok());
                     if !handled {
-                        warn!("SET '{path}': unknown parameter");
+                        warn!("SET '{path}' {value:.4} [source={source}]: unknown parameter");
                     }
                 }
-                ControlMessage::ProgramChange(p) => {
-                    for chain in &mut self.chains { chain.on_program_change(p); }
+                ControlMessage::ProgramChange { slot, .. } => {
+                    for chain in &mut self.chains { chain.on_program_change(slot); }
                 }
-                ControlMessage::Reset => {
+                ControlMessage::Reset { .. } => {
                     for chain in &mut self.chains { chain.reset(); }
                 }
                 ControlMessage::NoteOn { note, velocity } => {
@@ -249,7 +249,7 @@ impl AudioEngine {
                 ControlMessage::NoteOff { note } => {
                     for chain in &mut self.chains { chain.on_note_off(note); }
                 }
-                ControlMessage::Action { path, action } => {
+                ControlMessage::Action { path, action, .. } => {
                     let handled = self.chains.iter_mut().any(|c| c.dispatch_action(&path, &action).is_ok());
                     if !handled {
                         warn!("ACTION '{path}' '{action}': no handler");

@@ -132,7 +132,7 @@ async fn post_set(State(s): State<AppState>, Json(body): Json<SetBody>) -> (Stat
         serde_json::Value::Bool(b)   => if *b { 1.0 } else { 0.0 },
         _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "Unknown value type" }))),
     };
-    s.ask_master(|tx| ConfigRequest::ApplySet { path: body.path, value: value, resp: Some(tx) }).await
+    s.ask_master(|tx| ConfigRequest::ApplySet { path: body.path, value, source: "http".into(), resp: Some(tx) }).await
 }
 
 #[derive(Deserialize)]
@@ -142,7 +142,7 @@ struct ActionBody {
 }
 
 async fn post_action(State(s): State<AppState>, Json(body): Json<ActionBody>) -> StatusCode {
-    s.bus.send(ControlMessage::Action { path: body.target, action: body.action }).ok();
+    s.bus.send(ControlMessage::Action { path: body.target, action: body.action, source: "http".into() }).ok();
     StatusCode::OK
 }
 
@@ -194,6 +194,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let mut bus_rx = state.bus.subscribe();
     let master_tx = state.master_tx.clone();
+    let source = crate::control::connection_id("ws");
 
     // Push initial snapshot so the UI can render immediately.
     if let Ok(snap) = state.request(|tx| ConfigRequest::GetSnapshot { resp: tx }).await {
@@ -210,13 +211,14 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     }
 
+    // Outbound: bus → WS client (NO filtering — UI must see all messages)
     let send_task = tokio::spawn(async move {
         while let Ok(msg) = bus_rx.recv().await {
             let json: Option<serde_json::Value> = match msg {
-                ControlMessage::SetParam { path, value } =>
+                ControlMessage::SetParam { path, value, .. } =>
                     Some(serde_json::json!({ "type": "set", "path": path, "value": value })),
-                ControlMessage::ProgramChange(_) => None,
-                ControlMessage::Reset =>
+                ControlMessage::ProgramChange { .. } => None,
+                ControlMessage::Reset { .. } =>
                     Some(serde_json::json!({ "type": "reset" })),
                 ControlMessage::NodeEvent { key, event, data } =>
                     Some(serde_json::json!({ "type": "node_event", "key": key, "event": event, "data": data })),
@@ -232,7 +234,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Receive from client
+    // Inbound: WS client → bus
     while let Some(Ok(msg)) = stream.next().await {
         if let Message::Text(text) = msg {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -241,7 +243,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         if let (Some(path), Some(value)) = (v["path"].as_str(), v["value"].as_f64()) {
                             debug!("WS SET {path} {value}");
                             state.bus.send(ControlMessage::SetParam {
-                                path: path.to_string(), value: value as f32,
+                                path: path.to_string(), value: value as f32, source: source.clone(),
                             }).ok();
                         }
                     }
@@ -249,7 +251,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         if let Some(n) = v["n"].as_u64() {
                             let slot = n as u8;
                             master_tx.send(ConfigRequest::SwitchPreset { slot, resp: None }).await.ok();
-                            state.bus.send(ControlMessage::ProgramChange(slot)).ok();
+                            state.bus.send(ControlMessage::ProgramChange { slot, source: source.clone() }).ok();
                         }
                     }
                     _ => {}

@@ -150,11 +150,11 @@
             "nodes": [
               {
                 "active": true,
-                "feedback": 0,
+                "feedback": 0.616,
                 "key": "01-delay",
-                "time": 0,
+                "time": 0.626,
                 "type": "delay",
-                "wet": 0
+                "wet": 1.0
               }
             ],
             "output": [

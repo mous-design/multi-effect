@@ -39,7 +39,7 @@ pub enum ConfigRequest {
     DeleteDevice      { alias: String, resp: OptionResp },
     RenameDevice      { old_alias: String, new_alias: String, def: DeviceDef, resp: OptionResp },
     UpdateControllers { controllers: Vec<ControllerDef>, resp: OptionResp },
-    ApplySet          { path: String, value: f32, resp: OptionResp },
+    ApplySet          { path: String, value: f32, source: String, resp: OptionResp },
 
     // -- Chain structure update --
     SetChains         { json: String, resp: OptionResp },
@@ -112,6 +112,18 @@ impl ConfigMaster {
     async fn run(mut self, mut rx: mpsc::Receiver<ConfigRequest>) {
         self.spawn_initial_devices();
 
+        // Push initial preset to audio engine.
+        match self.build_chains(&self.snapshot.preset.chains.clone()) {
+            Ok(chains) => {
+                if let Err(e) = self.audio.push_patch(chains) {
+                    warn!("Initial patch push failed: {e}");
+                }
+                self.apply_controllers(&self.snapshot.preset.controllers.clone());
+                info!("Loaded initial preset {}", self.snapshot.preset.index);
+            }
+            Err(e) => warn!("Initial chain build failed: {e}"),
+        }
+
         while let Some(req) = rx.recv().await {
             self.handle(req);
         }
@@ -166,8 +178,8 @@ impl ConfigMaster {
             ConfigRequest::SetChains { json, resp } => {
                 Self::respond(resp, self.handle_set_chains(&json));
             }
-            ConfigRequest::ApplySet { path, value, resp } => {
-                Self::respond(resp, self.handle_apply_set(&path, value));
+            ConfigRequest::ApplySet { path, value, source, resp } => {
+                Self::respond(resp, self.handle_apply_set(&path, value, &source));
             }
             ConfigRequest::ApplyControl(_msg) => {
                 // @todo: forward to audio + bus
@@ -352,11 +364,12 @@ impl ConfigMaster {
         Ok(())
     }
 
-    fn handle_apply_set(&mut self, path: &String, value: f32) -> Result<()> {
+    fn handle_apply_set(&mut self, path: &String, value: f32, source: &str) -> Result<()> {
+        debug!("SET {path} {value:.4} [source={source}]");
         if self.snapshot.apply_set(&path, value)? {
             self.notify_state_changed();
         }
-        let cm = ControlMessage::SetParam { path:path.clone(), value };
+        let cm = ControlMessage::SetParam { path: path.clone(), value, source: source.to_string() };
         self.audio.push_control(cm.clone())?;
         self.bus.send(cm).ok();
         Ok(())
@@ -534,7 +547,7 @@ impl ConfigMaster {
         match def {
             DeviceDef::Serial { dev, baud, fallback, .. } => {
                 let serial = SerialControl::new(
-                    dev.clone(), *baud, *fallback, bus, mappings, master_tx,
+                    alias.to_string(), dev.clone(), *baud, *fallback, bus, mappings, master_tx,
                 );
                 let alias = alias.to_string();
                 tokio::spawn(async move {
@@ -545,7 +558,7 @@ impl ConfigMaster {
             }
             DeviceDef::Net { host, port, fallback, .. } => {
                 let net = NetworkControl::new(
-                    host.clone(), *port, *fallback, bus.clone(), mappings, master_tx,
+                    alias.to_string(), host.clone(), *port, *fallback, bus.clone(), mappings, master_tx,
                 );
                 let alias = alias.to_string();
                 tokio::spawn(async move {
@@ -555,7 +568,7 @@ impl ConfigMaster {
                 });
             }
             DeviceDef::MidiIn { dev, channel, .. } => {
-                let midi = MidiControl::new(dev.clone(), channel.clone(), mappings);
+                let midi = MidiControl::new(alias.to_string(), dev.clone(), channel.clone(), mappings);
                 midi.run(master_tx);
             }
             DeviceDef::MidiOut { dev, channel, .. } => {

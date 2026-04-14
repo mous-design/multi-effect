@@ -14,6 +14,16 @@ pub enum ParamValue {
     Bool(bool),
 }
 
+impl std::fmt::Display for ParamValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParamValue::Float(v)      => write!(f, "{v:.4}"),
+            ParamValue::Stereo([l,r]) => write!(f, "[{l:.4},{r:.4}]"),
+            ParamValue::Bool(b)       => write!(f, "{b}"),
+        }
+    }
+}
+
 impl ParamValue {
     /// Convert to `[left, right]`, or an error if the variant cannot be represented as stereo.
     ///

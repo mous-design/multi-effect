@@ -245,7 +245,7 @@ impl Chain {
             for node in &mut self.nodes {
                 if node.key() == key {
                     match node.set_param(rest, value) {
-                        Ok(())  => debug!("SET {param}"),
+                        Ok(())  => debug!("SET {param} = {value}"),
                         Err(e)  => warn!("{e}"),
                     }
                     return Ok(());

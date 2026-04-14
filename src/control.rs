@@ -6,62 +6,61 @@ pub mod serial;
 pub use network::NetworkControl;
 pub use serial::SerialControl;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::{debug, warn};
 
+// ---------------------------------------------------------------------------
+// Connection ID generator
+// ---------------------------------------------------------------------------
+
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Generate a unique source ID for a connection.
+/// Format: `{sanitized_alias}-{counter}`, e.g. `net-1-4`, `serial-1-1`.
+pub fn connection_id(alias: &str) -> String {
+    let sanitized: String = alias.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+    format!("{sanitized}-{id}")
+}
+
+// ---------------------------------------------------------------------------
+// ControlMessage
+// ---------------------------------------------------------------------------
+
 /// Messages published on the event bus and forwarded to the audio thread.
+/// Variants that originate from external controllers carry a `source` field
+/// so that outbound tasks can skip echoing messages back to the sender.
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
-    /// Set a named parameter on a device in the signal graph.
-    /// `path` has the form `"effect.param"`, e.g. `"delay.feedback"`.
-    SetParam { path: String, value: f32 },
+    SetParam { path: String, value: f32, source: String },
+    ProgramChange { slot: u8, source: String },
+    Reset { source: String },
+    Action { path: String, action: String, source: String },
 
-    /// MIDI Program Change → load preset number `p`.
-    ProgramChange(u8),
-
-    /// Reset all internal state (equivalent to switching to the same patch).
-    Reset,
-
-    /// MIDI Note On — forwarded to all Device nodes in all chains.
+    // System events — no source needed, no echo risk.
     NoteOn  { note: u8, velocity: u8 },
-
-    /// MIDI Note Off — forwarded to all Device nodes in all chains.
     NoteOff { note: u8 },
+    NodeEvent { key: String, event: String, data: serde_json::Value },
+    PresetLoaded { preset: serde_json::Value, preset_indices: Vec<u8>, state: String },
+    StateChanged { state: String, preset_index: u8, preset_indices: Vec<u8> },
+}
 
-    /// Dispatch a named action string to a device parameter.
-    /// `path` has the form `"01-looper.action"` or just `"01-looper"`.
-    /// Used for looper combined actions: "rec", "play", "stop", "reset",
-    /// "rec-play-stop-rec", etc.
-    Action { path: String, action: String },
-
-    /// A generic event emitted by a node (e.g. Looper state change, loop wrap).
-    /// Consumed by the WebSocket layer to push to the UI.
-    /// Never forwarded to the audio thread.
-    NodeEvent {
-        /// The originating node's key, e.g. `"05-looper"`.
-        key: String,
-        /// Event name, e.g. `"looper_state"` or `"loop_wrap"`.
-        event: String,
-        /// Event payload as a JSON object.
-        data: serde_json::Value,
-    },
-
-    /// Full preset loaded (preset switch, compare toggle, reset).
-    /// Pushed to WS so the UI can replace its entire state without re-fetching.
-    PresetLoaded {
-        preset: serde_json::Value,
-        preset_indices: Vec<u8>,
-        state: String,
-    },
-
-    /// Snapshot state changed (e.g. after save: Dirty → Clean).
-    /// Carries updated metadata without the full preset payload.
-    StateChanged {
-        state: String,
-        preset_index: u8,
-        preset_indices: Vec<u8>,
-    },
+impl ControlMessage {
+    /// Returns the source identifier for messages that carry one, empty string otherwise.
+    pub fn source(&self) -> &str {
+        match self {
+            Self::SetParam { source, .. }
+            | Self::ProgramChange { source, .. }
+            | Self::Reset { source, .. }
+            | Self::Action { source, .. } => source,
+            _ => "",
+        }
+    }
 }
 
 /// Broadcast channel used as the central pub/sub event bus.
@@ -82,7 +81,7 @@ pub fn new_event_bus() -> EventBus {
 /// - If the channel ID is in `mappings`, convert and publish `SetParam`.
 /// - If not found and `fallback` is true, publish `SetParam { path: channel_id, value: raw }`.
 /// - If not found and `fallback` is false, silently ignore.
-pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, bus: &EventBus) {
+pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, bus: &EventBus, source: &str) {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     if parts.len() != 3 {
         warn!("Malformed CTRL command: {line}");
@@ -96,11 +95,11 @@ pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, b
 
     if let Some(def) = mappings.mappings.get(channel_id) {
         let value = def.to_param(raw);
-        debug!("CTRL {channel_id} {raw} → SET {} {value:.4}", def.target);
-        bus.send(ControlMessage::SetParam { path: def.target.clone(), value }).ok();
+        debug!("CTRL {channel_id} {raw} → SET {} {value:.4} [source={source}]", def.target);
+        bus.send(ControlMessage::SetParam { path: def.target.clone(), value, source: source.to_string() }).ok();
     } else if fallback {
-        debug!("CTRL {channel_id} {raw} → SET {channel_id} {raw} (fallback)");
-        bus.send(ControlMessage::SetParam { path: channel_id.to_string(), value: raw }).ok();
+        debug!("CTRL {channel_id} {raw} → SET {channel_id} {raw} (fallback) [source={source}]");
+        bus.send(ControlMessage::SetParam { path: channel_id.to_string(), value: raw, source: source.to_string() }).ok();
     }
     // else: dedicated controller mode — unknown channels are silently ignored
 }
@@ -112,6 +111,6 @@ pub(crate) fn outbound_line(path: &str, value: f32, mappings: &ControllerDef) ->
     if let Some((ch, def)) = mappings.channel_for_target(path) {
         format!("CTRL {ch} {}\n", def.to_ctrl_str(value))
     } else {
-        format!("SET {path} {value}\n")
+        format!("SET {path} {value:.4}\n")
     }
 }
