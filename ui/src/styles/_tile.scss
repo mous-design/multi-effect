@@ -1,0 +1,253 @@
+@use 'variables' as *;
+
+// ── Tile ──────────────────────────────────────────────────────────────────────
+.tile {
+    background: var(--bg-tile);
+    border: 1px solid var(--border-tile);
+    border-radius: $radius-md;
+    min-width: 140px;
+    transition: opacity 0.2s;
+
+    &.inactive {
+        opacity: 0.45;
+    }
+}
+
+.tile-header {
+    display: flex;
+    align-items: center;
+    padding: 5px $gap;
+    border-bottom: 1px solid var(--border);
+    gap: $gap-sm;
+
+    .toggle {
+        flex-direction: row;
+        padding: 0;
+        gap: 0;
+        flex-shrink: 0;
+    }
+}
+
+.tile-header-spacer {
+    width: 32px;
+    flex-shrink: 0;
+}
+
+.tile-type {
+    flex: 1;
+    text-align: center;
+    font-weight: 600;
+    font-size: $font;
+    color: var(--text-strong);
+}
+
+.tile-delete {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: $font-lg;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 $gap-xs;
+    border-radius: $radius-sm;
+    flex-shrink: 0;
+
+    &:hover {
+        color: var(--delete-hover-fg);
+        background: var(--delete-hover-bg);
+    }
+}
+
+.tile-params {
+    display: flex;
+    flex-wrap: nowrap;
+    flex-grow: 1;
+    gap: 6px;
+    padding: $gap $gap-md;
+    align-items: flex-end;
+    overflow-x: auto;
+}
+
+// ── Param cell ───────────────────────────────────────────────────────────────
+.param-cell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: $gap-xs;
+
+    &.param-hidden {
+        opacity: 0.5;
+    }
+
+    &:hover .param-vis-btn {
+        opacity: 1;
+    }
+
+    &.param-hidden .param-vis-btn {
+        opacity: 0.7;
+    }
+}
+
+.param-vis-btn {
+    position: absolute;
+    top: -2px;
+    right: 2px;
+    background: none;
+    border: none;
+    padding: 0;
+    line-height: 1;
+    color: var(--text-dim);
+    cursor: pointer;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 0.15s;
+
+    &:hover {
+        color: var(--accent);
+    }
+}
+
+// ── Tile body + sidebar ──────────────────────────────────────────────────────
+.tile-body {
+    display: flex;
+    flex-direction: row;
+    flex: 1;
+}
+
+.tile-sidebar {
+    width: 24px;
+    min-width: 24px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tile-expand {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 0;
+    gap: $gap-xs;
+
+    &:hover {
+        color: var(--accent);
+    }
+}
+
+.tile-expand-arrow {
+    font-size: 24px;
+    line-height: 1;
+}
+
+.tile-expand-count {
+    font-size: $font;
+    line-height: 1;
+}
+
+// ── Knob ──────────────────────────────────────────────────────────────────────
+.knob {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 64px;
+}
+
+.knob svg {
+    display: block;
+}
+
+.knob-value {
+    font-size: $font-sm;
+    color: var(--text-value);
+    margin-top: -8px;
+}
+
+.knob-label {
+    font-size: $font-sm;
+    color: var(--text-dim);
+}
+
+// ── Toggle ────────────────────────────────────────────────────────────────────
+.toggle {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: $gap-sm;
+    cursor: pointer;
+    padding: $gap-sm;
+}
+
+.toggle-track {
+    width: 32px;
+    height: 16px;
+    border-radius: $gap;
+    position: relative;
+    transition: background 0.2s;
+
+    &.on {
+        background: var(--accent);
+    }
+
+    &.off {
+        background: var(--toggle-off);
+    }
+}
+
+.toggle-thumb {
+    position: absolute;
+    top: 2px;
+    width: 12px;
+    height: 12px;
+    background: white;
+    border-radius: 50%;
+    transition: left 0.2s;
+
+    .toggle-track.on & {
+        left: 18px;
+    }
+
+    .toggle-track.off & {
+        left: 2px;
+    }
+}
+
+.toggle-label {
+    font-size: $font-sm;
+    color: var(--text-dim);
+}
+
+// ── EQ connected group ───────────────────────────────────────────────────────
+.eq-group-wrapper {
+    display: flex;
+    flex-direction: row;
+
+    .tile {
+        border-radius: 0;
+        max-width: none;
+        min-width: 0;
+    }
+
+    .eq-band-wrapper:first-child .tile {
+        border-top-left-radius: $radius-md;
+        border-bottom-left-radius: $radius-md;
+    }
+
+    .eq-band-wrapper:last-child .tile {
+        border-top-right-radius: $radius-md;
+        border-bottom-right-radius: $radius-md;
+    }
+
+    .eq-band-wrapper:not(:last-child) .tile {
+        border-right: none;
+    }
+}

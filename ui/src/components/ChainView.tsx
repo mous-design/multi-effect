@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
-import { ChainDef, DeviceMap, NodeDef } from '../types';
+import { ChainDef, ControllerDef, DeviceMap, NodeDef } from '../types';
 import { EffectTile } from './EffectTile';
 import { MappingsPanel } from './MappingsPanel';
+import { ConfirmDelete } from './ConfirmDelete';
 import { t } from '../i18n';
 
 const EQ_TYPES = new Set(['eq_param', 'eq_low', 'eq_high']);
@@ -53,6 +54,7 @@ interface Props {
   chainIdx: number;
   chain: ChainDef;
   presetName: string;
+  controllers: ControllerDef[];
   devices: DeviceMap;
   allNodes: NodeDef[];
   delayMaxSeconds: number;
@@ -62,11 +64,11 @@ interface Props {
   onAddNode: (chainIdx: number, node: NodeDef) => void;
   onDeleteChain: (chainIdx: number) => void;
   onRouting: (chainIdx: number) => void;
+  onSaveControllers: (controllers: ControllerDef[]) => void;
 }
 
-export function ChainView({ chainIdx, chain, presetName, devices, allNodes, delayMaxSeconds, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting }: Props) {
+export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, delayMaxSeconds, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
   const items = groupNodes(chain.nodes);
-  const presetNum = parseInt(presetName, 10);
 
   const [mappingsOpen, setMappingsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -169,11 +171,11 @@ export function ChainView({ chainIdx, chain, presetName, devices, allNodes, dela
           in [{chain.input.join(',')}] → out [{chain.output.join(',')}]
         </button>
         {confirmDelete ? (
-          <div className="chain-confirm-group">
-            <span className="chain-confirm-text">{t('ui.confirm_delete_chain')}</span>
-            <button className="chain-confirm-yes" onClick={() => { setConfirmDelete(false); onDeleteChain(chainIdx); }}>✓</button>
-            <button className="chain-confirm-no"  onClick={() => setConfirmDelete(false)}>✗</button>
-          </div>
+          <ConfirmDelete
+            message={t('ui.confirm_delete_chain')}
+            onConfirm={() => { setConfirmDelete(false); onDeleteChain(chainIdx); }}
+            onCancel={() => setConfirmDelete(false)}
+          />
         ) : (
           <button
             className="tile-delete chain-delete"
@@ -184,9 +186,10 @@ export function ChainView({ chainIdx, chain, presetName, devices, allNodes, dela
       </div>
       {mappingsOpen && (
         <MappingsPanel
-          presetNum={presetNum}
+          controllers={controllers}
           devices={devices}
           allNodes={allNodes}
+          onSave={onSaveControllers}
           onClose={() => setMappingsOpen(false)}
         />
       )}

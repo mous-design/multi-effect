@@ -1,33 +1,30 @@
 import { useState } from 'react';
 import { t } from '../i18n';
+import { RoutingSelect } from './RoutingSelect';
+import { ConfirmDelete } from './ConfirmDelete';
 
 interface Props {
     hasChains: boolean;
+    inChannels: number;
+    outChannels: number;
     onNewChain: (input: [number, number], output: [number, number]) => void;
     onDeletePreset: () => void;
 }
 
-function parseChannels(s: string): [number, number] {
-    const parts = s.split(',').map(p => parseInt(p.trim(), 10)).filter(n => !isNaN(n));
-    if (parts.length === 1) return [parts[0], parts[0]];
-    if (parts.length >= 2) return [parts[0], parts[1]];
-    return [1, 1];
-}
-
-export function BottomBar({ hasChains, onNewChain, onDeletePreset }: Props) {
+export function BottomBar({ hasChains, inChannels, outChannels, onNewChain, onDeletePreset }: Props) {
     const [showForm, setShowForm] = useState(false);
-    const [input, setInput] = useState('1,1');
-    const [output, setOutput] = useState('1,2');
+    const [input, setInput] = useState<[number, number]>([1, Math.min(2, inChannels)]);
+    const [output, setOutput] = useState<[number, number]>([1, Math.min(2, outChannels)]);
     const [confirmDelete, setConfirmDelete] = useState(false);
 
     const handleCreate = () => {
-        onNewChain(parseChannels(input), parseChannels(output));
+        onNewChain(input, output);
         setShowForm(false);
     };
 
     const handleOpenForm = () => {
-        setInput('1,1');
-        setOutput('1,2');
+        setInput([1, Math.min(2, inChannels)]);
+        setOutput([1, Math.min(2, outChannels)]);
         setShowForm(true);
     };
 
@@ -37,20 +34,23 @@ export function BottomBar({ hasChains, onNewChain, onDeletePreset }: Props) {
                 <button className="new-chain-btn" onClick={handleOpenForm}>{t('ui.new_chain')}</button>
             ) : (
                 <div className="new-chain-form">
-                    <label>{t('ui.input_ch')}</label>
-                    <input type="text" value={input} onChange={e => setInput(e.target.value)} placeholder="1,1" />
-                    <label>{t('ui.output_ch')}</label>
-                    <input type="text" value={output} onChange={e => setOutput(e.target.value)} placeholder="1,2" />
-                    <button onClick={handleCreate}>{t('ui.create')}</button>
-                    <button onClick={() => setShowForm(false)}>{t('ui.cancel')}</button>
+                    <RoutingSelect
+                        input={input} output={output}
+                        inChannels={inChannels} outChannels={outChannels}
+                        onChange={(inp, out) => { setInput(inp); setOutput(out); }}
+                    />
+                    <div className="new-chain-actions">
+                        <button onClick={handleCreate}>{t('ui.create')}</button>
+                        <button onClick={() => setShowForm(false)}>{t('ui.cancel')}</button>
+                    </div>
                 </div>
             )}
             {confirmDelete ? (
-                <div className="chain-confirm-group">
-                    <span className="chain-confirm-text">{t('ui.confirm_delete_preset')}</span>
-                    <button className="chain-confirm-yes" onClick={onDeletePreset}>✓</button>
-                    <button className="chain-confirm-no" onClick={() => setConfirmDelete(false)}>✗</button>
-                </div>
+                <ConfirmDelete
+                    message={t('ui.confirm_delete_preset')}
+                    onConfirm={onDeletePreset}
+                    onCancel={() => setConfirmDelete(false)}
+                />
             ) : (
                 <button
                     className="new-chain-btn"

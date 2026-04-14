@@ -1,0 +1,215 @@
+@use 'variables' as *;
+
+// ── App header bar ───────────────────────────────────────────────────────────
+.app-header {
+    display: flex;
+    align-items: center;
+    gap: $gap-xl;
+    padding: 12px 20px;
+    background: var(--bg-header);
+    border-bottom: 1px solid var(--border);
+
+    h1 {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--text-strong);
+        letter-spacing: 0.05em;
+    }
+}
+
+.app-title-link {
+    cursor: pointer;
+}
+
+.app-title-link:hover {
+    color: var(--accent);
+}
+
+.devices-page-title {
+    font-size: $font-lg;
+    font-weight: 500;
+    color: var(--text-dim);
+}
+
+.back-btn {
+    background: none;
+    border: none;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 28px;
+    line-height: 1;
+    padding: 0 $gap 0 0;
+}
+
+.back-btn:hover {
+    color: var(--accent);
+}
+
+// ── Status dot ───────────────────────────────────────────────────────────────
+.status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.status.connected .status-dot {
+    background: var(--status-ok);
+    box-shadow: 0 0 4px var(--status-ok);
+}
+
+.status.disconnected .status-dot {
+    background: var(--status-err);
+}
+
+// ── Theme toggle ─────────────────────────────────────────────────────────────
+.theme-btn {
+    background: none;
+    border: 1px solid var(--border-tile);
+    color: var(--text-muted);
+    font-size: $font-lg;
+    cursor: pointer;
+    padding: 0 $gap;
+    border-radius: $radius;
+    height: 32px;
+    display: flex;
+    align-items: center;
+
+    &:hover {
+        color: var(--text);
+        border-color: var(--text-muted);
+    }
+}
+
+// ── Preset controls ──────────────────────────────────────────────────────────
+.header-preset {
+    display: flex;
+    align-items: center;
+    gap: $gap;
+    margin-left: auto;
+}
+
+.preset-label {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.preset-select {
+    background: var(--bg);
+    border: 1px solid var(--border-tile);
+    color: var(--text);
+    border-radius: $radius;
+    padding: 0 6px;
+    font-size: $font;
+    cursor: pointer;
+    height: 32px;
+}
+
+.preset-error {
+    font-size: 11px;
+    color: var(--delete-hover-fg);
+}
+
+.preset-input {
+    width: 48px;
+    background: var(--bg);
+    border: 1px solid var(--border-tile);
+    color: var(--text);
+    border-radius: $radius;
+    padding: $radius-sm 6px;
+    font-size: $font;
+    text-align: center;
+}
+
+.preset-save-btn {
+    background: none;
+    border: 1px solid var(--border-tile);
+    color: var(--text-muted);
+    border-radius: $radius;
+    padding: 0 $gap-md;
+    font-size: $font;
+    cursor: pointer;
+    white-space: nowrap;
+    height: 32px;
+
+    &:hover:not(:disabled) {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+
+    &:disabled {
+        opacity: 0.35;
+        cursor: default;
+    }
+}
+
+.compare-btn {
+    background: none;
+    border: 1px solid var(--border-tile);
+    color: var(--text-muted);
+    font-size: $font;
+    cursor: pointer;
+    padding: 0 $gap-md;
+    border-radius: $radius;
+    white-space: nowrap;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    opacity: 0.35;
+    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+
+    &:not(:disabled) {
+        opacity: 1;
+    }
+
+    &:not(:disabled):hover {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+}
+
+.compare-btn-active {
+    color: var(--compare-active) !important;
+    border-color: var(--compare-active) !important;
+    opacity: 1 !important;
+
+    &:hover {
+        color: var(--compare-hover) !important;
+        border-color: var(--compare-hover) !important;
+    }
+}
+
+.settings-btn,
+.devices-btn {
+    background: none;
+    border: 1px solid var(--border-tile);
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    line-height: 1;
+    padding: $gap-sm;
+    border-radius: $radius;
+    height: 32px;
+    width: 32px;
+
+    &:hover {
+        color: var(--accent);
+        border-color: var(--text-muted);
+    }
+}
+
+.settings-btn {
+    padding-bottom: 6px;
+    line-height: normal;
+}

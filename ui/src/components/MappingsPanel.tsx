@@ -1,7 +1,7 @@
-import { Fragment, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ControllerDef, DeviceMap, NodeDef } from '../types';
 import { PARAM_META } from './EffectTile';
-import { fetchControllers, putControllers } from '../api';
+import { putControllers } from '../api';
 import { t } from '../i18n';
 
 interface MappingRow {
@@ -55,27 +55,100 @@ function toApi(rows: MappingRow[]): ControllerDef[] {
 
 const SKIP_PARAMS = new Set(['key', 'type', 'active']);
 
+// --- Sub-components ---
+
+function MappingGridRow({ row, nodeKeys, paramsFor, onUpdate, onDelete }: {
+    row: MappingRow;
+    nodeKeys: string[];
+    paramsFor: (nodeKey: string) => string[];
+    onUpdate: (id: string, patch: Partial<MappingRow>) => void;
+    onDelete: (id: string) => void;
+}) {
+    return <>
+        <input type="text" value={row.ctrlKey}
+            onChange={e => onUpdate(row.id, { ctrlKey: e.target.value })}
+            placeholder="70" />
+        <select value={row.targetNode} onChange={e => {
+            const node = e.target.value;
+            onUpdate(row.id, { targetNode: node, targetParam: paramsFor(node)[0] ?? '' });
+        }}>
+            {nodeKeys.map(k => <option key={k} value={k}>{k}</option>)}
+        </select>
+        <select value={row.targetParam} onChange={e => {
+            const p = e.target.value;
+            const meta = PARAM_META[p];
+            onUpdate(row.id, { targetParam: p, paramMin: meta?.min ?? 0, paramMax: meta?.max ?? 1 });
+        }}>
+            {paramsFor(row.targetNode).map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <div className="range-pair">
+            <input type="number" value={row.ctrlMin}
+                onChange={e => onUpdate(row.id, { ctrlMin: parseFloat(e.target.value) || 0 })} />
+            <input type="number" value={row.ctrlMax}
+                onChange={e => onUpdate(row.id, { ctrlMax: parseFloat(e.target.value) || 127 })} />
+        </div>
+        <div className="range-pair">
+            <input type="number" value={row.paramMin} step="0.01"
+                onChange={e => onUpdate(row.id, { paramMin: parseFloat(e.target.value) || 0 })} />
+            <input type="number" value={row.paramMax} step="0.01"
+                onChange={e => onUpdate(row.id, { paramMax: parseFloat(e.target.value) || 1 })} />
+        </div>
+        <button className="tile-delete" onClick={() => onDelete(row.id)}>×</button>
+    </>;
+}
+
+function DeviceGroup({ alias, rows, nodeKeys, paramsFor, onUpdate, onDelete, onAddRow }: {
+    alias: string;
+    rows: MappingRow[];
+    nodeKeys: string[];
+    paramsFor: (nodeKey: string) => string[];
+    onUpdate: (id: string, patch: Partial<MappingRow>) => void;
+    onDelete: (id: string) => void;
+    onAddRow: (device: string) => void;
+}) {
+    return (
+        <div className="device-group">
+            <div className="dg-header">
+                <span className="dg-title">{alias}</span>
+                <button className="dg-add-row-btn" onClick={() => onAddRow(alias)}>＋ {t('ui.add_mapping')}</button>
+            </div>
+            <div className="dg-grid">
+                <div className="dg-col-hdr">{t('ui.mapping_ctrl')}</div>
+                <div className="dg-col-hdr">{t('ui.mapping_node')}</div>
+                <div className="dg-col-hdr">{t('ui.mapping_param')}</div>
+                <div className="dg-col-hdr">{t('ui.mapping_ctrl_range')}</div>
+                <div className="dg-col-hdr">{t('ui.mapping_param_range')}</div>
+                <div />
+                {rows.map(row => (
+                    <MappingGridRow key={row.id} row={row} nodeKeys={nodeKeys}
+                        paramsFor={paramsFor} onUpdate={onUpdate} onDelete={onDelete} />
+                ))}
+            </div>
+        </div>
+    );
+}
+
+// --- Main component ---
+
 interface Props {
-    presetNum: number;
+    controllers: ControllerDef[];
     devices: DeviceMap;
     allNodes: NodeDef[];
+    onSave: (controllers: ControllerDef[]) => void;
     onClose: () => void;
 }
 
-export function MappingsPanel({ presetNum, devices, allNodes, onClose }: Props) {
+export function MappingsPanel({ controllers, devices, allNodes, onSave, onClose }: Props) {
     const [rows, setRows] = useState<MappingRow[]>([]);
     const [saving, setSaving] = useState(false);
-    // @todo fix presetNum
+
     useEffect(() => {
-        fetchControllers().then(defs => setRows(fromApi(defs)));
-    }, [presetNum]);
+        setRows(fromApi(controllers));
+    }, [controllers]);
 
     const deviceAliases = Object.keys(devices);
-
-    // Unique node keys in order
     const nodeKeys = [...new Set(allNodes.map(n => n.key))];
 
-    // Params available for a given node key
     function paramsFor(nodeKey: string): string[] {
         return allNodes
             .filter(n => n.key === nodeKey)
@@ -115,10 +188,16 @@ export function MappingsPanel({ presetNum, devices, allNodes, onClose }: Props) 
         setRows(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
     }
 
+    function deleteRow(id: string) {
+        setRows(prev => prev.filter(r => r.id !== id));
+    }
+
     async function handleApply() {
         setSaving(true);
-        await putControllers(toApi(rows));
+        const updated = toApi(rows);
+        await putControllers(updated);
         setSaving(false);
+        onSave(updated);
         onClose();
     }
 
@@ -132,58 +211,12 @@ export function MappingsPanel({ presetNum, devices, allNodes, onClose }: Props) 
             </div>
 
             <div className="device-groups">
-                {shownDevices.map(alias => {
-                    const deviceRows = rows.filter(r => r.device === alias);
-                    return (
-                        <div key={alias} className="device-group">
-                            <div className="dg-header">
-                                <span className="dg-title">{alias}</span>
-                                <button className="dg-add-row-btn" onClick={() => addRowForDevice(alias)}>＋ {t('ui.add_mapping')}</button>
-                            </div>
-                            <div className="dg-grid">
-                                <div className="dg-col-hdr">{t('ui.mapping_ctrl')}</div>
-                                <div className="dg-col-hdr">{t('ui.mapping_node')}</div>
-                                <div className="dg-col-hdr">{t('ui.mapping_param')}</div>
-                                <div className="dg-col-hdr">{t('ui.mapping_ctrl_range')}</div>
-                                <div className="dg-col-hdr">{t('ui.mapping_param_range')}</div>
-                                <div />
-                                {deviceRows.map(row => (
-                                    <Fragment key={row.id}>
-                                        <input type="text" value={row.ctrlKey}
-                                            onChange={e => update(row.id, { ctrlKey: e.target.value })}
-                                            placeholder="70" />
-                                        <select value={row.targetNode} onChange={e => {
-                                            const node = e.target.value;
-                                            update(row.id, { targetNode: node, targetParam: paramsFor(node)[0] ?? '' });
-                                        }}>
-                                            {nodeKeys.map(k => <option key={k} value={k}>{k}</option>)}
-                                        </select>
-                                        <select value={row.targetParam} onChange={e => {
-                                            const p = e.target.value;
-                                            const meta = PARAM_META[p];
-                                            update(row.id, { targetParam: p, paramMin: meta?.min ?? 0, paramMax: meta?.max ?? 1 });
-                                        }}>
-                                            {paramsFor(row.targetNode).map(p => <option key={p} value={p}>{p}</option>)}
-                                        </select>
-                                        <div className="range-pair">
-                                            <input type="number" value={row.ctrlMin}
-                                                onChange={e => update(row.id, { ctrlMin: parseFloat(e.target.value) || 0 })} />
-                                            <input type="number" value={row.ctrlMax}
-                                                onChange={e => update(row.id, { ctrlMax: parseFloat(e.target.value) || 127 })} />
-                                        </div>
-                                        <div className="range-pair">
-                                            <input type="number" value={row.paramMin} step="0.01"
-                                                onChange={e => update(row.id, { paramMin: parseFloat(e.target.value) || 0 })} />
-                                            <input type="number" value={row.paramMax} step="0.01"
-                                                onChange={e => update(row.id, { paramMax: parseFloat(e.target.value) || 1 })} />
-                                        </div>
-                                        <button className="tile-delete" onClick={() => setRows(prev => prev.filter(r => r.id !== row.id))}>×</button>
-                                    </Fragment>
-                                ))}
-                            </div>
-                        </div>
-                    );
-                })}
+                {shownDevices.map(alias => (
+                    <DeviceGroup key={alias} alias={alias}
+                        rows={rows.filter(r => r.device === alias)}
+                        nodeKeys={nodeKeys} paramsFor={paramsFor}
+                        onUpdate={update} onDelete={deleteRow} onAddRow={addRowForDevice} />
+                ))}
             </div>
 
             {hiddenDevices.length > 0 && (

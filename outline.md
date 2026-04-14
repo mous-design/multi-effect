@@ -233,3 +233,13 @@ Looper stays custom — it has stateful transport logic (rec/play/pause/stop/ove
 
 #### Select of plugin
 Still to discuss with Paul: how is the plugin-select populated and how are we going to group them practically? Devide into source: 'native', 'clap' and 'lv2'. Perhaps first select source, than the plugin? Or, if that would render to a very long list, maybe even have one extra selectbox to then select the type of plugin?
+
+
+# Skinning
+## css
+Find some way to select a skin. Best I think is config.json. That would select a list of css'es. 
+_variables.scss should be a startingpoint.
+## Position and actual control
+Most controls can be simply skinned. But the active switch might be a problem. 
+For web, a toggle in the header is fine. But if you want to mimic a foot-padel, 
+you'd want a footswitch-kind of look. Active indicater would then be a led, switch a stateless toggle.

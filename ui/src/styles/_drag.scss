@@ -1,0 +1,18 @@
+@use 'variables' as *;
+
+.tile-wrapper {
+    cursor: default;
+}
+
+.tile-wrapper .tile-header {
+    cursor: grab;
+}
+
+.tile-wrapper.dragging {
+    opacity: 0.3;
+}
+
+.tile-wrapper.drag-over {
+    outline: 2px dashed var(--accent);
+    border-radius: $radius-md;
+}

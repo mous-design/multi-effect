@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { reloadConfig } from '../api';
 import { t } from '../i18n';
+import { Popup } from './Popup';
+import { FormRow } from './FormRow';
 
 const SAMPLE_RATES = [44100, 48000, 96000, 192000];
 const BUFFER_SIZES = [64, 128, 256, 512, 1024];
@@ -37,62 +39,34 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
   }
 
   return (
-    <div className="popup-overlay" onClick={onClose}>
-      <div className="popup" onClick={e => e.stopPropagation()}>
-        <p className="popup-title">{t('ui.settings')}</p>
+    <Popup title={t('ui.settings')} onClose={onClose} confirmLabel={t('ui.save')} onConfirm={handleSave}>
         <table className="routing-table">
           <tbody>
-            <tr>
-              <td className="routing-label">{t('ui.device')}</td>
-              <td colSpan={2}>
-                <input
-                  type="text"
-                  value={device}
-                  onChange={e => setDevice(e.target.value)}
-                  className="settings-text-input"
-                />
-              </td>
-            </tr>
-            <tr>
-              <td className="routing-label">{t('ui.sample_rate')}</td>
-              <td colSpan={2}>
-                <select value={sample_rate} onChange={e => setSampleRate(Number(e.target.value))} className="preset-select">
-                  {SAMPLE_RATES.map(r => <option key={r} value={r}>{r} Hz</option>)}
-                </select>
-              </td>
-            </tr>
-            <tr>
-              <td className="routing-label">{t('ui.buffer_size')}</td>
-              <td colSpan={2}>
-                <select value={buffer_size} onChange={e => setBufferSize(Number(e.target.value))} className="preset-select">
-                  {BUFFER_SIZES.map(b => <option key={b} value={b}>{b}</option>)}
-                </select>
-              </td>
-            </tr>
-            <tr>
-              <td className="routing-label">{t('ui.in_channels')}</td>
-              <td colSpan={2}>
-                <input type="number" min={1} max={32} value={in_channels}
-                  onChange={e => setInChannels(Number(e.target.value))}
-                  className="preset-input" />
-              </td>
-            </tr>
-            <tr>
-              <td className="routing-label">{t('ui.out_channels')}</td>
-              <td colSpan={2}>
-                <input type="number" min={1} max={32} value={out_channels}
-                  onChange={e => setOutChannels(Number(e.target.value))}
-                  className="preset-input" />
-              </td>
-            </tr>
-            <tr>
-              <td className="routing-label">{t('ui.delay_max')}</td>
-              <td colSpan={2}>
-                <input type="number" min={0.1} max={30} step={0.1} value={delay_max_seconds}
-                  onChange={e => setDelayMaxSeconds(Number(e.target.value))}
-                  className="preset-input" />
-              </td>
-            </tr>
+            <FormRow label={t('ui.device')}>
+              <input type="text" value={device} onChange={e => setDevice(e.target.value)} className="settings-text-input" />
+            </FormRow>
+            <FormRow label={t('ui.sample_rate')}>
+              <select value={sample_rate} onChange={e => setSampleRate(Number(e.target.value))} className="preset-select">
+                {SAMPLE_RATES.map(r => <option key={r} value={r}>{r} Hz</option>)}
+              </select>
+            </FormRow>
+            <FormRow label={t('ui.buffer_size')}>
+              <select value={buffer_size} onChange={e => setBufferSize(Number(e.target.value))} className="preset-select">
+                {BUFFER_SIZES.map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </FormRow>
+            <FormRow label={t('ui.in_channels')}>
+              <input type="number" min={1} max={32} value={in_channels}
+                onChange={e => setInChannels(Number(e.target.value))} className="preset-input" />
+            </FormRow>
+            <FormRow label={t('ui.out_channels')}>
+              <input type="number" min={1} max={32} value={out_channels}
+                onChange={e => setOutChannels(Number(e.target.value))} className="preset-input" />
+            </FormRow>
+            <FormRow label={t('ui.delay_max')}>
+              <input type="number" min={0.1} max={30} step={0.1} value={delay_max_seconds}
+                onChange={e => setDelayMaxSeconds(Number(e.target.value))} className="preset-input" />
+            </FormRow>
           </tbody>
         </table>
         {saved && (
@@ -103,11 +77,6 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
           </p>
         )}
         {error && <p className="settings-error">{t('error.save_config')}</p>}
-        <div className="popup-actions">
-          <button className="popup-confirm" onClick={handleSave}>{t('ui.save')}</button>
-          <button className="popup-cancel" onClick={onClose}>{t('ui.cancel')}</button>
-        </div>
-      </div>
-    </div>
+    </Popup>
   );
 }

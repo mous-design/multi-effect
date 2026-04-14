@@ -92,12 +92,6 @@ export async function putDevice(alias: string, def: object): Promise<boolean> {
     return res.ok;
 }
 
-export async function fetchControllers(): Promise<import('./types').ControllerDef[]> {
-    const res = await api(`/api/controllers`);
-    if (!res.ok) return [];
-    return res.json();
-}
-
 export async function putControllers(controllers: import('./types').ControllerDef[]): Promise<boolean> {
     const res = await api(`/api/controllers`, {
         method: 'PUT',

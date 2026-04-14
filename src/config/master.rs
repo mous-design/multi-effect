@@ -30,8 +30,6 @@ pub enum ConfigRequest {
     GetConfig       { resp: Resp<Result<Value>> },
     GetSnapshot { resp: Resp<Result<ConfigSnapshot>> },
     GetDevices      { resp: Resp<Result<Value>> },
-    GetControllers  { resp: Resp<Result<Value>> },
-
     // -- Config mutations (need response for HTTP) --
     UpdateConfig      { body: Value, resp: OptionResp },
     SwitchPreset      { slot: u8, resp: OptionResp },
@@ -140,13 +138,6 @@ impl ConfigMaster {
                     .unwrap_or(Value::Array(vec![]));
                 let _ = resp.send(Ok(snd));
             }
-            ConfigRequest::GetControllers { resp } => {
-                let controllers = &self.snapshot.preset.controllers;
-                let value = serde_json::to_value(controllers).ok()
-                    .unwrap_or(Value::Array(vec![]));
-                let _ = resp.send(Ok(value));
-            }
-
             // Mutations
             ConfigRequest::UpdateConfig { body, resp } => {
                 Self::respond(resp, self.handle_update_config(&body));
@@ -333,16 +324,13 @@ impl ConfigMaster {
         Ok(())
     }
 
-    // @todo check
     fn handle_update_controllers(&mut self, controllers: Vec<ControllerDef>) -> Result<()> {
         self.snapshot.preset.controllers = controllers;
+        self.clear_controllers();
+        self.apply_controllers(&self.snapshot.preset.controllers);
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed();
         }
-        // let preset = self.cfg.presets.get_mut(slot)
-        //     .with_context(|| format!("preset {slot} not found"))?;
-        // preset.controllers = controllers;
-        // self.cfg.persist()?;
         Ok(())
     }
 

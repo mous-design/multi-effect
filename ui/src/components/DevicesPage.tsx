@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchDevices, putDevice, renameDevice, deleteDevice } from '../api';
 import { t } from '../i18n';
+import { DeviceField } from './DeviceField';
 
 type AnyDevice = { type: string; active: boolean; [key: string]: any };
 
@@ -84,61 +85,52 @@ function DeviceTile({ alias: initialAlias, def: initialDef, isNew, onSave, onDel
       {aliasWarning && <div className="device-alias-warning">{aliasWarning}</div>}
 
       <div className="device-tile-fields">
-        <div className="device-field">
-          <label>{t('device.type')}</label>
+        <DeviceField label={t('device.type')}>
           <select value={def.type} onChange={e => changeType(e.target.value as DeviceType)}>
             <option value=""> </option>
             {DEVICE_TYPES.map(dt => (
               <option key={dt} value={dt}>{t(`device.type.${dt}`)}</option>
             ))}
           </select>
-        </div>
+        </DeviceField>
 
         {def.type === 'serial' && <>
-          <div className="device-field">
-            <label>{t('device.dev')}</label>
+          <DeviceField label={t('device.dev')}>
             <input value={def.dev ?? ''} onChange={e => set({ dev: e.target.value })} />
-          </div>
-          <div className="device-field">
-            <label>{t('device.baud')}</label>
+          </DeviceField>
+          <DeviceField label={t('device.baud')}>
             <select value={def.baud ?? 115200} onChange={e => set({ baud: Number(e.target.value) })}>
               {[9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600].map(b => (
                 <option key={b} value={b}>{b}</option>
               ))}
             </select>
-          </div>
-          <div className="device-field">
-            <label className="wide">{t('device.fallback')}</label>
+          </DeviceField>
+          <DeviceField label={t('device.fallback')} wide>
             <input type="checkbox" checked={def.fallback ?? true} onChange={e => set({ fallback: e.target.checked })} />
-          </div>
+          </DeviceField>
         </>}
 
         {def.type === 'net' && <>
-          <div className="device-field">
-            <label>{t('device.host')}</label>
+          <DeviceField label={t('device.host')}>
             <input value={def.host ?? '0.0.0.0'} onChange={e => set({ host: e.target.value })} />
-          </div>
-          <div className="device-field">
-            <label>{t('device.port')}</label>
+          </DeviceField>
+          <DeviceField label={t('device.port')}>
             <input type="number" value={def.port ?? 9000} onChange={e => set({ port: Number(e.target.value) })} />
-          </div>
-          <div className="device-field">
-            <label className="wide">{t('device.fallback')}</label>
+          </DeviceField>
+          <DeviceField label={t('device.fallback')} wide>
             <input type="checkbox" checked={def.fallback ?? true} onChange={e => set({ fallback: e.target.checked })} />
-          </div>
+          </DeviceField>
         </>}
 
         {(def.type === 'midi-in' || def.type === 'midi-out') && <>
-          <div className="device-field">
-            <label>{t('device.dev')}</label>
+          <DeviceField label={t('device.dev')}>
             <input
               value={def.dev ?? ''}
               placeholder={t('device.dev_any')}
               onChange={e => set({ dev: e.target.value || undefined })}
             />
-          </div>
-          <div className="device-field">
-            <label>{t('device.channel')}</label>
+          </DeviceField>
+          <DeviceField label={t('device.channel')}>
             {def.type === 'midi-in'
               ? <select value={def.channel ?? '*'} onChange={e => {
                   const v = e.target.value;
@@ -155,7 +147,7 @@ function DeviceTile({ alias: initialAlias, def: initialDef, isNew, onSave, onDel
                   ))}
                 </select>
             }
-          </div>
+          </DeviceField>
         </>}
       </div>
 

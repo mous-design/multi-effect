@@ -80,7 +80,7 @@
   "looper_max_seconds": 30.0,
   "out_channels": 2,
   "presets": {
-    "active": 1,
+    "active": 2,
     "items": [
       {
         "chains": [
@@ -92,19 +92,19 @@
             "nodes": [
               {
                 "active": true,
-                "feedback": 0.4,
+                "feedback": 0,
                 "key": "01-delay",
-                "time": 0.397,
+                "time": 0,
                 "type": "delay",
-                "wet": 0.5
+                "wet": 0
               },
               {
                 "active": true,
-                "damping": 0.5,
+                "damping": 0,
                 "key": "02-reverb",
-                "room_size": 0.5,
+                "room_size": 0,
                 "type": "reverb",
-                "wet": 0.27
+                "wet": 0
               },
               {
                 "active": true,
@@ -120,12 +120,83 @@
             ]
           }
         ],
-        "controllers": [],
+        "controllers": [
+          {
+            "device": "midi in 1",
+            "mappings": {
+              "70": {
+                "ctrl": [
+                  0.0,
+                  127.0
+                ],
+                "param": [
+                  0.0,
+                  1.0
+                ],
+                "target": "01-delay.feedback"
+              }
+            }
+          }
+        ],
         "index": 1
       },
       {
-        "chains": [],
-        "controllers": [],
+        "chains": [
+          {
+            "input": [
+              1,
+              1
+            ],
+            "nodes": [
+              {
+                "active": true,
+                "feedback": 0,
+                "key": "01-delay",
+                "time": 0,
+                "type": "delay",
+                "wet": 0
+              }
+            ],
+            "output": [
+              1,
+              2
+            ]
+          }
+        ],
+        "controllers": [
+          {
+            "device": "net 2",
+            "mappings": {
+              "ctrl_1": {
+                "ctrl": [
+                  0.0,
+                  1023.0
+                ],
+                "param": [
+                  0.0,
+                  1.0
+                ],
+                "target": "01-delay.feedback"
+              }
+            }
+          },
+          {
+            "device": "serial 1",
+            "mappings": {
+              "ctrl_1": {
+                "ctrl": [
+                  0.0,
+                  1023.0
+                ],
+                "param": [
+                  0.0,
+                  1.0
+                ],
+                "target": "01-delay.feedback"
+              }
+            }
+          }
+        ],
         "index": 2
       }
     ]

@@ -1,0 +1,246 @@
+@use 'variables' as *;
+
+.chain {
+    background: var(--bg-chain);
+    border: 1px solid var(--border);
+    border-radius: $radius-lg;
+    overflow: hidden;
+}
+
+.chain-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: $gap $gap-lg;
+    background: var(--bg-tile);
+    border-bottom: 1px solid var(--border);
+}
+
+.chain-io {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.chain-nodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: $gap-md;
+    padding: 12px;
+}
+
+// ── Chain delete + routing ───────────────────────────────────────────────────
+.chain-delete {
+    margin-left: auto;
+    font-size: 16px;
+}
+
+.chain-routing-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    padding: $gap-xs 6px;
+    border-radius: $radius;
+    font-family: inherit;
+
+    &:hover {
+        color: var(--accent);
+        background: var(--bg);
+    }
+}
+
+// ── Chain caret (mappings toggle) ────────────────────────────────────────────
+.chain-caret {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: $font-md;
+    cursor: pointer;
+    padding: $gap-xs $gap-sm;
+    border-radius: $radius-sm;
+    flex-shrink: 0;
+
+    &:hover {
+        color: var(--accent);
+    }
+}
+
+.chain-caret-active {
+    color: var(--accent);
+}
+
+// ── Confirm delete (shared component) ────────────────────────────────────────
+.chain-confirm-group {
+    display: flex;
+    align-items: center;
+    gap: $gap-sm;
+    margin-left: auto;
+}
+
+.chain-confirm-text {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.chain-confirm-yes,
+.chain-confirm-no {
+    background: none;
+    font-size: $font-md;
+    cursor: pointer;
+    padding: 1px 6px;
+    border-radius: $radius-sm;
+    line-height: 1.4;
+    color: var(--text-muted);
+    border: 1px solid var(--border-tile);
+
+    &:hover {
+        color: var(--text);
+        border-color: var(--text-dim);
+    }
+}
+
+// ── Routing table (shared by popups + forms) ─────────────────────────────────
+.routing-table {
+    border-collapse: separate;
+    border-spacing: 6px $gap;
+}
+
+.routing-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    padding-right: $gap-sm;
+}
+
+.routing-ch-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-right: $gap-sm;
+}
+
+// ── Add node ─────────────────────────────────────────────────────────────────
+.add-node-btn {
+    align-self: flex-start;
+    background: none;
+    border: 1px dashed var(--border);
+    color: var(--text-muted);
+    border-radius: $radius;
+    padding: 6px $gap-lg;
+    font-size: $font-md;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+}
+
+.add-node-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-tile);
+    border: 1px solid var(--border-tile);
+    border-radius: $radius-md;
+    padding: $gap $gap-md;
+    align-self: center;
+
+    select,
+    input[type="text"] {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: $radius;
+        padding: $radius-sm 6px;
+        font-size: $font;
+    }
+
+    button {
+        background: none;
+        border: 1px solid var(--border-tile);
+        color: var(--text-muted);
+        border-radius: $radius;
+        padding: $radius-sm $gap;
+        font-size: $font;
+        cursor: pointer;
+
+        &:first-of-type {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        &:hover {
+            color: var(--text);
+        }
+    }
+}
+
+// ── New chain ────────────────────────────────────────────────────────────────
+.new-chain-btn {
+    align-self: flex-start;
+    background: none;
+    border: 1px dashed var(--border);
+    color: var(--text-muted);
+    border-radius: $radius-md;
+    padding: 6px $gap-lg;
+    font-size: $font-md;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+}
+
+.new-chain-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: $gap;
+    background: var(--bg-chain);
+    border: 1px solid var(--border);
+    border-radius: $radius-lg;
+    padding: 12px $gap-lg;
+
+    label {
+        font-size: 11px;
+        color: var(--text-muted);
+    }
+
+    input[type="text"] {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: $radius;
+        padding: $gap-sm $gap;
+        font-size: $font;
+        width: 90px;
+    }
+
+    button {
+        background: none;
+        border: 1px solid var(--border-tile);
+        color: var(--text-muted);
+        border-radius: $radius;
+        padding: $gap-sm $gap-md;
+        font-size: $font;
+        cursor: pointer;
+
+        &:first-of-type {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        &:hover {
+            color: var(--text);
+        }
+    }
+}
+
+.preset-bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: $gap-sm 0;
+}

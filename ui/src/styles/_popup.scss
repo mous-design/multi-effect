@@ -1,0 +1,113 @@
+@use 'variables' as *;
+
+.popup-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+
+.popup {
+    background: var(--bg-tile);
+    border: 1px solid var(--border-tile);
+    border-radius: $radius-lg;
+    padding: 20px 24px;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: $gap-lg;
+}
+
+.popup-title {
+    font-weight: 600;
+    color: var(--text-strong);
+    font-size: $font-md;
+}
+
+.popup-row {
+    display: flex;
+    align-items: center;
+    gap: $gap-md;
+    font-size: $font;
+    color: var(--text-muted);
+}
+
+.popup-actions {
+    display: flex;
+    gap: $gap;
+    justify-content: flex-end;
+}
+
+.popup-confirm {
+    background: none;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    border-radius: $radius;
+    padding: $gap-sm $gap-lg;
+    font-size: $font;
+    cursor: pointer;
+
+    &:hover {
+        background: var(--accent);
+        color: #fff;
+    }
+}
+
+.popup-cancel {
+    background: none;
+    border: 1px solid var(--border-tile);
+    color: var(--text-muted);
+    border-radius: $radius;
+    padding: $gap-sm $gap-lg;
+    font-size: $font;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--text);
+    }
+}
+
+// ── Settings-specific ────────────────────────────────────────────────────────
+.settings-text-input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: $radius;
+    padding: $radius-sm 6px;
+    font-size: $font;
+    width: 160px;
+}
+
+.settings-restart-warning {
+    font-size: 11px;
+    color: var(--warning-action);
+    margin-top: $gap-sm;
+    display: flex;
+    align-items: center;
+    gap: $gap;
+}
+
+.settings-reload-btn {
+    background: none;
+    border: 1px solid var(--warning-action);
+    color: var(--warning-action);
+    border-radius: $radius;
+    padding: $gap-xs $gap;
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
+
+    &:hover {
+        background: var(--warning-action);
+        color: #000;
+    }
+}
+
+.settings-error {
+    font-size: 11px;
+    color: var(--delete-hover-fg);
+    margin-top: $gap-sm;
+}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AppState, ChainDef, NodeDef } from './types';
+import { AppState, ChainDef, ControllerDef, NodeDef } from './types';
 import { setParam, setChains, savePreset, saveConfig, switchPreset, deletePreset, postCompare } from './api';
 import { t } from './i18n';
 import { useToasts } from './hooks/useToasts';
@@ -40,6 +40,9 @@ export default function App() {
     const [savedFeedback, setSavedFeedback] = useState(false);
     const [showSavePopup, setShowSavePopup] = useState(false);
     const [savePresetNum, setSavePresetNum] = useState(1);
+
+    // --- Controller state (from preset) ---
+    const [controllers, setControllers] = useState<ControllerDef[]>([]);
 
     // --- Chain state ---
     const [state, setState] = useState<AppState | null>(null);
@@ -98,6 +101,7 @@ export default function App() {
         } else if (msg.type === 'preset') {
             const preset = msg.preset ?? {};
             setState({ chains: preset.chains ?? [] });
+            setControllers(preset.controllers ?? []);
             if (typeof preset.index === 'number') setActivePreset(preset.index);
             if (Array.isArray(msg.preset_indices)) setPresetDefs(msg.preset_indices);
             setIsDirty(msg.state === 'Dirty');
@@ -311,6 +315,7 @@ export default function App() {
                         chainIdx={chainIdx}
                         chain={chain}
                         presetName={String(activePreset)}
+                        controllers={controllers}
                         devices={devices}
                         allNodes={state.chains.flatMap(c => c.nodes)}
                         delayMaxSeconds={audioConfig.delay_max_seconds}
@@ -320,10 +325,13 @@ export default function App() {
                         onAddNode={handleAddNode}
                         onDeleteChain={handleDeleteChain}
                         onRouting={setRoutingIdx}
+                        onSaveControllers={setControllers}
                     />
                 ))}
                 <BottomBar
                     hasChains={(state?.chains.length ?? 0) > 0}
+                    inChannels={audioConfig.in_channels}
+                    outChannels={audioConfig.out_channels}
                     onNewChain={handleNewChain}
                     onDeletePreset={handleDeletePreset}
                 />

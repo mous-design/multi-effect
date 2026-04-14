@@ -1,0 +1,165 @@
+@use 'variables' as *;
+
+.mappings-panel {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    padding: $gap-md 12px $gap;
+}
+
+.mappings-header {
+    display: flex;
+    align-items: center;
+    gap: $gap-md;
+    margin-bottom: $gap;
+}
+
+.mappings-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.mappings-add-btn {
+    background: none;
+    border: 1px dashed var(--border-tile);
+    color: var(--text-muted);
+    border-radius: $radius;
+    padding: $gap-xs $gap;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: auto;
+
+    &:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+}
+
+.mappings-footer {
+    display: flex;
+    gap: $gap;
+}
+
+// ── Device groups ────────────────────────────────────────────────────────────
+.device-groups {
+    display: flex;
+    flex-wrap: wrap;
+    gap: $gap-md;
+    margin-bottom: $gap;
+}
+
+.device-group {
+    background: var(--bg-tile);
+    border: 1px solid var(--border-tile);
+    border-radius: 5px;
+    padding: 7px $gap;
+}
+
+.dg-header {
+    display: flex;
+    align-items: center;
+    gap: $gap;
+    margin-bottom: 5px;
+}
+
+.dg-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-strong);
+}
+
+.dg-add-row-btn {
+    margin-left: auto;
+    background: none;
+    border: 1px dashed var(--border-tile);
+    color: var(--text-muted);
+    border-radius: $radius-sm;
+    padding: 1px 6px;
+    font-size: $font-sm;
+    cursor: pointer;
+
+    &:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+    }
+}
+
+.dg-grid {
+    display: grid;
+    grid-template-columns: 60px 100px 100px 104px 104px 20px;
+    gap: $radius-sm $gap-sm;
+    align-items: center;
+
+    input[type="text"],
+    select {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: $radius-sm;
+        padding: $gap-xs $gap-sm;
+        font-size: 11px;
+    }
+}
+
+.dg-col-hdr {
+    font-size: $font-xs;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-bottom: 1px;
+}
+
+.range-pair {
+    display: flex;
+    gap: $gap-sm;
+
+    input {
+        width: 50px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: $radius-sm;
+        padding: $gap-xs $gap-sm;
+        font-size: 11px;
+    }
+}
+
+// ── Add device picker ────────────────────────────────────────────────────────
+.dg-add-area {
+    margin-bottom: $gap;
+}
+
+.dg-device-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: $gap-sm;
+    align-items: center;
+}
+
+.dg-device-opt {
+    background: var(--bg-tile);
+    border: 1px solid var(--border-tile);
+    color: var(--text);
+    border-radius: $radius-sm;
+    padding: $radius-sm $gap-md;
+    font-size: 11px;
+    cursor: pointer;
+
+    &:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+}
+
+.dg-device-cancel {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    padding: $radius-sm 6px;
+}

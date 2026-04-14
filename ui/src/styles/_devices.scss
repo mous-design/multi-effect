@@ -1,0 +1,152 @@
+@use 'variables' as *;
+
+.devices-main {
+    padding: $gap-xl 20px;
+}
+
+.device-tiles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: $gap-xl;
+}
+
+.device-tile {
+    background: var(--bg-tile);
+    border: 1px solid var(--border-tile);
+    border-radius: $radius-lg;
+    min-width: 200px;
+    max-width: 280px;
+    display: flex;
+    flex-direction: column;
+
+    &.inactive {
+        opacity: 0.55;
+    }
+}
+
+.device-tile-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: $gap $gap-md 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.device-active {
+    flex-shrink: 0;
+    accent-color: var(--accent);
+}
+
+.device-alias {
+    flex: 1;
+    background: none;
+    border: none;
+    color: var(--text-strong);
+    font-size: $font-md;
+    font-weight: 600;
+    min-width: 0;
+
+    &:focus {
+        outline: none;
+        border-bottom: 1px solid var(--accent);
+    }
+}
+
+.device-alias-warning {
+    font-size: 11px;
+    color: var(--warning);
+    padding: $gap-sm $gap-md 0;
+}
+
+.device-tile-fields {
+    display: flex;
+    flex-direction: column;
+    gap: $gap;
+    padding: $gap-md;
+}
+
+.device-field {
+    display: flex;
+    align-items: center;
+    gap: $gap;
+
+    label {
+        width: 70px;
+        font-size: 11px;
+        color: var(--text-dim);
+        flex-shrink: 0;
+
+        &.wide {
+            width: auto;
+            margin-right: $radius-sm;
+        }
+    }
+
+    input:not([type="checkbox"]),
+    select {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: $radius;
+        color: var(--text);
+        font-size: $font;
+        padding: $radius-sm 6px;
+        min-width: 0;
+    }
+
+    input[type="checkbox"] {
+        accent-color: var(--accent);
+    }
+}
+
+.device-tile-footer {
+    padding: 6px $gap-md $gap;
+    border-top: 1px solid var(--border);
+}
+
+.device-save-btn {
+    background: var(--accent);
+    border: none;
+    border-radius: $radius;
+    color: #fff;
+    cursor: pointer;
+    font-size: $font;
+    padding: $gap-sm 12px;
+    width: 100%;
+
+    &:hover {
+        opacity: 0.85;
+    }
+
+    &:disabled {
+        opacity: 0.5;
+        cursor: default;
+    }
+}
+
+.device-add-form {
+    display: flex;
+    align-items: center;
+    gap: $gap;
+    padding: $gap-md 0;
+
+    .device-alias {
+        border: 1px solid var(--border);
+        border-radius: $radius;
+        padding: $gap-sm $gap;
+        font-size: $font-md;
+        background: var(--bg-tile);
+        color: var(--text);
+        width: 140px;
+    }
+
+    select {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: $radius;
+        color: var(--text);
+        font-size: $font;
+        padding: $gap-sm 6px;
+    }
+}

@@ -1,0 +1,74 @@
+// ── Compile-time layout tokens ───────────────────────────────────────────────
+$radius-sm:   3px;
+$radius:      4px;
+$radius-md:   6px;
+$radius-lg:   8px;
+
+$gap-xs:  2px;
+$gap-sm:  4px;
+$gap:     8px;
+$gap-md: 10px;
+$gap-lg: 14px;
+$gap-xl: 16px;
+
+$font-xs:  9px;
+$font-sm: 10px;
+$font:    12px;
+$font-md: 13px;
+$font-lg: 14px;
+
+// ── Runtime colour tokens (skinnable via CSS custom properties) ──────────────
+:root {
+  --bg:              #111;
+  --bg-header:       #1a1a1a;
+  --bg-chain:        #161616;
+  --bg-tile:         #1e1e1e;
+  --border:          #272727;
+  --border-tile:     #2e2e2e;
+  --text:            #ccc;
+  --text-strong:     #e0e0e0;
+  --text-muted:      #555;
+  --text-dim:        #666;
+  --text-value:      #aaa;
+  --knob-track:      #3a3a3a;
+  --toggle-off:      #333;
+  --accent:          #4a9eff;
+  --delete-hover-bg: #2a1a1a;
+  --delete-hover-fg: #e05555;
+
+  // Status
+  --status-ok:       #4caf50;
+  --status-err:      #f44336;
+
+  // Looper
+  --looper-rec:      #c0222a;
+  --looper-overdub:  #c08800;
+  --looper-play:     #2a9a4a;
+
+  // Compare
+  --compare-active:  #c08800;
+  --compare-hover:   #d09800;
+
+  // Warning / reload
+  --warning:         #e0a030;
+  --warning-action:  #e09020;
+}
+
+body.light {
+  --bg:              #f0f0f0;
+  --bg-header:       #e0e0e0;
+  --bg-chain:        #e8e8e8;
+  --bg-tile:         #f8f8f8;
+  --border:          #ccc;
+  --border-tile:     #ddd;
+  --text:            #333;
+  --text-strong:     #111;
+  --text-muted:      #999;
+  --text-dim:        #888;
+  --text-value:      #555;
+  --knob-track:      #ccc;
+  --toggle-off:      #bbb;
+  --accent:          #1a7fe0;
+  --delete-hover-bg: #fde8e8;
+  --delete-hover-fg: #c0392b;
+}

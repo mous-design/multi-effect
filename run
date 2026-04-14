@@ -10,7 +10,7 @@ case "$TASK" in
   build-release)
     cargo build --release
     ;;
-  build-ts)
+  npm-build)
     cd ui && npm run build
     ;;
   "")
@@ -24,7 +24,7 @@ case "$TASK" in
 where command is one of:
     build-dev
     build-release
-    build-ts
+    npm-build
     run [-v] [-f]"
     ;;
 esac
