@@ -30,7 +30,7 @@ pub enum ConfigRequest {
     GetConfig       { resp: Resp<Result<Value>> },
     GetSnapshot { resp: Resp<Result<ConfigSnapshot>> },
     GetDevices      { resp: Resp<Result<Value>> },
-    GetControllers  { slot: u8, resp: Resp<Result<Value>> },
+    GetControllers  { resp: Resp<Result<Value>> },
 
     // -- Config mutations (need response for HTTP) --
     UpdateConfig      { body: Value, resp: OptionResp },
@@ -40,7 +40,7 @@ pub enum ConfigRequest {
     PutDevice         { alias: String, def: DeviceDef, resp: OptionResp },
     DeleteDevice      { alias: String, resp: OptionResp },
     RenameDevice      { old_alias: String, new_alias: String, def: DeviceDef, resp: OptionResp },
-    UpdateControllers { slot: u8, controllers: Vec<ControllerDef>, resp: OptionResp },
+    UpdateControllers { controllers: Vec<ControllerDef>, resp: OptionResp },
     ApplySet          { path: String, value: f32, resp: OptionResp },
 
     // -- Chain structure update --
@@ -140,11 +140,11 @@ impl ConfigMaster {
                     .unwrap_or(Value::Array(vec![]));
                 let _ = resp.send(Ok(snd));
             }
-            ConfigRequest::GetControllers { slot, resp } => {
-                let snd = self.cfg.presets.get(slot)
-                    .and_then(|p| serde_json::to_value(&p.controllers).ok())
+            ConfigRequest::GetControllers { resp } => {
+                let controllers = &self.snapshot.preset.controllers;
+                let value = serde_json::to_value(controllers).ok()
                     .unwrap_or(Value::Array(vec![]));
-                let _ = resp.send(Ok(snd));
+                let _ = resp.send(Ok(value));
             }
 
             // Mutations
@@ -169,8 +169,8 @@ impl ConfigMaster {
             ConfigRequest::RenameDevice { old_alias, new_alias, def, resp } => {
                 Self::respond(resp, self.handle_rename_device(&old_alias, &new_alias, def));
             }
-            ConfigRequest::UpdateControllers { slot, controllers, resp } => {
-                Self::respond(resp, self.handle_update_controllers(slot, controllers));
+            ConfigRequest::UpdateControllers { controllers, resp } => {
+                Self::respond(resp, self.handle_update_controllers(controllers));
             }
             ConfigRequest::SetChains { json, resp } => {
                 Self::respond(resp, self.handle_set_chains(&json));
@@ -250,7 +250,9 @@ impl ConfigMaster {
         self.cfg.presets.active = slot;
         self.snapshot.preset_indices = self.cfg.presets.indices();
         self.cfg.persist()?;
-        self.notify_state_changed();
+        if self.snapshot.set_state(Clean) {
+            self.notify_state_changed();
+        }
         Ok(())
     }
 
@@ -263,6 +265,7 @@ impl ConfigMaster {
         // If this is the active preset, clear all live objects
         if slot == self.cfg.presets.active {
             self.snapshot.load_preset(PresetDef::default(), Dirty);
+            self.notify_preset_loaded();
             self.clear_controllers();
             self.cfg.presets.active = PRESET_NONE;
             if self.audio.push_patch(Vec::new()).is_err() {
@@ -331,11 +334,15 @@ impl ConfigMaster {
     }
 
     // @todo check
-    fn handle_update_controllers(&mut self, slot: u8, controllers: Vec<ControllerDef>) -> Result<()> {
-        let preset = self.cfg.presets.get_mut(slot)
-            .with_context(|| format!("preset {slot} not found"))?;
-        preset.controllers = controllers;
-        self.cfg.persist()?;
+    fn handle_update_controllers(&mut self, controllers: Vec<ControllerDef>) -> Result<()> {
+        self.snapshot.preset.controllers = controllers;
+        if self.snapshot.set_state(Dirty) {
+            self.notify_state_changed();
+        }
+        // let preset = self.cfg.presets.get_mut(slot)
+        //     .with_context(|| format!("preset {slot} not found"))?;
+        // preset.controllers = controllers;
+        // self.cfg.persist()?;
         Ok(())
     }
 
@@ -350,14 +357,17 @@ impl ConfigMaster {
         self.audio.push_patch(chains)
             .context("patch channel full, patch not applied")?;
         self.snapshot.preset.chains = chain_defs;
-        self.snapshot.state = Dirty;
-        self.notify_state_changed();
+        if self.snapshot.set_state(Dirty) {
+            self.notify_state_changed();
+        }
         info!("Applied PATCH ({} chains)", self.snapshot.preset.chains.len());
         Ok(())
     }
 
     fn handle_apply_set(&mut self, path: &String, value: f32) -> Result<()> {
-        self.snapshot.apply_set(&path, value)?;
+        if self.snapshot.apply_set(&path, value)? {
+            self.notify_state_changed();
+        }
         let cm = ControlMessage::SetParam { path:path.clone(), value };
         self.audio.push_control(cm.clone())?;
         self.bus.send(cm).ok();
@@ -377,6 +387,7 @@ impl ConfigMaster {
         Ok(())
     }
 
+    // @tode check this!
     fn handle_reload(&mut self) -> Result<()> {
         let new_cfg = Config::load(self.cfg.config_path.clone())?;
 

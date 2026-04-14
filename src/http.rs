@@ -78,7 +78,7 @@ pub fn router(state: AppState, ui_dist_path: &str) -> Router {
         .route("/api/devices",              get(get_devices))
         .route("/api/devices/:alias",       put(put_device).delete(delete_device))
         .route("/api/devices/:alias/rename", post(post_rename_device))
-        .route("/api/preset/:n/controllers", get(get_controllers).put(put_controllers))
+        .route("/api/controllers", get(get_controllers).put(put_controllers))
         .route("/ws",                  get(ws_handler))
         .nest_service("/", ServeDir::new(ui_dist_path))
         .layer(CorsLayer::permissive())
@@ -305,17 +305,15 @@ async fn post_rename_device(
 
 async fn get_controllers(
     State(s): State<AppState>,
-    Path(slot): Path<u8>,
 ) -> (StatusCode, RespJson) {
-    s.ask_master(|tx| ConfigRequest::GetControllers { slot, resp: tx }).await
+    s.ask_master(|tx| ConfigRequest::GetControllers { resp: tx }).await
 }
 
 async fn put_controllers(
     State(s): State<AppState>,
-    Path(slot): Path<u8>,
     Json(body): Json<Vec<ControllerDef>>,
 ) -> (StatusCode, RespJson) {
     s.ask_master(|tx| ConfigRequest::UpdateControllers {
-        slot, controllers: body, resp: Some(tx) 
+        controllers: body, resp: Some(tx) 
     }).await
 }

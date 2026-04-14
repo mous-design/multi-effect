@@ -54,14 +54,14 @@ impl ConfigSnapshot {
         }
     }
     
-    pub fn load_preset(&mut self, preset: PresetDef, state: SnapshotState) {
-        self.state = state;
+    pub fn load_preset(&mut self, preset: PresetDef, state: SnapshotState ) {
         self.stash = None;
         self.preset = preset;
+        self.state = state;
     }
 
     /// Update a single node parameter.  `param_path` = "node-key.param".
-    pub fn apply_set(&mut self, param_path: &str, value: f32) -> Result<()> {
+    pub fn apply_set(&mut self, param_path: &str, value: f32) -> Result<bool> {
         let Some((node_key, param)) = param_path.split_once('.') else {
             bail!("invalid param path '{param_path}': missing '.'");
         };
@@ -70,11 +70,10 @@ impl ConfigSnapshot {
                 if node.key == node_key {
                     node.params[param] = Value::from(value);
                     // If comparing, we can delete the stash
-                    if matches!(Comparing, ComparingPersisted) {
+                    if matches!(self.state, Comparing | ComparingPersisted) {
                         self.stash = None;
                     }
-                    self.state = Dirty;
-                    return Ok(());
+                    return Ok(self.set_state(Dirty));
 
                 }
             }
@@ -82,10 +81,19 @@ impl ConfigSnapshot {
         bail!("No node found with key {node_key}")
     }
 
+    pub fn set_state(&mut self, state:SnapshotState) -> bool {
+        let changed_state = match state {
+            Clean | CleanPersisted => !matches!(self.state, Clean | CleanPersisted),
+            Dirty | DirtyPersisted => !matches!(self.state, Dirty | DirtyPersisted),
+            Comparing | ComparingPersisted => !matches!(self.state, Comparing | ComparingPersisted),
+        };
+        self.state = state;
+        changed_state
+    }
+
     pub fn set_to_slot(&mut self, slot: u8) {
         self.preset.index = slot;
         self.stash = None;
-        self.state = Clean;
     }
 
 

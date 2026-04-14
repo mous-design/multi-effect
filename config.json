@@ -83,7 +83,43 @@
     "active": 1,
     "items": [
       {
-        "chains": [],
+        "chains": [
+          {
+            "input": [
+              1,
+              1
+            ],
+            "nodes": [
+              {
+                "active": true,
+                "feedback": 0.4,
+                "key": "01-delay",
+                "time": 0.397,
+                "type": "delay",
+                "wet": 0.5
+              },
+              {
+                "active": true,
+                "damping": 0.5,
+                "key": "02-reverb",
+                "room_size": 0.5,
+                "type": "reverb",
+                "wet": 0.27
+              },
+              {
+                "active": true,
+                "decay": 1,
+                "key": "03-looper",
+                "type": "looper",
+                "wet": 1
+              }
+            ],
+            "output": [
+              1,
+              2
+            ]
+          }
+        ],
         "controllers": [],
         "index": 1
       },
