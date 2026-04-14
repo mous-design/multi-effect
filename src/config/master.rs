@@ -484,7 +484,7 @@ impl ConfigMaster {
 
     fn build_chains(&self, chains: &Vec<ChainDef>) -> Result<Vec<Chain>> {
         let mut chains = patch::load_patch_def(chains, &self.cfg)
-            .context("build_chains build error")?;
+            .context("Chain error")?;
 
         for chain in &mut chains { chain.init_bus(&self.bus); }
         Ok(chains)

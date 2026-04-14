@@ -20,16 +20,15 @@ fn round_floats(json: &Value) -> Value {
 }
 /// Convert float JSON numbers that are whole numbers back to integers (e.g. 1.0 → 1).
 /// Repairs config files that were incorrectly serialized with integer fields as floats.
-/// @todo check if this actually does something!
 fn whole_floats_to_int(json: &Value) -> Value {
     match json {
         Value::Number(n) if n.is_f64() => {
             let f = n.as_f64().unwrap();
-                if f.fract() == 0.0 {
-                    Value::from(f as i64)
-                } else {
-                    Value::from(f as u64)
-                }
+            if f.fract() == 0.0 {
+                Value::from(f as i64)
+            } else {
+                json.clone() // preserve float as-is
+            }
         }
         Value::Array(arr) => arr.into_iter().map(whole_floats_to_int).collect(),
         Value::Object(obj) => Value::Object(

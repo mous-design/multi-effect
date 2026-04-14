@@ -4,7 +4,10 @@ export function setApiErrorHandler(fn: (msg: string) => void) { onError = fn; }
 
 async function api(url: string, init?: RequestInit): Promise<Response> {
     const res = await fetch(url, init).catch(e => { onError(e.message); throw e; });
-    if (!res.ok) onError(`${init?.method ?? 'GET'} ${url}: ${res.status}`);
+    if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        onError(body?.error ?? `${init?.method ?? 'GET'} ${url}: ${res.status}`);
+    }
     return res;
 }
 

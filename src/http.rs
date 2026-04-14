@@ -44,7 +44,11 @@ impl AppState {
     {
         match self.request(build).await {
             Ok(val) => (StatusCode::OK, Json(serde_json::to_value(val).unwrap_or_default())),
-            Err(e)  => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))),
+            Err(e)  => {
+                let full = format!("{e:#}");
+                warn!("{full}");
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": full })))
+            }
         }
     }
 }

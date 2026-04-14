@@ -407,35 +407,20 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
 // helpers
 // ---------------------------------------------------------------------------
 
-fn eq_dry_from_params(params: &serde_json::Map<String, Value>) -> f32 {
-    match params.get("dry") {
-        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) as f32,
-        Some(Value::Array(a))  => a.first()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as f32,
-        _ => 0.0,
-    }
-}
-
 fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
     const EQ_TYPES: &[&str] = &["eq_param", "eq_low", "eq_high"];
 
     for (mix_pos, mix_node) in nodes.iter().enumerate()
         .filter(|(_, n)| n.device_type == "mix")
     {
-        let dry = eq_dry_from_params(&mix_node.params);
-        if dry >= 1.0 { continue; }  // dry=1.0 → no subtraction → no issue
-
-        if let Some((eq_pos, eq_node)) = nodes.iter().enumerate()
-            .find(|(_, n)| EQ_TYPES.contains(&n.device_type.as_str()))
+        if let Some((_, eq_node)) = nodes.iter().enumerate()
+            .find(|(pos, n)| *pos < mix_pos && EQ_TYPES.contains(&n.device_type.as_str()))
         {
-            if eq_pos < mix_pos {
-                bail!(
-                    "EQ '{}' (pos {}) before Mix '{}' (pos {}) with dry={dry:.2}: \
-                     causes phase artefacts on analogue bypass. Move EQ after Mix, or set Mix dry=0.",
-                    eq_node.key, eq_pos, mix_node.key, mix_pos
-                );
-            }
+            bail!(
+                "EQ must be placed after Mix (analogue bypass phase issue). \
+                 Move '{}' after '{}'.",
+                eq_node.key, mix_node.key
+            );
         }
     }
     Ok(())
@@ -583,5 +568,49 @@ fn flatten_rec(v: &Value, prefix: String, out: &mut Vec<(String, f32)>) {
             out.push((prefix, if *b { 1.0 } else { 0.0 }));
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nodedef_preserves_floats() {
+        let json = r#"{"key":"01-delay","type":"delay","wet":0.65,"feedback":0.616,"time":0.626,"active":true}"#;
+        let node: NodeDef = serde_json::from_str(json).unwrap();
+        eprintln!("Direct parse: {:?}", node.params);
+
+        let serialized = serde_json::to_value(&node).unwrap();
+        eprintln!("Serialized:   {serialized}");
+
+        let node2: NodeDef = serde_json::from_value(serialized).unwrap();
+        eprintln!("Round-trip:   {:?}", node2.params);
+
+        let wet = node2.params.get("wet").unwrap().as_f64().unwrap();
+        assert!((wet - 0.65).abs() < 0.01, "wet should be ~0.65, got {wet}");
+    }
+
+    #[test]
+    fn full_config_preserves_floats() {
+        use crate::config::Config;
+
+        // Method 1: load → from_value (current path)
+        let cfg1 = Config::load(std::path::PathBuf::from("config.json")).unwrap();
+        let p1 = cfg1.presets.get(1).unwrap();
+        let delay = p1.chains[0].nodes.iter().find(|n| n.key == "01-delay").unwrap();
+        let wet_from_value = delay.params.get("wet").unwrap().as_f64().unwrap();
+        eprintln!("from_value: wet = {wet_from_value}");
+
+        // Method 2: from_str directly
+        let json_str = std::fs::read_to_string("config.json").unwrap();
+        let cfg2: Config = serde_json::from_str(&json_str).unwrap();
+        let p2 = cfg2.presets.get(1).unwrap();
+        let delay2 = p2.chains[0].nodes.iter().find(|n| n.key == "01-delay").unwrap();
+        let wet_from_str = delay2.params.get("wet").unwrap().as_f64().unwrap();
+        eprintln!("from_str:   wet = {wet_from_str}");
+
+        assert!((wet_from_str - 0.65).abs() < 0.01, "from_str: wet should be ~0.65, got {wet_from_str}");
+        assert!((wet_from_value - 0.65).abs() < 0.01, "from_value: wet should be ~0.65, got {wet_from_value}");
     }
 }
