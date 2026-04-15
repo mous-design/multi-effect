@@ -56,14 +56,16 @@ impl SerialControl {
             info!("Serial '{device}': connected");
             if let Err(e) = handle_client(
                 port,
-                bus.clone(), 
+                bus.clone(),
                 Arc::clone(&mappings),
                 fallback,
                 master_tx.clone(),
-                &alias
+                &alias,
+                active_rx.clone(),
             ).await {
                 tracing::warn!("Serial '{device}': {e}");
             }
+            if !*active_rx.borrow() { return Ok(()); }
 
             // Reconnect delay
             tokio::select! {

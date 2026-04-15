@@ -67,14 +67,15 @@ impl NetworkControl {
                     let (socket, addr) = result?;
                     tracing::info!("Control connection from {addr}");
 
-                    let bus       = self.bus.clone();
-                    let mappings  = Arc::clone(&self.mappings);
-                    let fallback  = self.fallback;
-                    let master_tx = self.master_tx.clone();
-                    let alias     = self.alias.clone();
+                    let bus        = self.bus.clone();
+                    let mappings   = Arc::clone(&self.mappings);
+                    let fallback   = self.fallback;
+                    let master_tx  = self.master_tx.clone();
+                    let alias      = self.alias.clone();
+                    let client_rx  = active_rx.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_client(socket, bus, mappings, fallback, master_tx, &alias).await {
+                        if let Err(e) = handle_client(socket, bus, mappings, fallback, master_tx, &alias, client_rx).await {
                             tracing::warn!("Client {addr}: {e}");
                         }
                     });
