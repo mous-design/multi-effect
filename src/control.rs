@@ -1,15 +1,17 @@
 pub mod mapping;
+pub mod handle;
 pub mod midi;
 pub mod network;
 pub mod serial;
 
+use anyhow::{Result, Context, bail};
 pub use network::NetworkControl;
 pub use serial::SerialControl;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use mapping::ControllerDef;
-use tracing::{debug, warn};
+use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // Connection ID generator
@@ -81,17 +83,14 @@ pub fn new_event_bus() -> EventBus {
 /// - If the channel ID is in `mappings`, convert and publish `SetParam`.
 /// - If not found and `fallback` is true, publish `SetParam { path: channel_id, value: raw }`.
 /// - If not found and `fallback` is false, silently ignore.
-pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, bus: &EventBus, source: &str) {
+pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, bus: &EventBus, source: &str) -> Result<()> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
     if parts.len() != 3 {
-        warn!("Malformed CTRL command: {line}");
-        return;
+        bail!("Malformed CTRL command: {line}");
     }
     let channel_id = parts[1];
-    let raw: f32 = match parts[2].trim().parse() {
-        Ok(v)  => v,
-        Err(_) => { warn!("CTRL value not a number: {}", parts[2]); return; }
-    };
+    let raw: f32 = parts[2].trim().parse()
+        .with_context(|| format!("CTRL value not a number: {}", parts[2]) )?;
 
     if let Some(def) = mappings.mappings.get(channel_id) {
         let value = def.to_param(raw);
@@ -102,6 +101,7 @@ pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, b
         bus.send(ControlMessage::SetParam { path: channel_id.to_string(), value: raw, source: source.to_string() }).ok();
     }
     // else: dedicated controller mode — unknown channels are silently ignored
+    Ok(())
 }
 
 /// Build the outbound line for a `SetParam` event:

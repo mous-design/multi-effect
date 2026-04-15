@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot,};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{debug, info, warn};
-use crate::config::master::ConfigRequest;
+use crate::config::master::{ConfigRequest, snd_request};
 use crate::control::{ControlMessage, EventBus};
 use crate::control::mapping::{ControllerDef, DeviceDef};
 
@@ -26,23 +26,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Send a request to the master and return the result directly.
-    async fn request<T, F>(&self, build: F) -> Result<T>
-    where
-        F: FnOnce(oneshot::Sender<Result<T>>) -> ConfigRequest,
-    {
-        let (tx, rx) = oneshot::channel();
-        self.master_tx.send(build(tx)).await?;
-        rx.await?
-    }
-
     /// HTTP wrapper around request() — returns (StatusCode, Json).
     async fn ask_master<T, F>(&self, build: F) -> (StatusCode, RespJson)
     where
         T: serde::Serialize,
         F: FnOnce(oneshot::Sender<Result<T>>) -> ConfigRequest,
     {
-        match self.request(build).await {
+        match snd_request(&self.master_tx, build).await {
             Ok(val) => (StatusCode::OK, Json(serde_json::to_value(val).unwrap_or_default())),
             Err(e)  => {
                 let full = format!("{e:#}");
@@ -201,7 +191,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let source = crate::control::connection_id("ws");
 
     // Push initial snapshot so the UI can render immediately.
-    if let Ok(snap) = state.request(|tx| ConfigRequest::GetSnapshot { resp: tx }).await {
+    if let Ok(snap) = snd_request(&state.master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await {
         let preset = serde_json::to_value(&snap.preset).unwrap_or_default();
         let j = serde_json::json!({
             "type": "preset",

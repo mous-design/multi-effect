@@ -578,3 +578,18 @@ impl ConfigMaster {
         }
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Public access
+// ---------------------------------------------------------------------------
+
+/// Send a request to the master and return the result directly.
+pub async fn snd_request<T, F>(master_tx: &mpsc::Sender<ConfigRequest>, build: F) -> Result<T>
+where
+    F: FnOnce(oneshot::Sender<Result<T>>) -> ConfigRequest,
+{
+    let (tx, rx) = oneshot::channel();
+    master_tx.send(build(tx)).await?;
+    rx.await?
+}
