@@ -15,9 +15,9 @@ use crate::engine::patch;
 /// - an inbound read or ack-write fails;
 /// - `active_rx` flips to `false` (device deactivation).
 ///
-/// Inbound and outbound are driven from a single task via `select!`, so when
-/// any arm completes the others are cancelled on drop — no outbound task
-/// keeps writing into a dead peer after inbound has ended.
+/// Inbound and outbound communicate through an `ack` channel: inbound sends
+/// OK/ERR strings, outbound owns the writer exclusively and flushes both bus
+/// events and acks — no shared writer, no Mutex.
 pub async fn handle_client<S>(
     stream:        S,
     bus:           EventBus,
@@ -30,41 +30,59 @@ pub async fn handle_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (reader, writer) = tokio::io::split(stream);
+    let (reader, mut writer) = tokio::io::split(stream);
     let source = connection_id(alias);
-    let writer = Arc::new(tokio::sync::Mutex::new(writer));
     let mut bus_rx = bus.subscribe();
+    let (ack_tx, mut ack_rx) = mpsc::channel::<String>(8);
 
-    // Outbound: forward bus events to this peer (mapped where possible).
+    // Outbound: sole owner of the writer.
+    // Selects over bus events and ack responses from inbound.
     let outbound = async {
-        while let Ok(msg) = bus_rx.recv().await {
-            // Skip messages originating from this connection
-            if msg.source() == source { continue; }
+        loop {
+            tokio::select! {
+                msg = bus_rx.recv() => {
+                    let msg = match msg {
+                        Ok(m)  => m,
+                        Err(_) => break,  // bus closed
+                    };
+                    if msg.source() == source { continue; }
 
-            let line = match &msg {
-                ControlMessage::SetParam { path, value, .. } => {
-                    let cfg = mappings.read().unwrap();
-                    outbound_line(path, *value, &cfg)
+                    let line = match &msg {
+                        ControlMessage::SetParam { path, value, .. } => {
+                            let cfg = mappings.read().unwrap();
+                            outbound_line(path, *value, &cfg)
+                        }
+                        ControlMessage::ProgramChange { slot, .. } => format!("PROGRAM {slot}\n"),
+                        ControlMessage::Reset { .. }               => "RESET\n".to_string(),
+                        ControlMessage::NoteOn      { .. }
+                        | ControlMessage::NoteOff   { .. }
+                        | ControlMessage::Action    { .. }
+                        | ControlMessage::NodeEvent { .. }
+                        => continue,
+                        ControlMessage::PresetLoaded { ref preset, state: ref s, .. }
+                        => format!("PRESET {}\nSTATE {s}\n", serde_json::to_string(preset).unwrap_or_default()),
+                        ControlMessage::StateChanged { ref state, preset_index, .. }
+                        => format!("STATE {state} {preset_index}\n"),
+                    };
+                    if writer.write_all(line.as_bytes()).await.is_err() {
+                        break; // peer disconnected
+                    }
                 }
-                ControlMessage::ProgramChange { slot, .. } => format!("PROGRAM {slot}\n"),
-                ControlMessage::Reset { .. }               => "RESET\n".to_string(),
-                ControlMessage::NoteOn      { .. }
-                | ControlMessage::NoteOff   { .. }
-                | ControlMessage::Action    { .. }
-                | ControlMessage::NodeEvent { .. }
-                => continue,
-                ControlMessage::PresetLoaded { ref preset, state: ref s, .. }
-                => format!("PRESET {}\nSTATE {s}\n", serde_json::to_string(preset).unwrap_or_default()),
-                ControlMessage::StateChanged { ref state, preset_index, .. }
-                => format!("STATE {state} {preset_index}\n"),
-            };
-            if writer.lock().await.write_all(line.as_bytes()).await.is_err() {
-                break; // peer disconnected
+                ack = ack_rx.recv() => {
+                    match ack {
+                        Some(line) => {
+                            if writer.write_all(line.as_bytes()).await.is_err() {
+                                break; // peer disconnected
+                            }
+                        }
+                        None => break,  // inbound dropped ack_tx
+                    }
+                }
             }
         }
     };
 
-    // Inbound: read commands, respond with OK/ERR.
+    // Inbound: reads commands, sends OK/ERR acks through the channel.
     let inbound = async {
         let mut lines = BufReader::new(reader).lines();
         while let Some(line) = lines.next_line().await? {
@@ -81,7 +99,8 @@ where
                 Ok(())  => "OK\n".to_string(),
                 Err(e)  => format!("ERR {e}\n"),
             };
-            writer.lock().await.write_all(response.as_bytes()).await?;
+            // If outbound is gone (writer dead), stop reading too.
+            if ack_tx.send(response).await.is_err() { break; }
         }
         Ok::<(), anyhow::Error>(())
     };
