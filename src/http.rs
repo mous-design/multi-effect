@@ -135,9 +135,10 @@ struct ActionBody {
     action: String,
 }
 
-async fn post_action(State(s): State<AppState>, Json(body): Json<ActionBody>) -> StatusCode {
-    s.bus.send(ControlMessage::Action { path: body.target, action: body.action, source: "http".into() }).ok();
-    StatusCode::OK
+async fn post_action(State(s): State<AppState>, Json(body): Json<ActionBody>) -> (StatusCode, RespJson) {
+    s.ask_master(|tx| ConfigRequest::ApplyAction {
+        path: body.target, action: body.action, source: "http".into(), resp: Some(tx)
+    }).await
 }
 
 async fn post_compare(State(s): State<AppState>) -> (StatusCode, RespJson) {
@@ -228,7 +229,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Inbound: WS client → bus
+    // Inbound: WS client → master
     while let Some(Ok(msg)) = stream.next().await {
         if let Message::Text(text) = msg {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -236,16 +237,16 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                     Some("set") => {
                         if let (Some(path), Some(value)) = (v["path"].as_str(), v["value"].as_f64()) {
                             debug!("WS SET {path} {value}");
-                            state.bus.send(ControlMessage::SetParam {
-                                path: path.to_string(), value: value as f32, source: source.clone(),
-                            }).ok();
+                            snd_request(&master_tx, |tx| ConfigRequest::ApplySet {
+                                path: path.to_string(), value: value as f32, source: source.clone(), resp: Some(tx),
+                            }).await.ok();
                         }
                     }
                     Some("preset") => {
                         if let Some(n) = v["n"].as_u64() {
-                            let slot = n as u8;
-                            master_tx.send(ConfigRequest::SwitchPreset { slot, resp: None }).await.ok();
-                            state.bus.send(ControlMessage::ProgramChange { slot, source: source.clone() }).ok();
+                            snd_request(&master_tx, |tx| ConfigRequest::SwitchPreset {
+                                slot: n as u8, resp: Some(tx),
+                            }).await.ok();
                         }
                     }
                     _ => {}

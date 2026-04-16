@@ -40,11 +40,14 @@ pub enum ConfigRequest {
     RenameDevice      { old_alias: String, new_alias: String, def: DeviceDef, resp: OptionResp },
     UpdateControllers { controllers: Vec<ControllerDef>, resp: OptionResp },
     ApplySet          { path: String, value: f32, source: String, resp: OptionResp },
+    ApplyCtrl         { channel_id: String, raw: f32, alias: String, fallback: bool, source: String, resp: OptionResp },
+    ApplyAction       { path: String, action: String, source: String, resp: OptionResp },
+    ApplyReset        { source: String, resp: OptionResp },
 
     // -- Chain structure update --
     SetChains         { json: String, resp: OptionResp },
 
-    // -- Fire-and-forget --
+    // -- Fire-and-forget (MIDI notes) --
     ApplyControl(ControlMessage),
     ToggleCompare { resp: OptionResp },
 
@@ -181,8 +184,17 @@ impl ConfigMaster {
             ConfigRequest::ApplySet { path, value, source, resp } => {
                 Self::respond(resp, self.handle_apply_set(&path, value, &source));
             }
-            ConfigRequest::ApplyControl(_msg) => {
-                // @todo: forward to audio + bus
+            ConfigRequest::ApplyCtrl { channel_id, raw, alias, fallback, source, resp } => {
+                Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, fallback, &source));
+            }
+            ConfigRequest::ApplyAction { path, action, source, resp } => {
+                Self::respond(resp, self.handle_apply_action(&path, &action, &source));
+            }
+            ConfigRequest::ApplyReset { source, resp } => {
+                Self::respond(resp, self.handle_apply_reset(&source));
+            }
+            ConfigRequest::ApplyControl(msg) => {
+                self.handle_apply_control(msg);
             }
             ConfigRequest::ToggleCompare { resp } => {
                 Self::respond(resp,self.handle_toggle_compare());
@@ -234,9 +246,6 @@ impl ConfigMaster {
         let chains = self.build_chains(&preset.chains)?;
         self.audio.push_patch(chains)
             .context("patch channel full, preset not loaded")?;
-
-        // @todo, must propagate to bus! This line is from http, should happen here
-        // s.bus.send(ControlMessage::ProgramChange(n)).ok();
 
         self.clear_controllers();
         self.apply_controllers(&preset.controllers);
@@ -373,6 +382,40 @@ impl ConfigMaster {
         self.audio.push_control(cm.clone())?;
         self.bus.send(cm).ok();
         Ok(())
+    }
+
+    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, fallback: bool, source: &str) -> Result<()> {
+        let mappings = self.controller_map.get(alias)
+            .map(|arc| arc.read().unwrap().clone())
+            .unwrap_or_default();
+        if let Some((path, value)) = control::translate_ctrl(channel_id, raw, &mappings, fallback) {
+            self.handle_apply_set(&path, value, source)?;
+        }
+        Ok(())
+    }
+
+    fn handle_apply_action(&mut self, path: &str, action: &str, source: &str) -> Result<()> {
+        debug!("ACTION {path} {action} [source={source}]");
+        let cm = ControlMessage::Action { path: path.to_string(), action: action.to_string(), source: source.to_string() };
+        self.audio.push_control(cm.clone())?;
+        self.bus.send(cm).ok();
+        Ok(())
+    }
+
+    fn handle_apply_reset(&mut self, source: &str) -> Result<()> {
+        debug!("RESET [source={source}]");
+        let cm = ControlMessage::Reset { source: source.to_string() };
+        self.audio.push_control(cm.clone())?;
+        self.bus.send(cm).ok();
+        Ok(())
+    }
+
+    /// Forward a fire-and-forget ControlMessage to audio + bus (used for MIDI NoteOn/NoteOff).
+    fn handle_apply_control(&mut self, msg: ControlMessage) {
+        if let Err(e) = self.audio.push_control(msg.clone()) {
+            warn!("ApplyControl: audio push failed: {e}");
+        }
+        self.bus.send(msg).ok();
     }
 
     fn handle_toggle_compare(&mut self) -> Result<()> {

@@ -4,7 +4,6 @@ pub mod midi;
 pub mod network;
 pub mod serial;
 
-use anyhow::{Result, Context, bail};
 pub use network::NetworkControl;
 pub use serial::SerialControl;
 
@@ -79,29 +78,21 @@ pub fn new_event_bus() -> EventBus {
 // Shared CTRL helpers (used by serial and net)
 // ---------------------------------------------------------------------------
 
-/// Process a `CTRL <channel_id> <raw_value>` line:
-/// - If the channel ID is in `mappings`, convert and publish `SetParam`.
-/// - If not found and `fallback` is true, publish `SetParam { path: channel_id, value: raw }`.
-/// - If not found and `fallback` is false, silently ignore.
-pub(crate) fn apply_ctrl(line: &str, mappings: &ControllerDef, fallback: bool, bus: &EventBus, source: &str) -> Result<()> {
-    let parts: Vec<&str> = line.splitn(3, ' ').collect();
-    if parts.len() != 3 {
-        bail!("Malformed CTRL command: {line}");
-    }
-    let channel_id = parts[1];
-    let raw: f32 = parts[2].trim().parse()
-        .with_context(|| format!("CTRL value not a number: {}", parts[2]) )?;
-
+/// Translate a CTRL channel/value pair using the device's mappings.
+///
+/// Returns `Some((path, value))` if the channel is mapped or fallback is enabled,
+/// `None` if the channel is unknown and fallback is disabled (dedicated controller mode).
+pub(crate) fn translate_ctrl(channel_id: &str, raw: f32, mappings: &ControllerDef, fallback: bool) -> Option<(String, f32)> {
     if let Some(def) = mappings.mappings.get(channel_id) {
         let value = def.to_param(raw);
-        debug!("CTRL {channel_id} {raw} → SET {} {value:.4} [source={source}]", def.target);
-        bus.send(ControlMessage::SetParam { path: def.target.clone(), value, source: source.to_string() }).ok();
+        debug!("CTRL {channel_id} {raw} → SET {} {value:.4}", def.target);
+        Some((def.target.clone(), value))
     } else if fallback {
-        debug!("CTRL {channel_id} {raw} → SET {channel_id} {raw} (fallback) [source={source}]");
-        bus.send(ControlMessage::SetParam { path: channel_id.to_string(), value: raw, source: source.to_string() }).ok();
+        debug!("CTRL {channel_id} {raw} → SET {channel_id} {raw} (fallback)");
+        Some((channel_id.to_string(), raw))
+    } else {
+        None
     }
-    // else: dedicated controller mode — unknown channels are silently ignored
-    Ok(())
 }
 
 /// Build the outbound line for a `SetParam` event:

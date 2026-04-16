@@ -6,9 +6,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncRead, AsyncWrite
 use tokio::sync::{mpsc, watch};
 
 use crate::config::master::{ConfigRequest, snd_request};
-use super::{apply_ctrl, connection_id, outbound_line, ControlMessage, EventBus};
+use super::{connection_id, outbound_line, ControlMessage, EventBus};
 use super::mapping::ControllerDef;
 use crate::engine::patch;
+
 
 /// Run a full-duplex control session on `stream` until one of:
 /// - the peer disconnects (inbound EOF or a write error);
@@ -83,6 +84,7 @@ where
     };
 
     // Inbound: reads commands, sends OK/ERR acks through the channel.
+    // All commands are routed through master_tx — no direct bus access.
     let inbound = async {
         let mut lines = BufReader::new(reader).lines();
         while let Some(line) = lines.next_line().await? {
@@ -90,10 +92,9 @@ where
             if line.is_empty() { continue; }
 
             let res = if line.starts_with("CTRL ") {
-                let cfg = mappings.read().unwrap();
-                apply_ctrl(&line, &cfg, fallback, &bus, &source)
+                handle_ctrl(&line, &master_tx, alias, fallback, &source).await
             } else {
-                handle_command(&line, &bus, &master_tx, &source).await
+                handle_command(&line, &master_tx, &source).await
             };
             let response = match res {
                 Ok(())  => "OK\n".to_string(),
@@ -113,9 +114,34 @@ where
     Ok(())
 }
 
+/// Parse and forward a CTRL line to master for mapping translation.
+async fn handle_ctrl(
+    line:      &str,
+    master_tx: &mpsc::Sender<ConfigRequest>,
+    alias:     &str,
+    fallback:  bool,
+    source:    &str,
+) -> Result<()> {
+    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+    if parts.len() != 3 {
+        bail!("Malformed CTRL command: {line}");
+    }
+    let channel_id = parts[1];
+    let raw: f32 = parts[2].trim().parse()
+        .with_context(|| format!("CTRL value not a number: {}", parts[2]))?;
+
+    snd_request(master_tx, |tx| ConfigRequest::ApplyCtrl {
+        channel_id: channel_id.to_string(),
+        raw,
+        alias: alias.to_string(),
+        fallback,
+        source: source.to_string(),
+        resp: Some(tx),
+    }).await
+}
+
 pub(crate) async fn handle_command(
     line:      &str,
-    bus:       &EventBus,
     master_tx: &mpsc::Sender<ConfigRequest>,
     source:    &str,
 ) -> Result<()> {
@@ -124,7 +150,7 @@ pub(crate) async fn handle_command(
 
     match cmd {
         // ------------------------------------------------------------------
-        // SET <key.param> <float>
+        // SET <key.param> <value>
         // ------------------------------------------------------------------
         "SET" => {
             let (path, val_str) = rest
@@ -132,16 +158,14 @@ pub(crate) async fn handle_command(
                 .context("usage: SET <key.param> <value>")?;
             let val_str = val_str.trim();
             if let Ok(value) = val_str.parse::<f32>() {
-                snd_request(&master_tx, |tx| ConfigRequest::ApplySet {
+                snd_request(master_tx, |tx| ConfigRequest::ApplySet {
                      path: path.to_string(), value, source: src, resp: Some(tx)
                 }).await?;
             } else {
                 // Non-numeric value → action dispatch (e.g. "SET 01-looper.action rec")
-                bus.send(ControlMessage::Action {
-                    path:   path.to_string(),
-                    action: val_str.to_string(),
-                    source: src,
-                }).ok();
+                snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
+                    path: path.to_string(), action: val_str.to_string(), source: src, resp: Some(tx)
+                }).await?;
             }
         },
 
@@ -155,7 +179,7 @@ pub(crate) async fn handle_command(
                 bail!("no numeric values found in update object");
             }
             for (path, value) in &pairs {
-                snd_request(&master_tx, |tx| ConfigRequest::ApplySet {
+                snd_request(master_tx, |tx| ConfigRequest::ApplySet {
                      path: path.clone(), value: *value, source: src.clone(), resp: Some(tx)
                 }).await?;
             }
@@ -165,24 +189,25 @@ pub(crate) async fn handle_command(
         // CHAINS <json>
         // ------------------------------------------------------------------
         "CHAINS" => {
-            snd_request(&master_tx, |tx| ConfigRequest::SetChains {
+            snd_request(master_tx, |tx| ConfigRequest::SetChains {
                 json: rest.to_string(), resp: Some(tx),
             }).await?;
         }
 
         // ------------------------------------------------------------------
         "RESET" => {
-            bus.send(ControlMessage::Reset { source: src }).ok();
+            snd_request(master_tx, |tx| ConfigRequest::ApplyReset {
+                source: src, resp: Some(tx),
+            }).await?;
         },
 
         "PROGRAM" => {
             let slot: u8 = rest.trim()
                 .parse()
                 .context("program number must be 0-127")?;
-            snd_request(&master_tx, |tx| ConfigRequest::SwitchPreset {
+            snd_request(master_tx, |tx| ConfigRequest::SwitchPreset {
                 slot, resp: Some(tx),
             }).await?;
-            bus.send(ControlMessage::ProgramChange { slot, source: src }).ok();
         },
 
         // ------------------------------------------------------------------
@@ -192,13 +217,13 @@ pub(crate) async fn handle_command(
             let slot: u8 = rest.trim()
                 .parse()
                 .context("slot must be 0..127")?;
-            snd_request(&master_tx, |tx| ConfigRequest::SavePreset {
+            snd_request(master_tx, |tx| ConfigRequest::SavePreset {
                 slot, resp: Some(tx),
             }).await?;
         },
 
         "COMPARE" => {
-            snd_request(&master_tx, |tx| ConfigRequest::ToggleCompare {
+            snd_request(master_tx, |tx| ConfigRequest::ToggleCompare {
                 resp: Some(tx),
             }).await?;
         },
