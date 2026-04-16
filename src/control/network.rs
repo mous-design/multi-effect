@@ -1,12 +1,9 @@
-use std::sync::{Arc, RwLock};
-
 use anyhow::Result;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::master::ConfigRequest;
 use super::EventBus;
-use super::mapping::ControllerDef;
 use super::handle::handle_client;
 
 /// Text-based TCP control server.
@@ -35,7 +32,6 @@ pub struct NetworkControl {
     port:        u16,
     fallback:    bool,
     bus:         EventBus,
-    pub mappings: Arc<RwLock<ControllerDef>>,
     master_tx:   mpsc::Sender<ConfigRequest>,
 }
 
@@ -46,10 +42,9 @@ impl NetworkControl {
         port:      u16,
         fallback:  bool,
         bus:       EventBus,
-        mappings:  Arc<RwLock<ControllerDef>>,
         master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { alias, host, port, fallback, bus, mappings, master_tx }
+        Self { alias, host, port, fallback, bus, master_tx }
     }
 
     pub async fn run(
@@ -68,14 +63,13 @@ impl NetworkControl {
                     tracing::info!("Control connection from {addr}");
 
                     let bus        = self.bus.clone();
-                    let mappings   = Arc::clone(&self.mappings);
                     let fallback   = self.fallback;
                     let master_tx  = self.master_tx.clone();
                     let alias      = self.alias.clone();
                     let client_rx  = active_rx.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_client(socket, bus, mappings, fallback, master_tx, &alias, client_rx).await {
+                        if let Err(e) = handle_client(socket, bus, fallback, master_tx, &alias, client_rx).await {
                             tracing::warn!("Client {addr}: {e}");
                         }
                     });

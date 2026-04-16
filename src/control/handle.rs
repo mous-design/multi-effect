@@ -1,15 +1,11 @@
-use std::sync::{Arc, RwLock};
-
 use anyhow::{Result, Context, bail};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::master::{ConfigRequest, snd_request};
-use super::{connection_id, outbound_line, ControlMessage, EventBus};
-use super::mapping::ControllerDef;
+use super::{connection_id, ControlMessage, EventBus};
 use crate::engine::patch;
-
 
 /// Run a full-duplex control session on `stream` until one of:
 /// - the peer disconnects (inbound EOF or a write error);
@@ -19,10 +15,12 @@ use crate::engine::patch;
 /// Inbound and outbound communicate through an `ack` channel: inbound sends
 /// OK/ERR strings, outbound owns the writer exclusively and flushes both bus
 /// events and acks — no shared writer, no Mutex.
+///
+/// All mapping work (inbound CTRL translation, outbound reverse mapping) is
+/// delegated to master via `master_tx`
 pub async fn handle_client<S>(
     stream:        S,
     bus:           EventBus,
-    mappings:      Arc<RwLock<ControllerDef>>,
     fallback:      bool,
     master_tx:     mpsc::Sender<ConfigRequest>,
     alias:         &str,
@@ -50,8 +48,12 @@ where
 
                     let line = match &msg {
                         ControlMessage::SetParam { path, value, .. } => {
-                            let cfg = mappings.read().unwrap();
-                            outbound_line(path, *value, &cfg)
+                            match snd_request(&master_tx, |tx| ConfigRequest::ReverseMap {
+                                path: path.clone(), value: *value, alias: alias.to_string(), resp: tx,
+                            }).await {
+                                Ok(Some((ch, raw))) => format!("CTRL {ch} {raw}\n"),
+                                _ => format!("SET {path} {value:.4}\n"),
+                            }
                         }
                         ControlMessage::ProgramChange { slot, .. } => format!("PROGRAM {slot}\n"),
                         ControlMessage::Reset { .. }               => "RESET\n".to_string(),
@@ -135,6 +137,7 @@ async fn handle_ctrl(
         raw,
         alias: alias.to_string(),
         fallback,
+        midi_channel: None,
         source: source.to_string(),
         resp: Some(tx),
     }).await

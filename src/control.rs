@@ -75,7 +75,7 @@ pub fn new_event_bus() -> EventBus {
 }
 
 // ---------------------------------------------------------------------------
-// Shared CTRL helpers (used by serial and net)
+// CTRL translation helper (called by master)
 // ---------------------------------------------------------------------------
 
 /// Translate a CTRL channel/value pair using the device's mappings.
@@ -92,16 +92,5 @@ pub(crate) fn translate_ctrl(channel_id: &str, raw: f32, mappings: &ControllerDe
         Some((channel_id.to_string(), raw))
     } else {
         None
-    }
-}
-
-/// Build the outbound line for a `SetParam` event:
-/// - If a reverse mapping exists: `CTRL <channel_id> <raw_value>\n`
-/// - Otherwise:                   `SET <path> <value>\n`
-pub(crate) fn outbound_line(path: &str, value: f32, mappings: &ControllerDef) -> String {
-    if let Some((ch, def)) = mappings.channel_for_target(path) {
-        format!("CTRL {ch} {}\n", def.to_ctrl_str(value))
-    } else {
-        format!("SET {path} {value:.4}\n")
     }
 }

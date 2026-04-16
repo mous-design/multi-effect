@@ -1,5 +1,3 @@
-use std::sync::{Arc, RwLock};
-
 use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tokio_serial::SerialPortBuilderExt;
@@ -7,7 +5,6 @@ use tracing::info;
 
 use crate::config::master::ConfigRequest;
 use crate::control::EventBus;
-use crate::control::mapping::ControllerDef;
 use super::handle::handle_client;
 
 pub struct SerialControl {
@@ -16,7 +13,6 @@ pub struct SerialControl {
     baud:      u32,
     fallback:  bool,
     bus:       EventBus,
-    pub mappings: Arc<RwLock<ControllerDef>>,
     master_tx: mpsc::Sender<ConfigRequest>,
 }
 
@@ -27,14 +23,13 @@ impl SerialControl {
         baud:      u32,
         fallback:  bool,
         bus:       EventBus,
-        mappings:  Arc<RwLock<ControllerDef>>,
         master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { alias, device, baud, fallback, bus, mappings, master_tx }
+        Self { alias, device, baud, fallback, bus, master_tx }
     }
 
     pub async fn run(self, mut active_rx: watch::Receiver<bool>) -> Result<()> {
-        let Self { alias, device, baud, fallback, bus, mappings, master_tx } = self;
+        let Self { alias, device, baud, fallback, bus, master_tx } = self;
 
         loop {
             if !*active_rx.borrow() { return Ok(()); }
@@ -57,7 +52,6 @@ impl SerialControl {
             if let Err(e) = handle_client(
                 port,
                 bus.clone(),
-                Arc::clone(&mappings),
                 fallback,
                 master_tx.clone(),
                 &alias,

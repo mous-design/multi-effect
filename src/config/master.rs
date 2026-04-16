@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -40,15 +39,18 @@ pub enum ConfigRequest {
     RenameDevice      { old_alias: String, new_alias: String, def: DeviceDef, resp: OptionResp },
     UpdateControllers { controllers: Vec<ControllerDef>, resp: OptionResp },
     ApplySet          { path: String, value: f32, source: String, resp: OptionResp },
-    ApplyCtrl         { channel_id: String, raw: f32, alias: String, fallback: bool, source: String, resp: OptionResp },
+    ApplyCtrl         { channel_id: String, raw: f32, alias: String, fallback: bool,
+                        midi_channel: Option<u8>, source: String, resp: OptionResp },
     ApplyAction       { path: String, action: String, source: String, resp: OptionResp },
     ApplyReset        { source: String, resp: OptionResp },
+    ReverseMap        { path: String, value: f32, alias: String,
+                        resp: Resp<Result<Option<(String, f32)>>> },
 
     // -- Chain structure update --
     SetChains         { json: String, resp: OptionResp },
 
-    // -- Fire-and-forget (MIDI notes) --
-    ApplyControl(ControlMessage),
+    // -- Fire-and-forget (MIDI) --
+    ApplyControl { msg: ControlMessage, midi_channel: Option<u8>, alias: String },
     ToggleCompare { resp: OptionResp },
 
     // -- Internal --
@@ -67,8 +69,8 @@ pub struct ConfigMaster {
     snapshot:     ConfigSnapshot,
     /// Handle to push data into the audio engine (lock-free ring buffers).
     audio: AudioHandle,
-    /// Per-device-alias mapping definitions. Shared with device tasks.
-    controller_map:   HashMap<String, Arc<RwLock<ControllerDef>>>,
+    /// Per-device-alias mapping definitions.
+    controller_map:   HashMap<String, ControllerDef>,
     /// Per-device kill switch. Send false → device task shuts down gracefully.
     device_active:    HashMap<String, watch::Sender<bool>>,
     /// Broadcast channel (tokio::broadcast) for notifying all listeners (MIDI out, serial, network, WS) of control messages.
@@ -86,8 +88,8 @@ pub fn spawn(cfg: Config, audio: AudioHandle) -> Result<(mpsc::Sender<ConfigRequ
 
     let (master_tx, req_rx) = mpsc::channel(256);
 
-    let controller_map: HashMap<String, Arc<RwLock<ControllerDef>>> = cfg.control_devices.keys()
-        .map(|alias| (alias.clone(), Arc::new(RwLock::new(ControllerDef::default()))))
+    let controller_map: HashMap<String, ControllerDef> = cfg.control_devices.keys()
+        .map(|alias| (alias.clone(), ControllerDef::default()))
         .collect();
     let device_active = HashMap::new();
     let ret_tx = master_tx.clone();
@@ -184,8 +186,8 @@ impl ConfigMaster {
             ConfigRequest::ApplySet { path, value, source, resp } => {
                 Self::respond(resp, self.handle_apply_set(&path, value, &source));
             }
-            ConfigRequest::ApplyCtrl { channel_id, raw, alias, fallback, source, resp } => {
-                Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, fallback, &source));
+            ConfigRequest::ApplyCtrl { channel_id, raw, alias, fallback, midi_channel, source, resp } => {
+                Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, fallback, midi_channel, &source));
             }
             ConfigRequest::ApplyAction { path, action, source, resp } => {
                 Self::respond(resp, self.handle_apply_action(&path, &action, &source));
@@ -193,8 +195,11 @@ impl ConfigMaster {
             ConfigRequest::ApplyReset { source, resp } => {
                 Self::respond(resp, self.handle_apply_reset(&source));
             }
-            ConfigRequest::ApplyControl(msg) => {
-                self.handle_apply_control(msg);
+            ConfigRequest::ReverseMap { path, value, alias, resp } => {
+                let _ = resp.send(Ok(self.handle_reverse_map(&path, value, &alias)));
+            }
+            ConfigRequest::ApplyControl { msg, midi_channel, alias } => {
+                self.handle_apply_control(msg, midi_channel, &alias);
             }
             ConfigRequest::ToggleCompare { resp } => {
                 Self::respond(resp,self.handle_toggle_compare());
@@ -289,7 +294,6 @@ impl ConfigMaster {
         Ok(())
     }
 
-    // @todo check
     fn handle_put_device(&mut self, alias: String, def: DeviceDef) -> Result<()> {
         let was_active = self.cfg.control_devices.get(&alias).map(|d| d.is_active()).unwrap_or(false);
         let is_active = def.is_active();
@@ -302,22 +306,17 @@ impl ConfigMaster {
                 let _ = tx.send(false);
             }
         } else if !was_active {
-            // Ensure controller arc exists.
+            // Ensure controller entry exists.
             if !self.controller_map.contains_key(&alias) {
-                self.controller_map.insert(
-                    alias.clone(),
-                    Arc::new(RwLock::new(ControllerDef::default())),
-                );
+                self.controller_map.insert(alias.clone(), ControllerDef::default());
             }
-            let mappings = Arc::clone(self.controller_map.get(&alias).unwrap());
             let (tx, rx) = watch::channel(true);
             self.device_active.insert(alias.clone(), tx);
-            self.spawn_device_task(&alias, &def, rx, mappings);
+            self.spawn_device_task(&alias, &def, rx);
         }
         Ok(())
     }
 
-    // @todo check
     fn handle_delete_device(&mut self, alias: &str) -> Result<()> {
         self.cfg.control_devices.remove(alias);
         self.cfg.presets.remove_device(alias);
@@ -328,7 +327,6 @@ impl ConfigMaster {
         Ok(())
     }
 
-    // @todo check
     fn handle_rename_device(&mut self, old: &str, new: &str, def: DeviceDef) -> Result<()> {
         if old == new {
             self.cfg.control_devices.insert(old.to_string(), def);
@@ -348,7 +346,7 @@ impl ConfigMaster {
     fn handle_update_controllers(&mut self, controllers: Vec<ControllerDef>) -> Result<()> {
         self.snapshot.preset.controllers = controllers;
         self.clear_controllers();
-        self.apply_controllers(&self.snapshot.preset.controllers);
+        self.apply_controllers(&self.snapshot.preset.controllers.clone());
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed();
         }
@@ -384,10 +382,14 @@ impl ConfigMaster {
         Ok(())
     }
 
-    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, fallback: bool, source: &str) -> Result<()> {
+    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, fallback: bool, midi_channel: Option<u8>, source: &str) -> Result<()> {
         let mappings = self.controller_map.get(alias)
-            .map(|arc| arc.read().unwrap().clone())
-            .unwrap_or_default();
+            .cloned().unwrap_or_default();
+        // MIDI channel filter: if a midi_channel is given, check the mapping's channel filter.
+        if let Some(ch) = midi_channel {
+            let filter = mappings.channel.as_ref().unwrap_or(&crate::control::mapping::MidiChannel::Omni);
+            if !filter.matches(ch) { return Ok(()); }
+        }
         if let Some((path, value)) = control::translate_ctrl(channel_id, raw, &mappings, fallback) {
             self.handle_apply_set(&path, value, source)?;
         }
@@ -410,8 +412,22 @@ impl ConfigMaster {
         Ok(())
     }
 
+    /// Reverse-map a parameter path+value to (channel_id, raw_value) for outbound wire format.
+    fn handle_reverse_map(&self, path: &str, value: f32, alias: &str) -> Option<(String, f32)> {
+        let mappings = self.controller_map.get(alias)?;
+        let (ch, def) = mappings.channel_for_target(path)?;
+        Some((ch.to_string(), def.to_ctrl(value)))
+    }
+
     /// Forward a fire-and-forget ControlMessage to audio + bus (used for MIDI NoteOn/NoteOff).
-    fn handle_apply_control(&mut self, msg: ControlMessage) {
+    /// If midi_channel is Some, checks the device's channel filter first.
+    fn handle_apply_control(&mut self, msg: ControlMessage, midi_channel: Option<u8>, alias: &str) {
+        if let Some(ch) = midi_channel {
+            if let Some(mappings) = self.controller_map.get(alias) {
+                let filter = mappings.channel.as_ref().unwrap_or(&crate::control::mapping::MidiChannel::Omni);
+                if !filter.matches(ch) { return; }
+            }
+        }
         if let Err(e) = self.audio.push_control(msg.clone()) {
             warn!("ApplyControl: audio push failed: {e}");
         }
@@ -426,7 +442,7 @@ impl ConfigMaster {
         self.audio.push_patch(chains)
             .context("patch channel full, preset not loaded")?;
         self.clear_controllers();
-        self.apply_controllers(&self.snapshot.preset.controllers);
+        self.apply_controllers(&self.snapshot.preset.controllers.clone());
         self.notify_preset_loaded();
         Ok(())
     }
@@ -533,16 +549,16 @@ impl ConfigMaster {
         Ok(chains)
     }
 
-    fn clear_controllers(&self) {
-        for arc in self.controller_map.values() {
-            *arc.write().unwrap() = ControllerDef::default();
+    fn clear_controllers(&mut self) {
+        for def in self.controller_map.values_mut() {
+            *def = ControllerDef::default();
         }
     }
 
-    fn apply_controllers(&self, controllers: &[ControllerDef]) {
+    fn apply_controllers(&mut self, controllers: &[ControllerDef]) {
         for ctrl_def in controllers {
-            if let Some(arc) = self.controller_map.get(&ctrl_def.device) {
-                *arc.write().unwrap() = ctrl_def.clone();
+            if let Some(entry) = self.controller_map.get_mut(&ctrl_def.device) {
+                *entry = ctrl_def.clone();
             } else {
                 warn!("controller references unknown device '{}' — skipping", ctrl_def.device);
             }
@@ -568,12 +584,7 @@ impl ConfigMaster {
                 continue;
             }
 
-            let mappings = match self.controller_map.get(alias.as_str()) {
-                Some(arc) => Arc::clone(arc),
-                None      => continue,
-            };
-
-            self.spawn_device_task(alias, def, rx, mappings);
+            self.spawn_device_task(alias, def, rx);
         }
     }
 
@@ -582,7 +593,6 @@ impl ConfigMaster {
         alias:    &str,
         def:      &DeviceDef,
         active_rx: watch::Receiver<bool>,
-        mappings: Arc<RwLock<ControllerDef>>,
     ) {
         let bus = self.bus.clone();
         let master_tx = self.master_tx.clone();
@@ -590,7 +600,7 @@ impl ConfigMaster {
         match def {
             DeviceDef::Serial { dev, baud, fallback, .. } => {
                 let serial = SerialControl::new(
-                    alias.to_string(), dev.clone(), *baud, *fallback, bus, mappings, master_tx,
+                    alias.to_string(), dev.clone(), *baud, *fallback, bus, master_tx,
                 );
                 let alias = alias.to_string();
                 tokio::spawn(async move {
@@ -601,7 +611,7 @@ impl ConfigMaster {
             }
             DeviceDef::Net { host, port, fallback, .. } => {
                 let net = NetworkControl::new(
-                    alias.to_string(), host.clone(), *port, *fallback, bus.clone(), mappings, master_tx,
+                    alias.to_string(), host.clone(), *port, *fallback, bus.clone(), master_tx,
                 );
                 let alias = alias.to_string();
                 tokio::spawn(async move {
@@ -610,12 +620,12 @@ impl ConfigMaster {
                     }
                 });
             }
-            DeviceDef::MidiIn { dev, channel, .. } => {
-                let midi = MidiControl::new(alias.to_string(), dev.clone(), channel.clone(), mappings);
+            DeviceDef::MidiIn { dev, .. } => {
+                let midi = MidiControl::new(alias.to_string(), dev.clone());
                 midi.run(master_tx);
             }
             DeviceDef::MidiOut { dev, channel, .. } => {
-                let midi_out = MidiOutControl::new(dev.clone(), *channel, mappings);
+                let midi_out = MidiOutControl::new(dev.clone(), *channel, alias.to_string(), master_tx);
                 midi_out.run(bus);
             }
         }

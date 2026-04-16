@@ -243,3 +243,11 @@ _variables.scss should be a startingpoint.
 Most controls can be simply skinned. But the active switch might be a problem. 
 For web, a toggle in the header is fine. But if you want to mimic a foot-padel, 
 you'd want a footswitch-kind of look. Active indicater would then be a led, switch a stateless toggle.
+
+
+# to test
+
+Serial reconnect (the active_rx + select! lifecycle changes)
+CTRL knob sweep over TCP/serial (now round-trips through master)
+MIDI CC in + MIDI CC out (both completely rewired)
+Preset switch (controller mappings now owned by master, no Arc sync)

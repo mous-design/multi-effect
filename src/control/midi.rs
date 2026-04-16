@@ -1,34 +1,25 @@
-use std::sync::{Arc, RwLock};
-
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
-
-use tokio::sync::mpsc;
 
 use crate::config::master::ConfigRequest;
 use crate::control::{ControlMessage, EventBus};
-use crate::control::mapping::{ControllerDef, MidiChannel};
 
 // ---------------------------------------------------------------------------
 // MidiControl  (MIDI input)
 // ---------------------------------------------------------------------------
 
 pub struct MidiControl {
-    alias:           String,
-    device_name:     Option<String>,
-    default_channel: MidiChannel,
-    pub mappings:    Arc<RwLock<ControllerDef>>,
+    alias:       String,
+    device_name: Option<String>,
 }
 
 impl MidiControl {
-    pub fn new(
-        alias:           String,
-        device_name:     Option<String>,
-        default_channel: MidiChannel,
-        mappings:        Arc<RwLock<ControllerDef>>,
-    ) -> Self {
-        Self { alias, device_name, default_channel, mappings }
+    pub fn new(alias: String, device_name: Option<String>) -> Self {
+        Self { alias, device_name }
     }
 
+    /// All CC translation and channel filtering is delegated to master via
+    /// `ApplyCtrl` (with `midi_channel` set for filtering) and `ApplyControl`.
     pub fn run(self, master_tx: mpsc::Sender<ConfigRequest>) {
         let midi_in = match midir::MidiInput::new("multi-effect") {
             Ok(m)  => m,
@@ -63,9 +54,7 @@ impl MidiControl {
         let port_name = midi_in.port_name(port).unwrap_or_default();
         info!("MIDI in: opening port '{port_name}'");
 
-        let default_channel = self.default_channel;
-        let mappings        = Arc::clone(&self.mappings);
-        let alias           = self.alias;
+        let alias = self.alias;
 
         let conn = midi_in.connect(
             port,
@@ -87,66 +76,46 @@ impl MidiControl {
                     _         => debug!("MIDI raw: {:02X?}", msg),
                 }
 
-                // Source ID: alias-ch{channel} (ch0 for omni)
                 let source = format!("{alias}-ch{channel}");
 
-                let ctrl_msg = match msg_type {
+                // Route everything through master — master handles channel filtering
+                // and CC translation via the device's ControllerDef.
+                let req = match msg_type {
                     0xB0 if msg.len() >= 3 => {
-                        let cfg    = mappings.read().unwrap();
-                        let filter = cfg.channel.as_ref().unwrap_or(&default_channel);
-                        if !filter.matches(channel) { return; }
-
-                        let cc_str = msg[1].to_string();
-                        if let Some(def) = cfg.mappings.get(&cc_str) {
-                            let mapped = def.to_param(msg[2] as f32);
-                            debug!("MIDI ch{channel} CC{} {} → SET {} {mapped:.4}", msg[1], msg[2], def.target);
-                            Some(ControlMessage::SetParam {
-                                path:  def.target.clone(),
-                                value: mapped,
-                                source: source.clone(),
-                            })
-                        } else {
-                            None
-                        }
+                        Some(ConfigRequest::ApplyCtrl {
+                            channel_id: msg[1].to_string(),
+                            raw: msg[2] as f32,
+                            alias: alias.clone(),
+                            fallback: false,
+                            midi_channel: Some(channel),
+                            source,
+                            resp: None,
+                        })
                     }
                     0xC0 if msg.len() >= 2 => {
-                        debug!("MIDI ch{channel} Program Change {}", msg[1]);
-                        Some(ControlMessage::ProgramChange { slot: msg[1], source: source.clone() })
+                        Some(ConfigRequest::SwitchPreset { slot: msg[1], resp: None })
                     }
                     0x90 if msg.len() >= 3 => {
-                        let cfg    = mappings.read().unwrap();
-                        let filter = cfg.channel.as_ref().unwrap_or(&default_channel);
-                        if !filter.matches(channel) { return; }
-                        if msg[2] > 0 {
-                            Some(ControlMessage::NoteOn { note: msg[1], velocity: msg[2] })
+                        let cm = if msg[2] > 0 {
+                            ControlMessage::NoteOn { note: msg[1], velocity: msg[2] }
                         } else {
-                            Some(ControlMessage::NoteOff { note: msg[1] })
-                        }
+                            ControlMessage::NoteOff { note: msg[1] }
+                        };
+                        Some(ConfigRequest::ApplyControl {
+                            msg: cm, midi_channel: Some(channel), alias: alias.clone(),
+                        })
                     }
                     0x80 if msg.len() >= 3 => {
-                        let cfg    = mappings.read().unwrap();
-                        let filter = cfg.channel.as_ref().unwrap_or(&default_channel);
-                        if !filter.matches(channel) { return; }
-                        Some(ControlMessage::NoteOff { note: msg[1] })
+                        Some(ConfigRequest::ApplyControl {
+                            msg: ControlMessage::NoteOff { note: msg[1] },
+                            midi_channel: Some(channel), alias: alias.clone(),
+                        })
                     }
-                    _ => None,
-                };
-
-                let req = match ctrl_msg {
-                    Some(ControlMessage::SetParam { path, value, source }) =>
-                        Some(ConfigRequest::ApplySet { path, value, source, resp: None }),
-                    Some(ControlMessage::ProgramChange { slot, .. }) =>
-                        Some(ConfigRequest::SwitchPreset { slot, resp: None }),
-                    Some(ControlMessage::NoteOn { note, velocity }) =>
-                        Some(ConfigRequest::ApplyControl(ControlMessage::NoteOn { note, velocity })),
-                    Some(ControlMessage::NoteOff { note }) =>
-                        Some(ConfigRequest::ApplyControl(ControlMessage::NoteOff { note })),
                     _ => None,
                 };
                 if let Some(r) = req {
                     if master_tx.blocking_send(r).is_err() {
                         warn!("MIDI: master channel closed");
-                        return;
                     }
                 }
             },
@@ -172,16 +141,18 @@ impl MidiControl {
 pub struct MidiOutControl {
     device_name: Option<String>,
     out_channel: u8,
-    pub mappings: Arc<RwLock<ControllerDef>>,
+    alias:       String,
+    master_tx:   mpsc::Sender<ConfigRequest>,
 }
 
 impl MidiOutControl {
     pub fn new(
         device_name: Option<String>,
         out_channel: u8,
-        mappings:    Arc<RwLock<ControllerDef>>,
+        alias:       String,
+        master_tx:   mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { device_name, out_channel, mappings }
+        Self { device_name, out_channel, alias, master_tx }
     }
 
     pub fn run(self, bus: EventBus) {
@@ -226,7 +197,8 @@ impl MidiOutControl {
             };
 
             let ch_byte = (self.out_channel.saturating_sub(1)) & 0x0F;
-            let mappings = self.mappings;
+            let master_tx = self.master_tx;
+            let alias = self.alias;
 
             loop {
                 let msg = match bus_rx.blocking_recv() {
@@ -236,12 +208,17 @@ impl MidiOutControl {
 
                 match msg {
                     ControlMessage::SetParam { ref path, value, .. } => {
-                        let cfg = mappings.read().unwrap();
-                        if let Some((cc_str, def)) = cfg.channel_for_target(path) {
-                            if let Ok(cc) = cc_str.parse::<u8>() {
-                                let raw = def.to_ctrl(value).clamp(0.0, 127.0) as u8;
-                                debug!("MIDI out SET {path} {value:.4} → CC{cc} {raw}");
-                                let _ = conn.send(&[0xB0 | ch_byte, cc, raw]);
+                        // Ask master for reverse mapping (blocking round-trip).
+                        let (tx, rx) = oneshot::channel();
+                        if master_tx.blocking_send(ConfigRequest::ReverseMap {
+                            path: path.clone(), value, alias: alias.clone(), resp: tx,
+                        }).is_ok() {
+                            if let Ok(Ok(Some((cc_str, raw)))) = rx.blocking_recv() {
+                                if let Ok(cc) = cc_str.parse::<u8>() {
+                                    let raw_byte = raw.clamp(0.0, 127.0) as u8;
+                                    debug!("MIDI out SET {path} {value:.4} → CC{cc} {raw_byte}");
+                                    let _ = conn.send(&[0xB0 | ch_byte, cc, raw_byte]);
+                                }
                             }
                         }
                     }
