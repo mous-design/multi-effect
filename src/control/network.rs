@@ -30,7 +30,6 @@ pub struct NetworkControl {
     alias:       String,
     host:        String,
     port:        u16,
-    fallback:    bool,
     bus:         EventBus,
     master_tx:   mpsc::Sender<ConfigRequest>,
 }
@@ -40,11 +39,10 @@ impl NetworkControl {
         alias:     String,
         host:      String,
         port:      u16,
-        fallback:  bool,
         bus:       EventBus,
         master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { alias, host, port, fallback, bus, master_tx }
+        Self { alias, host, port, bus, master_tx }
     }
 
     pub async fn run(
@@ -63,13 +61,12 @@ impl NetworkControl {
                     tracing::info!("Control connection from {addr}");
 
                     let bus        = self.bus.clone();
-                    let fallback   = self.fallback;
                     let master_tx  = self.master_tx.clone();
                     let alias      = self.alias.clone();
                     let client_rx  = active_rx.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_client(socket, bus, fallback, master_tx, &alias, client_rx).await {
+                        if let Err(e) = handle_client(socket, bus, master_tx, &alias, client_rx).await {
                             tracing::warn!("Client {addr}: {e}");
                         }
                     });

@@ -163,8 +163,6 @@ pub enum DeviceDef {
         #[serde(default = "default_baud")]
         baud: u32,
         #[serde(default = "default_true")]
-        fallback: bool,
-        #[serde(default = "default_true")]
         active: bool,
     },
 
@@ -173,8 +171,6 @@ pub enum DeviceDef {
         #[serde(default = "default_host")]
         host: String,
         port: u16,
-        #[serde(default = "default_true")]
-        fallback: bool,
         #[serde(default = "default_true")]
         active: bool,
     },
@@ -220,14 +216,13 @@ impl DeviceDef {
 ///
 /// One entry per device referenced in a preset.  On a preset switch all previous
 /// mappings are cleared and replaced with the new preset's `controllers` list.
+///
+/// Note: MIDI channel filtering is a device-level concern (see `DeviceDef::MidiIn.channel`),
+/// not a per-preset override.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ControllerDef {
     /// Alias matching a key in `Config.control_devices`.
     pub device: String,
-
-    /// MIDI channel override (MidiIn only).  If absent, inherits the channel from `DeviceDef`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel: Option<MidiChannel>,
 
     /// key → ControlDef mapping.
     /// Keys are CC number strings (`"70"`) for MIDI, or channel IDs (`"ctrl_1"`) for serial/net.

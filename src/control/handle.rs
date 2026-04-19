@@ -21,7 +21,6 @@ use crate::engine::patch;
 pub async fn handle_client<S>(
     stream:        S,
     bus:           EventBus,
-    fallback:      bool,
     master_tx:     mpsc::Sender<ConfigRequest>,
     alias:         &str,
     mut active_rx: watch::Receiver<bool>,
@@ -51,11 +50,11 @@ where
                             match snd_request(&master_tx, |tx| ConfigRequest::ReverseMap {
                                 path: path.clone(), value: *value, alias: alias.to_string(), resp: tx,
                             }).await {
+                                // @todo Look at the way this is rounded. Where to fix it. What number of decimals. `ControlDef.round`?
                                 Ok(Some((ch, raw))) => format!("CTRL {ch} {raw}\n"),
                                 _ => format!("SET {path} {value:.4}\n"),
                             }
                         }
-                        ControlMessage::ProgramChange { slot, .. } => format!("PROGRAM {slot}\n"),
                         ControlMessage::Reset { .. }               => "RESET\n".to_string(),
                         ControlMessage::NoteOn      { .. }
                         | ControlMessage::NoteOff   { .. }
@@ -94,7 +93,7 @@ where
             if line.is_empty() { continue; }
 
             let res = if line.starts_with("CTRL ") {
-                handle_ctrl(&line, &master_tx, alias, fallback, &source).await
+                handle_ctrl(&line, &master_tx, alias, &source).await
             } else {
                 handle_command(&line, &master_tx, &source).await
             };
@@ -121,7 +120,6 @@ async fn handle_ctrl(
     line:      &str,
     master_tx: &mpsc::Sender<ConfigRequest>,
     alias:     &str,
-    fallback:  bool,
     source:    &str,
 ) -> Result<()> {
     let parts: Vec<&str> = line.splitn(3, ' ').collect();
@@ -136,8 +134,6 @@ async fn handle_ctrl(
         channel_id: channel_id.to_string(),
         raw,
         alias: alias.to_string(),
-        fallback,
-        midi_channel: None,
         source: source.to_string(),
         resp: Some(tx),
     }).await

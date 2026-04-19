@@ -39,8 +39,8 @@ pub enum ConfigRequest {
     RenameDevice      { old_alias: String, new_alias: String, def: DeviceDef, resp: OptionResp },
     UpdateControllers { controllers: Vec<ControllerDef>, resp: OptionResp },
     ApplySet          { path: String, value: f32, source: String, resp: OptionResp },
-    ApplyCtrl         { channel_id: String, raw: f32, alias: String, fallback: bool,
-                        midi_channel: Option<u8>, source: String, resp: OptionResp },
+    ApplyCtrl         { channel_id: String, raw: f32, alias: String,
+                        source: String, resp: OptionResp },
     ApplyAction       { path: String, action: String, source: String, resp: OptionResp },
     ApplyReset        { source: String, resp: OptionResp },
     ReverseMap        { path: String, value: f32, alias: String,
@@ -49,8 +49,8 @@ pub enum ConfigRequest {
     // -- Chain structure update --
     SetChains         { json: String, resp: OptionResp },
 
-    // -- Fire-and-forget (MIDI) --
-    ApplyControl { msg: ControlMessage, midi_channel: Option<u8>, alias: String },
+    // -- Fire-and-forget (MIDI notes) --
+    ApplyControl(ControlMessage), // @todo maybe rename this to ApplyMidiControl, otherwise confusing with ApplyCtrl
     ToggleCompare { resp: OptionResp },
 
     // -- Internal --
@@ -186,8 +186,8 @@ impl ConfigMaster {
             ConfigRequest::ApplySet { path, value, source, resp } => {
                 Self::respond(resp, self.handle_apply_set(&path, value, &source));
             }
-            ConfigRequest::ApplyCtrl { channel_id, raw, alias, fallback, midi_channel, source, resp } => {
-                Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, fallback, midi_channel, &source));
+            ConfigRequest::ApplyCtrl { channel_id, raw, alias, source, resp } => {
+                Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, &source));
             }
             ConfigRequest::ApplyAction { path, action, source, resp } => {
                 Self::respond(resp, self.handle_apply_action(&path, &action, &source));
@@ -198,8 +198,8 @@ impl ConfigMaster {
             ConfigRequest::ReverseMap { path, value, alias, resp } => {
                 let _ = resp.send(Ok(self.handle_reverse_map(&path, value, &alias)));
             }
-            ConfigRequest::ApplyControl { msg, midi_channel, alias } => {
-                self.handle_apply_control(msg, midi_channel, &alias);
+            ConfigRequest::ApplyControl(msg) => {
+                self.handle_apply_control(msg);
             }
             ConfigRequest::ToggleCompare { resp } => {
                 Self::respond(resp,self.handle_toggle_compare());
@@ -382,15 +382,10 @@ impl ConfigMaster {
         Ok(())
     }
 
-    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, fallback: bool, midi_channel: Option<u8>, source: &str) -> Result<()> {
+    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, source: &str) -> Result<()> {
         let mappings = self.controller_map.get(alias)
             .cloned().unwrap_or_default();
-        // MIDI channel filter: if a midi_channel is given, check the mapping's channel filter.
-        if let Some(ch) = midi_channel {
-            let filter = mappings.channel.as_ref().unwrap_or(&crate::control::mapping::MidiChannel::Omni);
-            if !filter.matches(ch) { return Ok(()); }
-        }
-        if let Some((path, value)) = control::translate_ctrl(channel_id, raw, &mappings, fallback) {
+        if let Some((path, value)) = control::translate_ctrl(channel_id, raw, &mappings) {
             self.handle_apply_set(&path, value, source)?;
         }
         Ok(())
@@ -419,15 +414,9 @@ impl ConfigMaster {
         Some((ch.to_string(), def.to_ctrl(value)))
     }
 
-    /// Forward a fire-and-forget ControlMessage to audio + bus (used for MIDI NoteOn/NoteOff).
-    /// If midi_channel is Some, checks the device's channel filter first.
-    fn handle_apply_control(&mut self, msg: ControlMessage, midi_channel: Option<u8>, alias: &str) {
-        if let Some(ch) = midi_channel {
-            if let Some(mappings) = self.controller_map.get(alias) {
-                let filter = mappings.channel.as_ref().unwrap_or(&crate::control::mapping::MidiChannel::Omni);
-                if !filter.matches(ch) { return; }
-            }
-        }
+    /// Forward a fire-and-forget ControlMessage to audio + bus (MIDI NoteOn/NoteOff).
+    /// Channel filtering is done at the device level before we get here.
+    fn handle_apply_control(&mut self, msg: ControlMessage) {
         if let Err(e) = self.audio.push_control(msg.clone()) {
             warn!("ApplyControl: audio push failed: {e}");
         }
@@ -526,7 +515,7 @@ impl ConfigMaster {
     /// Push a PresetLoaded message on the bus (full preset + state).
     fn notify_preset_loaded(&self) {
         self.bus.send(ControlMessage::PresetLoaded {
-            preset: serde_json::to_value(&self.snapshot.preset).unwrap_or_default(),
+            preset: self.snapshot.preset.clone(),
             preset_indices: self.snapshot.preset_indices.clone(),
             state: self.snapshot.state.label().to_string(),
         }).ok();
@@ -598,9 +587,9 @@ impl ConfigMaster {
         let master_tx = self.master_tx.clone();
 
         match def {
-            DeviceDef::Serial { dev, baud, fallback, .. } => {
+            DeviceDef::Serial { dev, baud, .. } => {
                 let serial = SerialControl::new(
-                    alias.to_string(), dev.clone(), *baud, *fallback, bus, master_tx,
+                    alias.to_string(), dev.clone(), *baud, bus, master_tx,
                 );
                 let alias = alias.to_string();
                 tokio::spawn(async move {
@@ -609,9 +598,9 @@ impl ConfigMaster {
                     }
                 });
             }
-            DeviceDef::Net { host, port, fallback, .. } => {
+            DeviceDef::Net { host, port, .. } => {
                 let net = NetworkControl::new(
-                    alias.to_string(), host.clone(), *port, *fallback, bus.clone(), master_tx,
+                    alias.to_string(), host.clone(), *port, bus.clone(), master_tx,
                 );
                 let alias = alias.to_string();
                 tokio::spawn(async move {
@@ -620,8 +609,8 @@ impl ConfigMaster {
                     }
                 });
             }
-            DeviceDef::MidiIn { dev, .. } => {
-                let midi = MidiControl::new(alias.to_string(), dev.clone());
+            DeviceDef::MidiIn { dev, channel, .. } => {
+                let midi = MidiControl::new(alias.to_string(), dev.clone(), channel.clone());
                 midi.run(master_tx);
             }
             DeviceDef::MidiOut { dev, channel, .. } => {

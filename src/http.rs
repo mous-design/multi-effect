@@ -212,7 +212,6 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             let json: Option<serde_json::Value> = match msg {
                 ControlMessage::SetParam { path, value, .. } =>
                     Some(serde_json::json!({ "type": "set", "path": path, "value": value })),
-                ControlMessage::ProgramChange { .. } => None,
                 ControlMessage::Reset { .. } =>
                     Some(serde_json::json!({ "type": "reset" })),
                 ControlMessage::NodeEvent { key, event, data } =>

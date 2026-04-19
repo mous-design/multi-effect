@@ -3,6 +3,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::master::ConfigRequest;
 use crate::control::{ControlMessage, EventBus};
+use crate::control::mapping::MidiChannel;
 
 // ---------------------------------------------------------------------------
 // MidiControl  (MIDI input)
@@ -11,15 +12,16 @@ use crate::control::{ControlMessage, EventBus};
 pub struct MidiControl {
     alias:       String,
     device_name: Option<String>,
+    channel:     MidiChannel,
 }
 
 impl MidiControl {
-    pub fn new(alias: String, device_name: Option<String>) -> Self {
-        Self { alias, device_name }
+    pub fn new(alias: String, device_name: Option<String>, channel: MidiChannel) -> Self {
+        Self { alias, device_name, channel }
     }
 
-    /// All CC translation and channel filtering is delegated to master via
-    /// `ApplyCtrl` (with `midi_channel` set for filtering) and `ApplyControl`.
+    /// Channel filtering happens locally (MIDI-native). CC translation is
+    /// delegated to master via `ApplyCtrl`.
     pub fn run(self, master_tx: mpsc::Sender<ConfigRequest>) {
         let midi_in = match midir::MidiInput::new("multi-effect") {
             Ok(m)  => m,
@@ -55,6 +57,7 @@ impl MidiControl {
         info!("MIDI in: opening port '{port_name}'");
 
         let alias = self.alias;
+        let channel_filter = self.channel;
 
         let conn = midi_in.connect(
             port,
@@ -76,18 +79,19 @@ impl MidiControl {
                     _         => debug!("MIDI raw: {:02X?}", msg),
                 }
 
+                // Device-level channel filter (MIDI-native). Program Change is
+                // accepted on all channels (it's a global event).
+                let is_channel_msg = matches!(msg_type, 0xB0 | 0x90 | 0x80);
+                if is_channel_msg && !channel_filter.matches(channel) { return; }
+
                 let source = format!("{alias}-ch{channel}");
 
-                // Route everything through master — master handles channel filtering
-                // and CC translation via the device's ControllerDef.
                 let req = match msg_type {
                     0xB0 if msg.len() >= 3 => {
                         Some(ConfigRequest::ApplyCtrl {
                             channel_id: msg[1].to_string(),
                             raw: msg[2] as f32,
                             alias: alias.clone(),
-                            fallback: false,
-                            midi_channel: Some(channel),
                             source,
                             resp: None,
                         })
@@ -101,15 +105,10 @@ impl MidiControl {
                         } else {
                             ControlMessage::NoteOff { note: msg[1] }
                         };
-                        Some(ConfigRequest::ApplyControl {
-                            msg: cm, midi_channel: Some(channel), alias: alias.clone(),
-                        })
+                        Some(ConfigRequest::ApplyControl(cm))
                     }
                     0x80 if msg.len() >= 3 => {
-                        Some(ConfigRequest::ApplyControl {
-                            msg: ControlMessage::NoteOff { note: msg[1] },
-                            midi_channel: Some(channel), alias: alias.clone(),
-                        })
+                        Some(ConfigRequest::ApplyControl(ControlMessage::NoteOff { note: msg[1] }))
                     }
                     _ => None,
                 };
@@ -215,22 +214,45 @@ impl MidiOutControl {
                         }).is_ok() {
                             if let Ok(Ok(Some((cc_str, raw)))) = rx.blocking_recv() {
                                 if let Ok(cc) = cc_str.parse::<u8>() {
-                                    let raw_byte = raw.clamp(0.0, 127.0) as u8;
-                                    debug!("MIDI out SET {path} {value:.4} → CC{cc} {raw_byte}");
-                                    let _ = conn.send(&[0xB0 | ch_byte, cc, raw_byte]);
+                                    // Encoding follows MIDI spec:
+                                    //   CC 0..=31  → 14-bit, MSB on cc, LSB on cc+32
+                                    //   CC 32..=63 → reserved for LSB, invalid as a primary CC
+                                    //   CC 64..=127 → 7-bit
+                                    match cc {
+                                        0..=31 => {
+                                            let raw_u16 = raw.clamp(0.0, 16383.0) as u16;
+                                            let msb = ((raw_u16 >> 7) & 0x7F) as u8;
+                                            let lsb = (raw_u16 & 0x7F) as u8;
+                                            debug!("MIDI out SET {path} {value:.4} → CC{cc} 14-bit (MSB={msb}, LSB={lsb})");
+                                            let _ = conn.send(&[0xB0 | ch_byte, cc, msb]);
+                                            let _ = conn.send(&[0xB0 | ch_byte, cc + 32, lsb]);
+                                        }
+                                        32..=63 => {
+                                            error!("MIDI out: CC{cc} is reserved for 14-bit LSB (paired with CC{}) — cannot use as primary mapping", cc - 32);
+                                        }
+                                        64..=127 => {
+                                            let raw_u8 = raw.clamp(0.0, 127.0) as u8;
+                                            debug!("MIDI out SET {path} {value:.4} → CC{cc} {raw_u8}");
+                                            let _ = conn.send(&[0xB0 | ch_byte, cc, raw_u8]);
+                                        }
+                                        _ => {
+                                            error!("MIDI out: CC{cc} out of range (valid: 0..=127)");
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    ControlMessage::ProgramChange { slot, .. } => {
-                        let _ = conn.send(&[0xC0 | ch_byte, slot]);
+                    ControlMessage::PresetLoaded { preset, .. } => {
+                        if preset.index != 0 {
+                            let _ = conn.send(&[0xC0 | ch_byte, preset.index]);
+                        }
                     }
                     ControlMessage::Reset { .. }
                     | ControlMessage::NoteOn         { .. }
                     | ControlMessage::NoteOff        { .. }
                     | ControlMessage::Action         { .. }
                     | ControlMessage::NodeEvent      { .. }
-                    | ControlMessage::PresetLoaded   { .. }
                     | ControlMessage::StateChanged   { .. }
                                      => {}
                 }

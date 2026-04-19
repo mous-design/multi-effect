@@ -237,9 +237,6 @@ impl AudioEngine {
                         warn!("SET '{path}' {value:.4} [source={source}]: unknown parameter");
                     }
                 }
-                ControlMessage::ProgramChange { slot, .. } => {
-                    for chain in &mut self.chains { chain.on_program_change(slot); }
-                }
                 ControlMessage::Reset { .. } => {
                     for chain in &mut self.chains { chain.reset(); }
                 }

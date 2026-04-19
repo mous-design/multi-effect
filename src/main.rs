@@ -39,11 +39,6 @@ async fn main() -> Result<()> {
         http::run(http_port, master_tx.clone(), bus.clone());
     }
 
-        // let mut chains = engine::patch::load_from_config(&cfg, !skip_state)
-        // .context("failed to build startup chains")?;
-
-
-
     // Periodic state save.
     if state_save_interval > 0 {
         let master_tx_save = master_tx.clone();

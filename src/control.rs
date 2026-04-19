@@ -12,6 +12,8 @@ use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::debug;
 
+use crate::config::preset::PresetDef;
+
 // ---------------------------------------------------------------------------
 // Connection ID generator
 // ---------------------------------------------------------------------------
@@ -39,7 +41,6 @@ pub fn connection_id(alias: &str) -> String {
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
     SetParam { path: String, value: f32, source: String },
-    ProgramChange { slot: u8, source: String },
     Reset { source: String },
     Action { path: String, action: String, source: String },
 
@@ -47,7 +48,7 @@ pub enum ControlMessage {
     NoteOn  { note: u8, velocity: u8 },
     NoteOff { note: u8 },
     NodeEvent { key: String, event: String, data: serde_json::Value },
-    PresetLoaded { preset: serde_json::Value, preset_indices: Vec<u8>, state: String },
+    PresetLoaded { preset: PresetDef, preset_indices: Vec<u8>, state: String },
     StateChanged { state: String, preset_index: u8, preset_indices: Vec<u8> },
 }
 
@@ -56,7 +57,6 @@ impl ControlMessage {
     pub fn source(&self) -> &str {
         match self {
             Self::SetParam { source, .. }
-            | Self::ProgramChange { source, .. }
             | Self::Reset { source, .. }
             | Self::Action { source, .. } => source,
             _ => "",
@@ -80,17 +80,12 @@ pub fn new_event_bus() -> EventBus {
 
 /// Translate a CTRL channel/value pair using the device's mappings.
 ///
-/// Returns `Some((path, value))` if the channel is mapped or fallback is enabled,
-/// `None` if the channel is unknown and fallback is disabled (dedicated controller mode).
-pub(crate) fn translate_ctrl(channel_id: &str, raw: f32, mappings: &ControllerDef, fallback: bool) -> Option<(String, f32)> {
-    if let Some(def) = mappings.mappings.get(channel_id) {
-        let value = def.to_param(raw);
-        debug!("CTRL {channel_id} {raw} → SET {} {value:.4}", def.target);
-        Some((def.target.clone(), value))
-    } else if fallback {
-        debug!("CTRL {channel_id} {raw} → SET {channel_id} {raw} (fallback)");
-        Some((channel_id.to_string(), raw))
-    } else {
-        None
-    }
+/// Returns `Some((path, value))` if the channel is mapped, `None` otherwise.
+/// Unmapped channels are silently ignored — clients that want direct parameter
+/// access should use `SET <path> <value>`.
+pub(crate) fn translate_ctrl(channel_id: &str, raw: f32, mappings: &ControllerDef) -> Option<(String, f32)> {
+    let def = mappings.mappings.get(channel_id)?;
+    let value = def.to_param(raw);
+    debug!("CTRL {channel_id} {raw} → SET {} {value:.4}", def.target);
+    Some((def.target.clone(), value))
 }

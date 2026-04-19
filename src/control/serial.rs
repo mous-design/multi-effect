@@ -11,7 +11,6 @@ pub struct SerialControl {
     alias:     String,
     device:    String,
     baud:      u32,
-    fallback:  bool,
     bus:       EventBus,
     master_tx: mpsc::Sender<ConfigRequest>,
 }
@@ -21,15 +20,14 @@ impl SerialControl {
         alias:     String,
         device:    String,
         baud:      u32,
-        fallback:  bool,
         bus:       EventBus,
         master_tx: mpsc::Sender<ConfigRequest>,
     ) -> Self {
-        Self { alias, device, baud, fallback, bus, master_tx }
+        Self { alias, device, baud, bus, master_tx }
     }
 
     pub async fn run(self, mut active_rx: watch::Receiver<bool>) -> Result<()> {
-        let Self { alias, device, baud, fallback, bus, master_tx } = self;
+        let Self { alias, device, baud, bus, master_tx } = self;
 
         loop {
             if !*active_rx.borrow() { return Ok(()); }
@@ -52,7 +50,6 @@ impl SerialControl {
             if let Err(e) = handle_client(
                 port,
                 bus.clone(),
-                fallback,
                 master_tx.clone(),
                 &alias,
                 active_rx.clone(),
