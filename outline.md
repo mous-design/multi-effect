@@ -251,3 +251,4 @@ Serial reconnect (the active_rx + select! lifecycle changes)
 CTRL knob sweep over TCP/serial (now round-trips through master)
 MIDI CC in + MIDI CC out (both completely rewired)
 Preset switch (controller mappings now owned by master, no Arc sync)
+Reload logic

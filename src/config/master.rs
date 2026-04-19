@@ -84,10 +84,12 @@ pub struct ConfigMaster {
     bus:              EventBus,
     /// Self-handle — so device-spawn helpers can give new tasks a way to send requests back to the master (e.g. serial sending ApplySet).
     master_tx:        mpsc::Sender<ConfigRequest>,
+    /// Handle reload (from http)
+    reload_tx:        mpsc::Sender<()>,
 }
 
 /// Create the master, spawn it on the tokio runtime, return the channels.
-pub fn spawn(cfg: Config, audio: AudioHandle) -> Result<(mpsc::Sender<ConfigRequest>, control::EventBus)> {
+pub fn spawn(cfg: Config, audio: AudioHandle, reload_tx: mpsc::Sender<()>) -> Result<(mpsc::Sender<ConfigRequest>, control::EventBus)> {
     let snapshot = ConfigSnapshot::restore_or_build(&cfg)?;
 
     // --- Event bus ---
@@ -110,6 +112,7 @@ pub fn spawn(cfg: Config, audio: AudioHandle) -> Result<(mpsc::Sender<ConfigRequ
         device_active,
         bus,
         master_tx,
+        reload_tx,
     };
 
     tokio::spawn(master.run(req_rx));
@@ -452,68 +455,12 @@ impl ConfigMaster {
         Ok(())
     }
 
-    // @tode check this!
     fn handle_reload(&mut self) -> Result<()> {
-        let new_cfg = Config::load(self.cfg.config_path.clone())?;
-
-        // Warn about changes that require restart.
-        if new_cfg.audio_device != self.cfg.audio_device  { warn!("reload: 'audio_device' changed — restart required"); }
-        if new_cfg.sample_rate  != self.cfg.sample_rate  { warn!("reload: 'sample_rate' changed — restart required"); }
-        if new_cfg.buffer_size  != self.cfg.buffer_size  { warn!("reload: 'buffer_size' changed — restart required"); }
-        if new_cfg.in_channels  != self.cfg.in_channels  { warn!("reload: 'in_channels' changed — restart required"); }
-        if new_cfg.out_channels != self.cfg.out_channels { warn!("reload: 'out_channels' changed — restart required"); }
-        if new_cfg.http_port    != self.cfg.http_port    { warn!("reload: 'http_port' changed — restart required"); }
-
-        // Save current state before swapping.
-        
-        if let Err(e) = self.snapshot.persist_state(&self.cfg.state_save_path) {
-            warn!("reload: state save failed: {e}");
-        }
-
-        // let controllers = new_cfg.presets.active_entry()
-        //     .map(|p| p.controllers.clone())
-        //     .unwrap_or_default();
-        // let state_path = new_cfg.state_save_path;
-        // let old_config_path = self.cfg.config_path.clone();
-        // self.cfg = new_cfg;
-        // self.cfg.config_path = old_config_path;
-
-        // // Build chains from new config, overlaying saved state.
-        // let structure_json = self.cfg.startup_chains_json()
-        //     .unwrap_or(None)
-        //     .unwrap_or_else(|| r#"{"chains":[]}"#.into());
-
-        // let merged = if !state_path.as_os_str().is_empty() && state_path.exists() {
-        //     info!("reload: overlaying saved params from {}", state_path.display());
-        //     match std::fs::read_to_string(&state_path)
-        //         .ok()
-        //         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        //     {
-        //         Some(saved) => {
-        //             let structure: Value = serde_json::from_str(&structure_json).unwrap_or_default();
-        //             save::merge_state_params(structure, &saved).to_string()
-        //         }
-        //         None => structure_json,
-        //     }
-        // } else {
-        //     structure_json
-        // };
-
-        // match patch::load_str(&merged, &self.cfg) {
-        //     Ok(mut chains) => {
-        //         for chain in &mut chains { chain.init_bus(&self.bus); }
-        //         let json = patch::chains_to_json(&chains);
-        //         if self.audio.push_patch(chains).is_err() {
-        //             warn!("reload: patch channel full");
-        //         } else {
-        //             self.preset_state.apply_patch(json);
-        //             self.clear_controllers();
-        //             self.apply_controllers(&controllers);
-        //             info!("reload: done.");
-        //         }
-        //     }
-        //     Err(e) => warn!("reload: chain build error: {e}"),
-        // }
+        let tx = self.reload_tx.clone(); 
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = tx.send(()).await;
+        });
         Ok(())
     }
 

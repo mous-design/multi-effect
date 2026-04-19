@@ -131,15 +131,21 @@ export function createWs(
     let ws: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
+    let retryMs = 500;                 // snappy first retry (reload ~200-500ms)
+    const RETRY_CAP = 8000;            // polite upper bound when server is truly down
 
     function connect() {
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${proto}//${window.location.host}/ws`);
-        ws.onopen = onConnect;
+        ws.onopen = () => { retryMs = 500; onConnect(); };          // reset backoff on success
         ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch { } };
+        ws.onerror = () => { /* swallow — onclose triggers reconnect */ };
         ws.onclose = () => {
             onDisconnect();
-            if (!stopped) timer = setTimeout(connect, 3000);
+            if (!stopped) {
+                timer = setTimeout(connect, retryMs);
+                retryMs = Math.min(retryMs * 2, RETRY_CAP);         // exponential backoff, capped
+            }
         };
     }
     connect();
