@@ -234,7 +234,7 @@ impl AudioEngine {
                 ControlMessage::SetParam { path, value, ref source } => {
                     let handled = self.chains.iter_mut().any(|c| c.set_param(&path, ParamValue::Float(value)).is_ok());
                     if !handled {
-                        warn!("SET '{path}' {value:.4} [source={source}]: unknown parameter");
+                        warn!("SET '{path}' {value} [source={source}]: unknown parameter");
                     }
                 }
                 ControlMessage::Reset { .. } => {

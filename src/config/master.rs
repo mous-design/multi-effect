@@ -372,7 +372,7 @@ impl ConfigMaster {
     }
 
     fn handle_apply_set(&mut self, path: &String, value: f32, source: &str) -> Result<()> {
-        debug!("SET {path} {value:.4} [source={source}]");
+        debug!("SET {path} {value} [source={source}]");
         if self.snapshot.apply_set(&path, value)? {
             self.notify_state_changed();
         }
@@ -408,10 +408,12 @@ impl ConfigMaster {
     }
 
     /// Reverse-map a parameter path+value to (channel_id, raw_value) for outbound wire format.
+    /// The raw value is smart-rounded using the mapping's cached ctrl-side multiplier,
+    /// so callers can emit it as text directly (default `Display`) with clean output.
     fn handle_reverse_map(&self, path: &str, value: f32, alias: &str) -> Option<(String, f32)> {
         let mappings = self.controller_map.get(alias)?;
         let (ch, def) = mappings.channel_for_target(path)?;
-        Some((ch.to_string(), def.to_ctrl(value)))
+        Some((ch.to_string(), def.smart_round_ctrl(def.to_ctrl(value))))
     }
 
     /// Forward a fire-and-forget ControlMessage to audio + bus (MIDI NoteOn/NoteOff).

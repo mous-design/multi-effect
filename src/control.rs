@@ -86,6 +86,6 @@ pub fn new_event_bus() -> EventBus {
 pub(crate) fn translate_ctrl(channel_id: &str, raw: f32, mappings: &ControllerDef) -> Option<(String, f32)> {
     let def = mappings.mappings.get(channel_id)?;
     let value = def.to_param(raw);
-    debug!("CTRL {channel_id} {raw} → SET {} {value:.4}", def.target);
+    debug!("CTRL {channel_id} {raw} → SET {} {}", def.target, def.smart_round_target(value));
     Some((def.target.clone(), value))
 }

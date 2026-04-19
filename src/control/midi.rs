@@ -220,10 +220,11 @@ impl MidiOutControl {
                                     //   CC 64..=127 → 7-bit
                                     match cc {
                                         0..=31 => {
-                                            let raw_u16 = raw.clamp(0.0, 16383.0) as u16;
+                                            // `.round() as u16` (not bare `as u16` which truncates).
+                                            let raw_u16 = raw.clamp(0.0, 16383.0).round() as u16;
                                             let msb = ((raw_u16 >> 7) & 0x7F) as u8;
                                             let lsb = (raw_u16 & 0x7F) as u8;
-                                            debug!("MIDI out SET {path} {value:.4} → CC{cc} 14-bit (MSB={msb}, LSB={lsb})");
+                                            debug!("MIDI out SET {path} {value} → CC{cc} 14-bit (MSB={msb}, LSB={lsb})");
                                             let _ = conn.send(&[0xB0 | ch_byte, cc, msb]);
                                             let _ = conn.send(&[0xB0 | ch_byte, cc + 32, lsb]);
                                         }
@@ -231,8 +232,8 @@ impl MidiOutControl {
                                             error!("MIDI out: CC{cc} is reserved for 14-bit LSB (paired with CC{}) — cannot use as primary mapping", cc - 32);
                                         }
                                         64..=127 => {
-                                            let raw_u8 = raw.clamp(0.0, 127.0) as u8;
-                                            debug!("MIDI out SET {path} {value:.4} → CC{cc} {raw_u8}");
+                                            let raw_u8 = raw.clamp(0.0, 127.0).round() as u8;
+                                            debug!("MIDI out SET {path} {value} → CC{cc} {raw_u8}");
                                             let _ = conn.send(&[0xB0 | ch_byte, cc, raw_u8]);
                                         }
                                         _ => {

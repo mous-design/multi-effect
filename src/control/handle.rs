@@ -50,9 +50,12 @@ where
                             match snd_request(&master_tx, |tx| ConfigRequest::ReverseMap {
                                 path: path.clone(), value: *value, alias: alias.to_string(), resp: tx,
                             }).await {
-                                // @todo Look at the way this is rounded. Where to fix it. What number of decimals. `ControlDef.round`?
+                                // `raw` is pre-smart-rounded by master. Default Display prints
+                                // the shortest round-trippable form (e.g. "63.5" not "63.5000").
                                 Ok(Some((ch, raw))) => format!("CTRL {ch} {raw}\n"),
-                                _ => format!("SET {path} {value:.4}\n"),
+                                // No reverse mapping: emit the raw param value. Once `get_params`
+                                // exists we can smart-round-target using the param's known range.
+                                _ => format!("SET {path} {value}\n"),
                             }
                         }
                         ControlMessage::Reset { .. }               => "RESET\n".to_string(),

@@ -17,8 +17,8 @@ pub enum ParamValue {
 impl std::fmt::Display for ParamValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParamValue::Float(v)      => write!(f, "{v:.4}"),
-            ParamValue::Stereo([l,r]) => write!(f, "[{l:.4},{r:.4}]"),
+            ParamValue::Float(v)      => write!(f, "{v}"),
+            ParamValue::Stereo([l,r]) => write!(f, "[{l},{r}]"),
             ParamValue::Bool(b)       => write!(f, "{b}"),
         }
     }
@@ -174,11 +174,6 @@ pub trait Device: Parameterized + Send + Sync {
     /// MIDI Control Change
     fn on_cc(&mut self, controller: u8, value: u8) {
         let _ = (controller, value);
-    }
-
-    /// MIDI Program Change → switch preset
-    fn on_program_change(&mut self, program: u8) {
-        let _ = program;
     }
 
     /// MIDI Note On

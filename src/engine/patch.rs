@@ -295,12 +295,6 @@ impl Chain {
         }
     }
 
-    pub fn on_program_change(&mut self, program: u8) {
-        for node in &mut self.nodes {
-            node.on_program_change(program);
-        }
-    }
-
     pub fn on_note_on(&mut self, note: u8, velocity: u8) {
         for node in &mut self.nodes {
             node.on_note_on(note, velocity);

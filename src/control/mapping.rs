@@ -10,6 +10,26 @@ fn default_true()           -> bool       { true            }
 fn default_channel()        -> MidiChannel { MidiChannel::Omni }
 fn default_midi_out_channel() -> u8       { 1               }
 
+/// System-wide target resolution for outbound rounding. Roughly equivalent to
+/// 14-bit precision (16384). Picking 10000 gives slightly friendlier decimal
+/// counts on common ranges (e.g. 2 decimals on [0,127] instead of 3).
+const OUTBOUND_RESOLUTION: f32 = 10000.0;
+
+/// Compute the smallest power-of-10 multiplier `m` such that rounding a value
+/// to the nearest `1/m` preserves at least `OUTBOUND_RESOLUTION` steps across
+/// the given range.
+fn auto_multiplier(range: f32) -> f32 {
+    let r = range.abs();
+    if r <= 0.0 { return 1.0; }
+    let d = (OUTBOUND_RESOLUTION / r).log10().ceil().clamp(0.0, 10.0);
+    10_f32.powi(d as i32)
+}
+
+/// Round a value to the nearest `1/multiplier`.
+fn smart_round(value: f32, multiplier: f32) -> f32 {
+    (value * multiplier).round() / multiplier
+}
+
 // ---------------------------------------------------------------------------
 // ControlDef
 // ---------------------------------------------------------------------------
@@ -29,32 +49,89 @@ fn default_midi_out_channel() -> u8       { 1               }
 /// ```text
 /// param_val = param[0] * (param[1] / param[0]) ^ t
 /// ```
+///
+/// ## Construction
+///
+/// `ControlDef` can only be constructed via:
+/// - `serde::Deserialize` (goes through [`ControlDefRaw`] and runs [`Self::new`]).
+/// - [`Self::new`] — the single public constructor. Initializes cached multipliers.
+/// - `Clone` of an existing (already-initialized) instance.
+///
+/// Struct-literal construction from outside this module is impossible because
+/// the `ctrl_mult` / `target_mult` fields are private; this guarantees every
+/// live `ControlDef` has valid cached multipliers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "ControlDefRaw")]
 pub struct ControlDef {
     /// Target parameter path, e.g. `"04-delay.feedback"`.
     pub target: String,
 
     /// Controller native range.  Default: `[0.0, 127.0]` (7-bit MIDI).
-    #[serde(default = "default_ctrl")]
     pub ctrl: [f32; 2],
 
     /// Parameter value range.  Default: `[0.0, 1.0]`.
-    #[serde(default = "default_param")]
     pub param: [f32; 2],
 
     /// Use logarithmic interpolation.  Default: `false`.
     /// Both `param` values must be positive (non-zero) when enabled.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub log: bool,
 
-    /// Decimal places in outbound `CTRL` values.
-    /// `0` = integer, `1` = one decimal, etc.
-    /// Default: auto — `0` when ctrl range > 100, full float otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub round: Option<u8>,
+    // --- cached, private (so outside code cannot skip init via struct literal) ---
+
+    /// Precomputed rounding multiplier for ctrl-space values.
+    ///
+    /// Stored as `10^d` where `d = ceil(log10(OUTBOUND_RESOLUTION / ctrl_range))`.
+    /// Used by [`smart_round_ctrl`] to round outbound wire values to a decimal-aligned
+    /// step that preserves the system's target resolution without cluttering output
+    /// with meaningless precision.
+    #[serde(skip)]
+    ctrl_mult: f32,
+
+    /// Precomputed rounding multiplier for target (param-space) values.
+    ///
+    /// Same formula as `ctrl_mult`, but based on the `param` range. Used by
+    /// [`smart_round_target`] when emitting param values as text (e.g. `SET` lines
+    /// for paths where no reverse mapping exists but the param range is known).
+    #[serde(skip)]
+    target_mult: f32,
+}
+
+/// Wire-format shadow of [`ControlDef`] used only for deserialization.
+///
+/// `ControlDef` routes deserialization here via `#[serde(from = "ControlDefRaw")]`,
+/// which then runs [`ControlDef::new`] to populate the cached multipliers.
+/// Serialization goes directly through the derived impl on `ControlDef`, with
+/// the private fields skipped — no parallel path needed.
+#[derive(Deserialize)]
+pub struct ControlDefRaw {
+    target: String,
+    #[serde(default = "default_ctrl")]
+    ctrl: [f32; 2],
+    #[serde(default = "default_param")]
+    param: [f32; 2],
+    #[serde(default)]
+    log: bool,
+}
+
+impl From<ControlDefRaw> for ControlDef {
+    fn from(r: ControlDefRaw) -> Self {
+        ControlDef::new(r.target, r.ctrl, r.param, r.log)
+    }
 }
 
 impl ControlDef {
+    /// The single public constructor. Computes and caches the rounding multipliers
+    /// from the given ranges. All other construction paths (serde, clone) funnel
+    /// through here.
+    pub fn new(target: String, ctrl: [f32; 2], param: [f32; 2], log: bool) -> Self {
+        Self {
+            target, ctrl, param, log,
+            ctrl_mult:   auto_multiplier(ctrl[1]  - ctrl[0]),
+            target_mult: auto_multiplier(param[1] - param[0]),
+        }
+    }
+
     /// Map a raw controller value to a parameter value.
     pub fn to_param(&self, ctrl_val: f32) -> f32 {
         let t = ((ctrl_val - self.ctrl[0]) / (self.ctrl[1] - self.ctrl[0])).clamp(0.0, 1.0);
@@ -76,20 +153,27 @@ impl ControlDef {
         self.ctrl[0] + t.clamp(0.0, 1.0) * (self.ctrl[1] - self.ctrl[0])
     }
 
-    /// Format the raw controller value for transmission.
+    /// Round a ctrl-space value to the mapping's outbound resolution.
     ///
-    /// Uses `round` if set; otherwise auto-detects:
-    /// - ctrl range > 100 → integer (0 decimals)
-    /// - ctrl range ≤ 100 → full float precision
-    pub fn to_ctrl_str(&self, param_val: f32) -> String {
-        let raw = self.to_ctrl(param_val);
-        let range = (self.ctrl[1] - self.ctrl[0]).abs();
-        let decimals = self.round.unwrap_or(if range > 100.0 { 0 } else { u8::MAX });
-        match decimals {
-            0         => format!("{}", raw.round() as i64),
-            u8::MAX   => format!("{raw}"),
-            n         => format!("{raw:.prec$}", prec = n as usize),
-        }
+    /// Call this on any f32 that's about to become text on the wire (CTRL frames).
+    /// The result has just enough decimal precision to preserve the system's
+    /// target resolution across this mapping's `ctrl` range — nothing more,
+    /// nothing less. No log/exp per call; uses the cached multiplier.
+    ///
+    /// Example: with `ctrl = [0, 127]` and `OUTBOUND_RESOLUTION = 10000`, the
+    /// multiplier is 100 (2 decimals). `smart_round_ctrl(63.4871)` → `63.49`.
+    pub fn smart_round_ctrl(&self, value: f32) -> f32 {
+        smart_round(value, self.ctrl_mult)
+    }
+
+    /// Round a target (param-space) value to the mapping's outbound resolution.
+    ///
+    /// Same idea as [`smart_round_ctrl`] but based on the `param` range.
+    /// Useful when a parameter change needs to be emitted as text on a device
+    /// that can understand the full param-space (e.g. SET frames) rather than
+    /// the controller's native units.
+    pub fn smart_round_target(&self, value: f32) -> f32 {
+        smart_round(value, self.target_mult)
     }
 }
 
