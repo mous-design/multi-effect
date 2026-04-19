@@ -47,7 +47,7 @@ where
 
                     let line = match &msg {
                         ControlMessage::SetParam { path, value, .. } => {
-                            match snd_request(&master_tx, |tx| ConfigRequest::ReverseMap {
+                            match snd_request(&master_tx, |tx| ConfigRequest::ReverseMapRounded {
                                 path: path.clone(), value: *value, alias: alias.to_string(), resp: tx,
                             }).await {
                                 // `raw` is pre-smart-rounded by master. Default Display prints

@@ -11,7 +11,7 @@ use super::snapshot::{ConfigSnapshot, SnapshotState::*};
 use super::ChainDef;
 use super::preset::PRESET_NONE;
 use crate::control;
-use crate::control::mapping::{ControllerDef, DeviceDef};
+use crate::control::mapping::{ControlDef, ControllerDef, DeviceDef};
 use crate::control::{EventBus, NetworkControl, SerialControl, ControlMessage};
 use crate::control::midi::{MidiControl, MidiOutControl};
 use crate::engine::AudioHandle;
@@ -43,7 +43,14 @@ pub enum ConfigRequest {
                         source: String, resp: OptionResp },
     ApplyAction       { path: String, action: String, source: String, resp: OptionResp },
     ApplyReset        { source: String, resp: OptionResp },
+    /// Reverse-map a parameter to (channel_id, raw_value) without rounding.
+    /// Use for binary protocols (MIDI) that do their own integer rounding.
     ReverseMap        { path: String, value: f32, alias: String,
+                        resp: Resp<Result<Option<(String, f32)>>> },
+    /// Same as `ReverseMap` but the raw value is pre-rounded via the mapping's
+    /// cached ctrl multiplier. Use for text protocols (serial / TCP) so the
+    /// wire output has clean decimals via default `Display`.
+    ReverseMapRounded { path: String, value: f32, alias: String,
                         resp: Resp<Result<Option<(String, f32)>>> },
 
     // -- Chain structure update --
@@ -196,7 +203,14 @@ impl ConfigMaster {
                 Self::respond(resp, self.handle_apply_reset(&source));
             }
             ConfigRequest::ReverseMap { path, value, alias, resp } => {
-                let _ = resp.send(Ok(self.handle_reverse_map(&path, value, &alias)));
+                let result = self.lookup_reverse(&path, &alias)
+                    .map(|(ch, def)| (ch, def.to_ctrl(value)));
+                let _ = resp.send(Ok(result));
+            }
+            ConfigRequest::ReverseMapRounded { path, value, alias, resp } => {
+                let result = self.lookup_reverse(&path, &alias)
+                    .map(|(ch, def)| (ch, def.smart_round_ctrl(def.to_ctrl(value))));
+                let _ = resp.send(Ok(result));
             }
             ConfigRequest::ApplyControl(msg) => {
                 self.handle_apply_control(msg);
@@ -407,13 +421,13 @@ impl ConfigMaster {
         Ok(())
     }
 
-    /// Reverse-map a parameter path+value to (channel_id, raw_value) for outbound wire format.
-    /// The raw value is smart-rounded using the mapping's cached ctrl-side multiplier,
-    /// so callers can emit it as text directly (default `Display`) with clean output.
-    fn handle_reverse_map(&self, path: &str, value: f32, alias: &str) -> Option<(String, f32)> {
+    /// Find the reverse mapping for `path` on device `alias`: the channel_id
+    /// the target maps to (if any) and the `ControlDef` that does the math.
+    /// Callers decide whether to use `to_ctrl` alone or with `smart_round_ctrl`.
+    fn lookup_reverse(&self, path: &str, alias: &str) -> Option<(String, &ControlDef)> {
         let mappings = self.controller_map.get(alias)?;
         let (ch, def) = mappings.channel_for_target(path)?;
-        Some((ch.to_string(), def.smart_round_ctrl(def.to_ctrl(value))))
+        Some((ch.to_string(), def))
     }
 
     /// Forward a fire-and-forget ControlMessage to audio + bus (MIDI NoteOn/NoteOff).
