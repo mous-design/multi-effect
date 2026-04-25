@@ -55,10 +55,13 @@ export default function App() {
     // --- Connection (WS + config + devices) ---
     const { connected, audioConfig, setAudioConfig, devices } = useConnection((msg, params) => {
         switch(msg) {
-            case 'SET':
-                const [path, value] = splitN(params, ' ', 2);
+            case 'SET': {
+                const [path, valueStr] = splitN(params, ' ', 2);
                 const [nodeKey, param] = splitN(path, '.', 2);
                 if (!nodeKey || !param) return;
+                // Parse numeric values; keep non-numeric (action strings) as-is.
+                const num = Number(valueStr);
+                const value: number | string = isFinite(num) ? num : valueStr;
                 setIsDirty(true);
                 setState(prev => {
                     if (!prev) return prev;
@@ -72,7 +75,8 @@ export default function App() {
                     };
                 });
                 break;
-            case 'SNAPSHOT':
+            }
+            case 'SNAPSHOT': {
                 const snap = JSON.parse(params);
                 const preset = snap.preset ?? {};
                 setState({ chains: preset.chains ?? [] });
@@ -82,13 +86,25 @@ export default function App() {
                 setIsDirty(snap.state === 'Dirty');
                 setIsComparing(snap.state === 'Comparing');
                 break;
-            case 'STATE':
-                const [state, idx, preset_indices] = splitN(params, ' ', 3);
-                setIsDirty(state === 'Dirty');
-                setIsComparing(state === 'Comparing');
-                if (typeof idx === 'number') setActivePreset(idx);
-                if (Array.isArray(preset_indices)) setPresetDefs(preset_indices);
+            }
+            case 'PRESET': {
+                const preset = JSON.parse(params);
+                setState({ chains: preset.chains ?? [] });
+                setControllers(preset.controllers ?? []);
+                if (typeof preset.index === 'number') setActivePreset(preset.index);
                 break;
+            }
+            case 'STATE': {
+                const s = params.trim();
+                setIsDirty(s === 'Dirty');
+                setIsComparing(s === 'Comparing');
+                break;
+            }
+            case 'INDICES': {
+                const indices = JSON.parse(params);
+                if (Array.isArray(indices)) setPresetDefs(indices);
+                break;
+            }
             case 'EVENT':
                 const [key, event, json] = splitN(params, ' ', 3);
                 if (event === 'looper_state') {

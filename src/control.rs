@@ -48,8 +48,13 @@ pub enum ControlMessage {
     NoteOn  { note: u8, velocity: u8 },
     NoteOff { note: u8 },
     NodeEvent { key: String, event: String, data: serde_json::Value },
-    PresetLoaded { preset: PresetDef, preset_indices: Vec<u8>, state: String },
-    StateChanged { state: String, preset_index: u8, preset_indices: Vec<u8> },
+    /// The current preset's structural content has changed (load / save / compare).
+    /// UI reads `preset.index` from the JSON to know which slot is active.
+    PresetLoaded { preset: PresetDef },
+    /// State transition only (Clean / Dirty / Comparing).
+    StateChanged { state: String },
+    /// The list of occupied preset slots has changed (save to empty slot, delete).
+    PresetIndices { indices: Vec<u8> },
 }
 
 impl ControlMessage {

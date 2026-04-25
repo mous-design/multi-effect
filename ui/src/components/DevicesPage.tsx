@@ -180,7 +180,7 @@ export function DevicesPage({ onHome }: Props) {
         if (!newAlias.trim()) return false;
         if (oldAlias && oldAlias !== newAlias) {
             // Rename: atomically moves device + updates all preset controller refs
-            const ok = await renameDevice(oldAlias, newAlias, def);
+            const ok = await renameDevice(oldAlias, newAlias);
             if (!ok) return false;
             setDevices(prev =>
                 Object.fromEntries(Object.entries(prev).map(([k, v]) =>

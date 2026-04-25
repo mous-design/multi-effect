@@ -59,11 +59,13 @@ where
                                 _ => format!("SET {path} {value}\n"),
                             }
                         },
-                        ControlMessage::Reset { .. }               => "RESET\n".to_string(),
-                        ControlMessage::PresetLoaded { ref preset, .. }
-                        => format!("PRESET {}\n", serde_json::to_string(preset).unwrap_or_default()),
-                        ControlMessage::StateChanged { ref state, preset_index, .. }
-                        => format!("STATE {state} {preset_index}\n"),
+                        ControlMessage::Reset { .. } => "RESET\n".to_string(),
+                        ControlMessage::PresetLoaded { ref preset } =>
+                            format!("PRESET {}\n", serde_json::to_string(preset).unwrap_or_default()),
+                        ControlMessage::StateChanged { ref state } =>
+                            format!("STATE {state}\n"),
+                        ControlMessage::PresetIndices { ref indices } =>
+                            format!("INDICES {}\n", serde_json::to_string(indices).unwrap_or_default()),
                         _ => continue,
                     };
                     if writer.write_all(line.as_bytes()).await.is_err() {

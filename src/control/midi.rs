@@ -249,13 +249,7 @@ impl MidiOutControl {
                             let _ = conn.send(&[0xC0 | ch_byte, preset.index]);
                         }
                     }
-                    ControlMessage::Reset { .. }
-                    | ControlMessage::NoteOn         { .. }
-                    | ControlMessage::NoteOff        { .. }
-                    | ControlMessage::Action         { .. }
-                    | ControlMessage::NodeEvent      { .. }
-                    | ControlMessage::StateChanged   { .. }
-                                     => {}
+                    _ => {}
                 }
             }
         });
