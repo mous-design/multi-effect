@@ -23,7 +23,6 @@ use crate::engine::patch::{self, Chain};
 pub type Resp<T> = oneshot::Sender<Result<T>>;
 pub type OptionResp<T> = Option<Resp<T>>;
 pub type OptionRespEmpty = Option<Resp<()>>;
-pub type OptionRespBool = Option<Resp<bool>>;
 
 /// Inbound requests to the config master.
 pub enum ConfigRequest {
