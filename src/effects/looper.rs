@@ -222,7 +222,7 @@ impl Looper {
                 self.loop_len      = 0;
                 self.current_pos   = 0;
                 self.state         = LooperState::Recording;
-            }
+            },
             LooperState::Stop | LooperState::Recording => {
                 // Start overdubbing from the beginning of the loop
                 if self.loop_len == 0 {
@@ -231,11 +231,11 @@ impl Looper {
                 self.current_pos = 0;
                 self.try_start_overdub();
                 self.start_fade_in();
-            }
+            },
             LooperState::Playing => {
                 // Start overdubbing from current position
                 self.try_start_overdub();
-            }
+            },
             LooperState::Overdub => {
                 // Commit current layer and start a new one.
                 // If the stack is full, try_start_overdub merges the two oldest layers.
@@ -258,18 +258,18 @@ impl Looper {
                 self.state         = LooperState::Playing;
                 self.init_merge_buf();
                 // No output fade-in: buffer already near-silent at pos 0 (baked fade-in)
-            }
+            },
             LooperState::Stop => {
                 if self.loop_len > 0 {
                     self.state = LooperState::Playing;
                     self.start_fade_in();
                 }
-            }
+            },
             LooperState::Overdub => {
                 self.finish_overdub_layer();
                 self.state = LooperState::Playing;
                 // No fade — playback was already running during overdub
-            }
+            },
             LooperState::Idle | LooperState::Playing => {}
         }
         if self.state == LooperState::Playing {
@@ -285,12 +285,12 @@ impl Looper {
                 self.bake_fade_out(0);
                 self.init_merge_buf();
                 self.state = LooperState::Stop;
-            }
+            },
             LooperState::Playing | LooperState::Overdub => {
                 // Fade out; state transitions to Stop when fade completes in process().
                 // Notify the UI immediately so it shows Stop without waiting for the fade.
                 self.start_fade_out();
-            }
+            },
             LooperState::Idle | LooperState::Stop => {}
         }
         if matches!(self.state, LooperState::Stop) {
@@ -312,7 +312,7 @@ impl Looper {
             LooperState::Stop => {
                 self.current_pos = 0;
                 self.fire_state();
-            }
+            },
             LooperState::Recording => {
                 self.loop_len    = self.current_pos.max(1);
                 self.bake_fade_out(0);
@@ -320,7 +320,7 @@ impl Looper {
                 self.state       = LooperState::Stop;
                 self.current_pos = 0;
                 self.fire_state();
-            }
+            },
             LooperState::Playing | LooperState::Overdub => {
                 // Start fade-out; reset pos to 0 immediately (8-sample fade is inaudible).
                 self.start_fade_out();
@@ -368,7 +368,7 @@ impl Looper {
                 self.fade_gain  = 1.0;
                 self.fade_delta = 0.0;
                 self.state      = LooperState::Playing;
-            }
+            },
             LooperState::Playing | LooperState::Stop => {
                 if self.overdub_count > 0 {
                     // Zero-fill the last completed overdub layer and remove it.
@@ -788,7 +788,7 @@ impl Parameterized for Looper {
                 } else { 0.0 };
                 self.current_pos = (secs.clamp(0.0, max_secs) * self.sample_rate) as usize;
                 Ok(())
-            }
+            },
             _ => Err(format!("Looper: unknown param '{param}'")),
         }
     }

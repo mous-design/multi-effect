@@ -35,3 +35,13 @@ export interface ControllerDef {
   channel?: number | '*';
   mappings: Record<string, ControlDef>;
 }
+
+export interface AudioConfig {
+    sample_rate: number;
+    buffer_size: number;
+    audio_device: string;
+    in_channels: number;
+    out_channels: number;
+    delay_max_seconds: number;
+    looper_max_seconds: number;
+}

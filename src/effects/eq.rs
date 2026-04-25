@@ -94,7 +94,7 @@ impl Eq {
                     -2.0 * ((a - 1.0) + (a + 1.0) * cos_w),
                     (a + 1.0) + (a - 1.0) * cos_w - two_sqrt_a_alpha,
                 )
-            }
+            },
             EqType::HighShelf => {
                 let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
                 (

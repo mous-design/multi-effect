@@ -1,7 +1,7 @@
 {
   "sample_rate":  48000,
   "buffer_size":  256,
-  "device":       "default",
+  "audio_device":       "default",
   "in_channels":  1,
   "out_channels": 2,
   "control_port": 9000,

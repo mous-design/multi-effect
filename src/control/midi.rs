@@ -2,8 +2,8 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::config::master::ConfigRequest;
-use crate::control::{ControlMessage, EventBus};
-use crate::control::mapping::MidiChannel;
+use super::{ControlMessage, EventBus};
+use super::mapping::MidiChannel;
 
 // ---------------------------------------------------------------------------
 // MidiControl  (MIDI input)
@@ -95,10 +95,10 @@ impl MidiControl {
                             source,
                             resp: None,
                         })
-                    }
+                    },
                     0xC0 if msg.len() >= 2 => {
-                        Some(ConfigRequest::SwitchPreset { slot: msg[1], resp: None })
-                    }
+                        Some(ConfigRequest::SwitchPreset { slot: msg[1], source, resp: None })
+                    },
                     0x90 if msg.len() >= 3 => {
                         let cm = if msg[2] > 0 {
                             ControlMessage::NoteOn { note: msg[1], velocity: msg[2] }
@@ -106,10 +106,10 @@ impl MidiControl {
                             ControlMessage::NoteOff { note: msg[1] }
                         };
                         Some(ConfigRequest::ApplyControl(cm))
-                    }
+                    },
                     0x80 if msg.len() >= 3 => {
                         Some(ConfigRequest::ApplyControl(ControlMessage::NoteOff { note: msg[1] }))
-                    }
+                    },
                     _ => None,
                 };
                 if let Some(r) = req {
@@ -127,7 +127,7 @@ impl MidiControl {
                     let _conn = conn;
                     std::thread::park();
                 });
-            }
+            },
             Err(e) => error!("MIDI connect error: {e}"),
         }
     }
@@ -227,15 +227,15 @@ impl MidiOutControl {
                                             debug!("MIDI out SET {path} {value} → CC{cc} 14-bit (MSB={msb}, LSB={lsb})");
                                             let _ = conn.send(&[0xB0 | ch_byte, cc, msb]);
                                             let _ = conn.send(&[0xB0 | ch_byte, cc + 32, lsb]);
-                                        }
+                                        },
                                         32..=63 => {
                                             error!("MIDI out: CC{cc} is reserved for 14-bit LSB (paired with CC{}) — cannot use as primary mapping", cc - 32);
-                                        }
+                                        },
                                         64..=127 => {
                                             let raw_u8 = raw.clamp(0.0, 127.0).round() as u8;
                                             debug!("MIDI out SET {path} {value} → CC{cc} {raw_u8}");
                                             let _ = conn.send(&[0xB0 | ch_byte, cc, raw_u8]);
-                                        }
+                                        },
                                         _ => {
                                             error!("MIDI out: CC{cc} out of range (valid: 0..=127)");
                                         }
@@ -243,7 +243,7 @@ impl MidiOutControl {
                                 }
                             }
                         }
-                    }
+                    },
                     ControlMessage::PresetLoaded { preset, .. } => {
                         if preset.index != 0 {
                             let _ = conn.send(&[0xC0 | ch_byte, preset.index]);

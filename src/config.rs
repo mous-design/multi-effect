@@ -14,8 +14,38 @@ use preset::PresetDefs;
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-
+/// Lightweight config object: only carries real scalar values, meant to send 
+/// over transport channels. All properties are Options, so the transport can use 
+/// this struct for sending just the properties it wants.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigPatch {
+    sample_rate:        Option<u32>,
+    buffer_size:        Option<u32>,
+    audio_device:       Option<String>,
+    in_channels:        Option<u16>,
+    out_channels:       Option<u16>,
+    delay_max_seconds:  Option<f32>,
+    looper_max_seconds: Option<f32>,
+}
+impl ConfigPatch {
+    pub fn from_config(cfg: &Config) -> Self {
+        Self {
+            sample_rate:        Some(cfg.sample_rate),
+            buffer_size:        Some(cfg.buffer_size),
+            audio_device:       Some(cfg.audio_device.clone()),
+            in_channels:        Some(cfg.in_channels),
+            out_channels:       Some(cfg.out_channels),
+            delay_max_seconds:  Some(cfg.delay_max_seconds),
+            looper_max_seconds: Some(cfg.looper_max_seconds),
+        }
+    }
+}
+
+/// Complete config object. Holds all ConfigPatch plus presets, default chains
+/// and some other values that are internal only
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Sample rate in Hz (e.g. 48000)
     pub sample_rate: u32,

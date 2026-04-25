@@ -195,10 +195,11 @@ export function MappingsPanel({ controllers, devices, allNodes, onSave, onClose 
     async function handleApply() {
         setSaving(true);
         const updated = toApi(rows);
-        await putControllers(updated);
-        setSaving(false);
-        onSave(updated);
-        onClose();
+        if (await putControllers(updated)) {
+            setSaving(false);
+            onSave(updated);
+            onClose();
+        }
     }
 
     const shownDevices = deviceAliases.filter(alias => rows.some(r => r.device === alias));

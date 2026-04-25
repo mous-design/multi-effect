@@ -10,7 +10,7 @@ fn round_floats(json: &Value) -> Value {
         Value::Number(n) if n.is_f64() => {
             let rounded = (n.as_f64().unwrap() * 1000.0).round() / 1000.0;
             Value::from(rounded)
-        }
+        },
         Value::Array(arr) => arr.into_iter().map(round_floats).collect(),
         Value::Object(obj) => Value::Object(
             obj.iter().map(|(k, v)| (k.clone(), round_floats(v))).collect()
@@ -29,7 +29,7 @@ fn whole_floats_to_int(json: &Value) -> Value {
             } else {
                 json.clone() // preserve float as-is
             }
-        }
+        },
         Value::Array(arr) => arr.into_iter().map(whole_floats_to_int).collect(),
         Value::Object(obj) => Value::Object(
             obj.iter().map(|(k, v)| (k.clone(), whole_floats_to_int(v))).collect()

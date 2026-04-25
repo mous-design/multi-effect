@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NodeDef } from '../types';
-import { postAction } from '../api';
+import { sendAction } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { t } from '../i18n';
@@ -258,21 +258,21 @@ export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete 
                       disabled={isPlaying}
                       title={recTitle}
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, recActive ? 'pause' : 'rec')}>
+                      onClick={() => sendAction(`${node.key}.action`, recActive ? 'pause' : 'rec')}>
                       {recActive ? <PauseIcon /> : t('looper.rec')}
                     </button>
                     <button className={playClass}
                       disabled={isIdle}
                       title={playTitle}
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, isPlaying ? 'pause' : 'play')}>
+                      onClick={() => sendAction(`${node.key}.action`, isPlaying ? 'pause' : 'play')}>
                       {isPlaying ? <PauseIcon /> : '▶'}
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}
                       title="Stop (go to start)"
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, 'stop')}>
+                      onClick={() => sendAction(`${node.key}.action`, 'stop')}>
                       ■
                     </button>
                   </div>
@@ -334,14 +334,14 @@ export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete 
                       disabled={!canUndo}
                       title={`Undo overdub (${displayOverdubs} layer${displayOverdubs !== 1 ? 's' : ''})`}
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, 'undo')}>
+                      onClick={() => sendAction(`${node.key}.action`, 'undo')}>
                       ↩<span className="looper-undo-count" style={atMerge ? { color: 'var(--red, #e05)' } : undefined}>{displayOverdubs}</span>
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}
                       title="Reset (clear loop)"
                       onMouseDown={e => e.stopPropagation()}
-                      onClick={() => postAction(`${node.key}.action`, 'reset')}>
+                      onClick={() => sendAction(`${node.key}.action`, 'reset')}>
                       {t('looper.reset')}
                     </button>
                   </div>

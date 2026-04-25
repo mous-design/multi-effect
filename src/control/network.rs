@@ -15,11 +15,11 @@ use super::handle::handle_client;
 /// ```text
 /// SET  <key.param> <value>     — set a single parameter, e.g. SET 04-reverb.wet 0.6
 /// CTRL <channel_id> <value>    — mapped control (same as serial CTRL)
-/// UPDATE <json>                — partial patch update
 /// CHAINS <json>                — replace chain structure (full chain array)
 /// RESET                        — reset all effect state
-/// PROGRAM <0-127>              — load preset number
+/// PRESET <0-127>              — load preset number
 /// SAVE_PRESET <0-127>          — save current chains to preset slot in config.json
+/// COMPARE                      - Go to compare-mode
 /// ```
 ///
 /// All connected clients also receive outbound events from the bus:
@@ -70,7 +70,7 @@ impl NetworkControl {
                             tracing::warn!("Client {addr}: {e}");
                         }
                     });
-                }
+                },
                 _ = active_rx.changed() => {
                     if !*active_rx.borrow() {
                         tracing::info!("Net control on :{} deactivated", self.port);

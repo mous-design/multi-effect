@@ -58,7 +58,7 @@ impl Parameterized for Chorus {
                 let (vr, rr) = check_bounds("Chorus", "wet", r, 0.0, 1.0);
                 self.wet = [vl, vr];
                 rl.and(rr)
-            }
+            },
             _ => Err(format!("Chorus: unknown param '{param}'")),
         }
     }

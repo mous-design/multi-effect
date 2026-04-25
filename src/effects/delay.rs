@@ -81,7 +81,7 @@ impl Parameterized for Delay {
                 let (vr, rr) = check_bounds("Delay", "wet", r, 0.0, 1.0);
                 self.wet = [vl, vr];
                 rl.and(rr)
-            }
+            },
             _ => Err(format!("Delay: unknown param '{param}'")),
         }
     }

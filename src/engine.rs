@@ -236,26 +236,23 @@ impl AudioEngine {
                     if !handled {
                         warn!("SET '{path}' {value} [source={source}]: unknown parameter");
                     }
-                }
+                },
                 ControlMessage::Reset { .. } => {
                     for chain in &mut self.chains { chain.reset(); }
-                }
+                },
                 ControlMessage::NoteOn { note, velocity } => {
                     for chain in &mut self.chains { chain.on_note_on(note, velocity); }
-                }
+                },
                 ControlMessage::NoteOff { note } => {
                     for chain in &mut self.chains { chain.on_note_off(note); }
-                }
+                },
                 ControlMessage::Action { path, action, .. } => {
                     let handled = self.chains.iter_mut().any(|c| c.dispatch_action(&path, &action).is_ok());
                     if !handled {
                         warn!("ACTION '{path}' '{action}': no handler");
                     }
-                }
-                // NodeEvent is fired directly by nodes (e.g. Looper) via their stored EventBus.
-                ControlMessage::NodeEvent { .. }
-                | ControlMessage::PresetLoaded { .. }
-                | ControlMessage::StateChanged { .. } => {}
+                },
+                _ => {}
             }
         }
     }

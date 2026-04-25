@@ -104,6 +104,7 @@ pub struct ControlDef {
 /// Serialization goes directly through the derived impl on `ControlDef`, with
 /// the private fields skipped — no parallel path needed.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlDefRaw {
     target: String,
     #[serde(default = "default_ctrl")]
@@ -239,7 +240,7 @@ impl<'de> Deserialize<'de> for MidiChannel {
 /// Connection-level device configuration.
 /// Defined once at root level under `"devices"`, referenced by alias in `ControllerDef`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DeviceDef {
     /// USB/UART serial port.
     Serial {
@@ -250,7 +251,7 @@ pub enum DeviceDef {
         active: bool,
     },
 
-    /// TCP server — accepts `CTRL`, `SET`, `UPDATE`, `PATCH`, `RESET`, `PROGRAM`.
+    /// TCP server — accepts `CTRL`, `SET`, `CHAINS`, `RESET`, `PRESET`, `SAVE_PRESET`.
     Net {
         #[serde(default = "default_host")]
         host: String,
@@ -304,6 +305,7 @@ impl DeviceDef {
 /// Note: MIDI channel filtering is a device-level concern (see `DeviceDef::MidiIn.channel`),
 /// not a per-preset override.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ControllerDef {
     /// Alias matching a key in `Config.control_devices`.
     pub device: String,

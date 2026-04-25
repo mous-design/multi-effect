@@ -143,7 +143,7 @@ impl Parameterized for Reverb {
                 let (vr, rr) = check_bounds("Reverb", "wet", r, 0.0, 1.0);
                 self.wet = [vl, vr];
                 rl.and(rr)
-            }
+            },
             _ => Err(format!("Reverb: unknown param '{param}'")),
         }
     }

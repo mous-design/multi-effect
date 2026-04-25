@@ -9,6 +9,7 @@ pub const PRESET_NONE: u8 = 255;
 
 /// One numbered preset slot: a signal chain definition + controller mappings.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct PresetDef {
     /// Preset number (0–127, matching MIDI program-change range, PRESET_NONE if unknown).
     pub index: u8,
@@ -26,6 +27,7 @@ pub struct PresetDef {
 
 /// Collection of presets with an active-preset pointer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PresetDefs {
     /// Current preset, if any. If none, values is PRESET_NONE
     #[serde(default = "PresetDefs::default_active")]

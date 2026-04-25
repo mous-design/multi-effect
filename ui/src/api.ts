@@ -1,134 +1,75 @@
-// Global error handler — set by App on mount.
+import type { ControllerDef, AudioConfig, DeviceMap } from './types';
+export function splitN(s: string, sep: string, n: number): string[] {
+    const out: string[] = [];
+    let remaining = s;
+    for (let i = 0; i < n - 1; i++) {
+        const idx = remaining.indexOf(sep);
+        if (idx === -1) break;
+        out.push(remaining.slice(0, idx));
+        remaining = remaining.slice(idx + sep.length);
+    }
+    out.push(remaining);
+    return out;
+}
+
+//---------- Errors ----------//
+// Set default error handler to consoele. Overload with setApiErrorHandler()
 let onError: (msg: string) => void = console.error;
+// Global error handler — set by App on mount.
 export function setApiErrorHandler(fn: (msg: string) => void) { onError = fn; }
 
-async function api(url: string, init?: RequestInit): Promise<Response> {
-    const res = await fetch(url, init).catch(e => { onError(e.message); throw e; });
-    if (!res.ok) {
-        const body = await res.json().catch(() => null);
-        onError(body?.error ?? `${init?.method ?? 'GET'} ${url}: ${res.status}`);
+//---------- Websocket ----------//
+let ws: WebSocket|null = null;
+type Pending = {expect: string; resolve: (value:string|null) => void; reject: (e: Error) => void};
+const pending: Pending[] = [];
+
+// Send a line. Drops silently if not connected — UI will resync on reconnect
+// via the SNAPSHOT line the server sends on handshake.
+function sendWs(line: string, expect: string = 'OK'): Promise<[boolean, string|null]> {
+    return new Promise(resolve => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            onError('not connected');
+            resolve([false, null]);
+            return;
+        }
+        pending.push({
+            expect,
+            resolve: (value: string|null) => {
+                resolve([true, value]);
+            }, reject: e => {
+                onError(e.message);
+                resolve([false, null]);
+            }
+        });
+        ws.send(line);
+    });
+}
+
+async function fetchWs<T>(command: string, expect: string): Promise<T | null> {
+    const [ok, value] = await sendWs(command, expect);
+    if (!ok || value === null) return null;
+    try { return JSON.parse(value) as T; } catch { onError(`bad ${expect} payload`); return null; }
+}
+
+function handleLine(line: string, onMessage: (msg: string, param: string) => void) {
+    let [msg, param] = splitN(line, ' ', 2);
+    if (msg === 'ERR') {
+        pending.shift()?.reject(new Error(param));
+        return;        
     }
-    return res;
+    if (pending.length && pending[0].expect === msg) {
+        pending.shift()?.resolve(param);
+        return;
+    }
+    onMessage(msg, param);
 }
 
-export async function postAction(target: string, action: string): Promise<boolean> {
-    const res = await api('/api/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target, action }),
-    });
-    return res.ok;
-}
-
-export async function fetchConfig(): Promise<{
-    in_channels: number; out_channels: number;
-    sample_rate: number; buffer_size: number; audio_device: string;
-    delay_max_seconds: number; looper_max_seconds: number;
-}> {
-    const res = await api('/api/config');
-    return res.json();
-}
-
-export async function setChains(chains: object[]): Promise<boolean> {
-    const res = await api('/api/chains', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chains }),
-    });
-    return res.ok;
-}
-
-export function setParam(path: string, value: number | boolean) {
-    api('/api/set', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path, value }),
-    });
-}
-
-export async function saveConfig(cfg: {
-    sample_rate: number;
-    buffer_size: number;
-    audio_device: string;
-    in_channels: number;
-    out_channels: number;
-    delay_max_seconds: number;
-}): Promise<boolean> {
-    const res = await api('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cfg),
-    });
-    return res.ok;
-}
-
-export async function reloadConfig(): Promise<boolean> {
-    const res = await api('/api/reload', { method: 'POST' });
-    return res.ok;
-}
-
-export function savePreset(n: number) {
-    return api(`/api/preset/${n}/save`, { method: 'POST' });
-}
-
-export async function switchPreset(n: number): Promise<boolean> {
-    const res = await api(`/api/preset/${n}`, { method: 'POST' });
-    return res.ok;
-}
-
-export async function deletePreset(n: number): Promise<boolean> {
-    const res = await api(`/api/preset/${n}`, { method: 'DELETE' });
-    return res.ok;
-}
-
-export async function fetchDevices(): Promise<Record<string, any>> {
-    const res = await api('/api/devices');
-    return res.json();
-}
-
-export async function putDevice(alias: string, def: object): Promise<boolean> {
-    const res = await api(`/api/devices/${encodeURIComponent(alias)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(def),
-    });
-    return res.ok;
-}
-
-export async function putControllers(controllers: import('./types').ControllerDef[]): Promise<boolean> {
-    const res = await api(`/api/controllers`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(controllers),
-    });
-    return res.ok;
-}
-
-export async function renameDevice(oldAlias: string, newAlias: string, def: object): Promise<boolean> {
-    const res = await api(`/api/devices/${encodeURIComponent(oldAlias)}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ new_alias: newAlias, ...def }),
-    });
-    return res.ok;
-}
-
-export async function deleteDevice(alias: string): Promise<boolean> {
-    const res = await api(`/api/devices/${encodeURIComponent(alias)}`, { method: 'DELETE' });
-    return res.ok;
-}
-
-export async function postCompare(): Promise<boolean> {
-    const res = await api('/api/compare', { method: 'POST' });
-    return res.ok;
-}
-
+// Constructor
 export function createWs(
-    onMessage: (data: any) => void,
+    onMessage: (msg: string, param: string) => void,
     onConnect: () => void,
     onDisconnect: () => void,
 ): () => void {
-    let ws: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
     let retryMs = 500;                 // snappy first retry (reload ~200-500ms)
@@ -138,9 +79,12 @@ export function createWs(
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${proto}//${window.location.host}/ws`);
         ws.onopen = () => { retryMs = 500; onConnect(); };          // reset backoff on success
-        ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch { } };
+        ws.onmessage = (e) => { handleLine(e.data, onMessage); };
         ws.onerror = () => { /* swallow — onclose triggers reconnect */ };
         ws.onclose = () => {
+            for (const p of pending) p.reject(new Error('disconnected'));
+            pending.length = 0;
+            ws = null;
             onDisconnect();
             if (!stopped) {
                 timer = setTimeout(connect, retryMs);
@@ -150,4 +94,69 @@ export function createWs(
     }
     connect();
     return () => { stopped = true; ws?.close(); if (timer) clearTimeout(timer); };
+}
+
+//---------- Handlers ----------//
+export async function sendChains(chains: object[]): Promise<boolean> {
+    const chainsStr = JSON.stringify(chains);
+    return (await sendWs(`CHAINS ${chainsStr}`))[0];
+}
+
+export async function sendSet(path: string, value: number | boolean): Promise<boolean> {
+    return (await sendWs(`SET ${path} ${value}`))[0];
+}
+
+export async function sendAction(target: string, action: string): Promise<boolean> {
+    return (await sendWs(`SET ${target} ${action}`))[0];
+}
+
+export async function savePreset(n: number):Promise<boolean> {
+    return (await sendWs(`SAVE_PRESET ${n}`))[0];
+}
+
+export async function sendProgram(n: number): Promise<boolean> {
+    return (await sendWs(`PRESET ${n}`))[0];
+}
+
+export async function sendCompare(): Promise<boolean> {
+    return (await sendWs('COMPARE'))[0];
+}
+
+export async function fetchConfig(): Promise<AudioConfig|null> {
+    return fetchWs<AudioConfig>('FETCH_CONFIG', 'CONFIG');
+}
+
+export async function saveConfig(cfg: AudioConfig): Promise<boolean> {
+    const value = JSON.stringify(cfg);
+    return (await sendWs(`SAVE_CONFIG ${value}`))[0];
+}
+
+export async function deletePreset(n: number): Promise<boolean> {
+    return (await sendWs(`DELETE_PRESET ${n}`))[0];
+}
+
+export async function fetchDevices(): Promise<DeviceMap | null> {
+    return fetchWs<DeviceMap>('FETCH_DEVICES', 'DEVICES');
+}
+
+export async function putDevice(alias: string, def: object): Promise<boolean> { // @todo check if alias contains \W
+    const value = JSON.stringify(def);
+    return (await sendWs(`PUT_DEVICE ${alias} ${value}`))[0];
+}
+
+export async function renameDevice(oldAlias: string, newAlias: string): Promise<boolean> { // @todo check if alias contains \W
+    return (await sendWs(`SET_DEVICE_NAME ${oldAlias} ${newAlias}`))[0];
+}
+
+export async function deleteDevice(alias: string): Promise<boolean> {
+    return (await sendWs(`DELETE_DEVICE ${alias}`))[0];
+}
+
+export async function sendReload(): Promise<boolean> {
+    return (await sendWs('RELOAD'))[0];
+}
+
+export async function putControllers(controllers: ControllerDef[]): Promise<boolean> {
+    const value = JSON.stringify(controllers);
+    return (await sendWs(`PUT_CONTROLLERS ${value}`))[0];
 }

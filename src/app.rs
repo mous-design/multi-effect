@@ -81,7 +81,7 @@ async fn wait_signal(mut reload_rx:  mpsc::Receiver<()>) -> Result<Signal> {
             r = tokio::signal::ctrl_c() => {
                 r?;
                 info!("Ctrl-C received, shutting down.");
-            }
+            },
             _ = reload_rx.recv() => { info!("Reload received."); return Ok(Signal::Reload); }
         }
     }

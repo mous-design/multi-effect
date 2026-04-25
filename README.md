@@ -12,11 +12,7 @@ Signal path: ADC → Rust engine → DAC. The dry signal is mixed in analogue �
 
 ```bash
 cargo run                                        # loads config.yml
-cargo run -- -c my-config.yml                   # specific config (YAML or JSON)
-cargo run -- -p patch.yml                       # override startup patch
-cargo run -- --device "USB Audio" --sample-rate 44100   # CLI overrides
-RUST_LOG=debug cargo run                        # debug logging to stderr
-cargo run -- --log-target syslog                # log to syslog (/var/log/syslog)
+cargo run -- -c my-config.yml                   # specific config (YAML or JSON) @todo update this
 ```
 
 ---
@@ -28,7 +24,7 @@ Device settings and the startup patch live in one file.
 ```yaml
 sample_rate:         48000
 buffer_size:         256
-device:              default        # or e.g. "USB Audio Interface"
+audio_device:              default        # or e.g. "USB Audio Interface"
 in_channels:         1              # physical input channels
 out_channels:        2              # physical output channels
 control_port:        9000
@@ -54,7 +50,7 @@ chains:
 
 Both `.yml` / `.yaml` and `.json` are accepted.
 
-### Command-line overrides
+### Command-line overrides @todo fix this!
 
 Any config field can be overridden at startup. `-c` selects the config file;
 all other flags overwrite the loaded config.
@@ -202,7 +198,7 @@ midi:
 ```
 
 - `min` / `max` default to `0.0` / `1.0`; the CC value is linearly mapped to that range.
-- Program Change messages are forwarded as `PROGRAM` events to all chains.
+- Program Change messages are forwarded as `PRESET` events to all chains.
 - With `RUST_LOG=multi_effect=debug`, **every incoming MIDI message is logged** — useful when you don't know what your device sends.
 
 ---
@@ -243,11 +239,11 @@ Reset all effect state (clear delay buffers, reverb tails, etc.).
 RESET
 ```
 
-#### `PROGRAM <0-127>`
-Send a MIDI program change event to all chains.
+#### `PRESET <0-127>`
+Send a preset change event to all chains.
 
 ```
-PROGRAM 5
+PRESET 5
 ```
 
 ### Testing with netcat
@@ -279,3 +275,34 @@ output_channels += eff_buf              # routed by chain.output
 ```
 
 Multiple chains run in parallel and their outputs are summed.
+
+
+## Line protocol (net/serial/web socket)
+Each request is a one-line request, it returns a one-line response.
+The response is either `OK|Err <error message>`, or CONFIG|DEVICES
+**Requests -> Response**
+`CHAINS <chains: json> -> OK|ERR <error msg>` Set chains for the snapshot
+`SET <path: str> <value: float> -> OK|ERR <error msg>` Set value of a controller
+`SET <path: str> <action: str> -> OK|ERR <error msg>` Perform action (e.q. play, pause) 
+`SAVE_PRESET <preset int 1..127> -> OK|ERR <error msg>` Save preset to given slot
+`DELETE_PRESET <preset in 1..127> -> OK|ERR <error msg>` Delete preset on given slot
+`PRESET <preset in 1..127> -> OK|ERR <error msg>` Switch to preset of given slot
+`COMPARE -> OK|ERR <error msg>` Switch to compare mode
+`FETCH_CONFIG -> CONFIG <config: json>|Err <error msg>` Ask for config
+`SAVE_CONFIG <config: json> -> OK|ERR <error msg>` Save the config
+`FETCH_DEVICES -> DEVICES <devices: json>|Err <error msg>` Ask for devices
+`PUT_DEVICE <alias: str> <value: str> -> OK|ERR <error msg>` Save a device
+`SET_DEVICE_NAME <old_alias: str> <new_alias: str> -> OK|ERR <error msg>` Rename a device
+`DELETE_DEVICE <alias: str> -> OK|ERR <error msg>` Delete a device
+`RELOAD -> OK|ERR <error msg>` Reload the system (SIGHUP)
+`PUT_CONTROLLERS <controllers: json> -> OK|ERR <error msg>` Save the controllers
+
+**Broadcasts**
+Broadcasts ar unsolisited messages. Each device may receive one and chooses to either process it or ignore it.
+As far as a request-variant exists, the format is the same. Broadcasts are sent to inform other controllers of 
+a change. The change is not broadcasted to the source-controller.
+`SET <path: str> <value: float>` Set value of controller 
+`SET <path: str> <action: str>` Perform action (e.q. play, pause)
+`COMPARE` Switch to compare mode @todo this needed??
+`STATE <state>`  Switch to state (clean, dirty, compare)
+`SNAPSHOT <snapshot: json> Big set of data: complete preset, state and preset_indexes.

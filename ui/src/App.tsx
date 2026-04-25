@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AppState, ChainDef, ControllerDef, NodeDef } from './types';
-import { setParam, setChains, savePreset, saveConfig, switchPreset, deletePreset, postCompare } from './api';
+import { sendSet, sendChains, savePreset, saveConfig, sendProgram, deletePreset, sendCompare } from './api';
 import { t } from './i18n';
 import { useToasts } from './hooks/useToasts';
 import { useTheme } from './hooks/useTheme';
@@ -12,6 +12,7 @@ import { ChainView } from './components/ChainView';
 import { ChainRoutingPopup } from './components/ChainRoutingPopup';
 import { SettingsPopup } from './components/SettingsPopup';
 import { DevicesPage } from './components/DevicesPage';
+import { splitN } from './api';
 
 export default function App() {
 
@@ -52,65 +53,74 @@ export default function App() {
     const [showSettings, setShowSettings] = useState(false);
 
     // --- Connection (WS + config + devices) ---
-    const { connected, audioConfig, setAudioConfig, devices } = useConnection((msg) => {
-        if (msg.type === 'set') {
-            const [nodeKey, param] = (msg.path as string).split('.');
-            if (!nodeKey || !param) return;
-            setIsDirty(true);
-            setState(prev => {
-                if (!prev) return prev;
-                return {
-                    ...prev, chains: prev.chains.map(chain => ({
-                        ...chain,
-                        nodes: chain.nodes.map(node =>
-                            node.key === nodeKey ? { ...node, [param]: msg.value } : node
-                        ),
-                    }))
-                };
-            });
-        } else if (msg.type === 'node_event') {
-            const { key, event, data } = msg;
-            if (event === 'looper_state') {
-                const { state: ls, loop_ms, pos_ms, overdub_count } = data;
+    const { connected, audioConfig, setAudioConfig, devices } = useConnection((msg, params) => {
+        switch(msg) {
+            case 'SET':
+                const [path, value] = splitN(params, ' ', 2);
+                const [nodeKey, param] = splitN(path, '.', 2);
+                if (!nodeKey || !param) return;
+                setIsDirty(true);
                 setState(prev => {
                     if (!prev) return prev;
                     return {
                         ...prev, chains: prev.chains.map(chain => ({
                             ...chain,
                             nodes: chain.nodes.map(node =>
-                                node.key === key
-                                    ? { ...node, state: ls, loop_secs: loop_ms / 1000, pos_secs: pos_ms / 1000, overdub_count }
-                                    : node
+                                node.key === nodeKey ? {...node, [param]: value} : node
                             ),
                         }))
                     };
                 });
-            } else if (event === 'loop_wrap') {
-                setState(prev => {
-                    if (!prev) return prev;
-                    return {
-                        ...prev, chains: prev.chains.map(chain => ({
-                            ...chain,
-                            nodes: chain.nodes.map(node =>
-                                node.key === key ? { ...node, pos_secs: 0, _wrap_ts: Date.now() } : node
-                            ),
-                        }))
-                    };
-                });
-            }
-        } else if (msg.type === 'preset') {
-            const preset = msg.preset ?? {};
-            setState({ chains: preset.chains ?? [] });
-            setControllers(preset.controllers ?? []);
-            if (typeof preset.index === 'number') setActivePreset(preset.index);
-            if (Array.isArray(msg.preset_indices)) setPresetDefs(msg.preset_indices);
-            setIsDirty(msg.state === 'Dirty');
-            setIsComparing(msg.state === 'Comparing');
-        } else if (msg.type === 'state') {
-            setIsDirty(msg.state === 'Dirty');
-            setIsComparing(msg.state === 'Comparing');
-            if (typeof msg.preset_index === 'number') setActivePreset(msg.preset_index);
-            if (Array.isArray(msg.preset_indices)) setPresetDefs(msg.preset_indices);
+                break;
+            case 'SNAPSHOT':
+                const snap = JSON.parse(params);
+                const preset = snap.preset ?? {};
+                setState({ chains: preset.chains ?? [] });
+                setControllers(preset.controllers ?? []);
+                if (typeof preset.index === 'number') setActivePreset(preset.index);
+                if (Array.isArray(snap.preset_indices)) setPresetDefs(snap.preset_indices);
+                setIsDirty(snap.state === 'Dirty');
+                setIsComparing(snap.state === 'Comparing');
+                break;
+            case 'STATE':
+                const [state, idx, preset_indices] = splitN(params, ' ', 3);
+                setIsDirty(state === 'Dirty');
+                setIsComparing(state === 'Comparing');
+                if (typeof idx === 'number') setActivePreset(idx);
+                if (Array.isArray(preset_indices)) setPresetDefs(preset_indices);
+                break;
+            case 'EVENT':
+                const [key, event, json] = splitN(params, ' ', 3);
+                if (event === 'looper_state') {
+                    const data = JSON.parse(json); 
+                    const { state: ls, loop_ms, pos_ms, overdub_count } = data;
+                    setState(prev => {
+                        if (!prev) return prev;
+                        return {
+                            ...prev, chains: prev.chains.map(chain => ({
+                                ...chain,
+                                nodes: chain.nodes.map(node =>
+                                    node.key === key
+                                        ? { ...node, state: ls, loop_secs: loop_ms / 1000, pos_secs: pos_ms / 1000, overdub_count }
+                                        : node
+                                ),
+                            }))
+                        };
+                    });
+                } else if (event === 'loop_wrap') {
+                    setState(prev => {
+                        if (!prev) return prev;
+                        return {
+                            ...prev, chains: prev.chains.map(chain => ({
+                                ...chain,
+                                nodes: chain.nodes.map(node =>
+                                    node.key === key ? { ...node, pos_secs: 0, _wrap_ts: Date.now() } : node
+                                ),
+                            }))
+                        };
+                    });
+                }
+                break;
         }
     });
 
@@ -118,18 +128,18 @@ export default function App() {
 
     const handleSwitchPreset = async (n: number) => {
         if (!presets.includes(n)) { addToast(t('error.preset_missing', n)); return; }
-        setActivePreset(n);
-        setIsDirty(false);
-        setIsComparing(false);
-        await switchPreset(n);
+        if (await sendProgram(n)) {
+            setActivePreset(n);
+            setIsDirty(false);
+            setIsComparing(false);
+        }
     };
 
-    const handleCompare = async () => { await postCompare(); };
+    const handleCompare = async () => { await sendCompare(); };
 
     const handleConfirmSave = async () => {
         setShowSavePopup(false);
-        const res = await savePreset(savePresetNum);
-        if (res.ok) {
+        if (await savePreset(savePresetNum)) {
             setActivePreset(savePresetNum);
             setIsDirty(false);
             setSavedFeedback(true);
@@ -138,8 +148,7 @@ export default function App() {
     };
 
     const handleQuickSave = async () => {
-        const res = await savePreset(activePreset);
-        if (res.ok) {
+        if (await savePreset(activePreset)) {
             setIsDirty(false);
             setSavedFeedback(true);
             setTimeout(() => setSavedFeedback(false), 2000);
@@ -147,23 +156,23 @@ export default function App() {
     };
 
     const handleDeletePreset = async () => {
-        const ok = await deletePreset(activePreset);
-        if (!ok) return;
-        const remaining = presets.filter(n => n !== activePreset);
-        setPresetDefs(remaining);
-        if (remaining.length > 0) {
-            const next = remaining[0];
-            setActivePreset(next);
-            switchPreset(next);
-        } else {
-            setState({ chains: [] });
+        if (await deletePreset(activePreset)) {
+            const remaining = presets.filter(n => n !== activePreset);
+            setPresetDefs(remaining);
+            if (remaining.length > 0) {
+                const next = remaining[0];
+                setActivePreset(next);
+                sendProgram(next);
+            } else {
+                setState({ chains: [] });
+            }
         }
     };
 
     // --- Chain handlers ---
 
     const handleSet = (path: string, value: number | boolean) => {
-        const [nodeKey, param] = path.split('.');
+        const [nodeKey, param] = splitN(path, '.', 2);
         if (!nodeKey || !param) return;
         setIsDirty(true);
         setState(prev => {
@@ -177,7 +186,8 @@ export default function App() {
                 }))
             };
         });
-        setParam(path, value);
+        // @todo Can we rollback the view?
+        sendSet(path, value);
     };
 
     const handleDelete = (nodeKey: string) => {
@@ -190,7 +200,7 @@ export default function App() {
         };
         setState(next);
         setIsDirty(true);
-        setChains(next.chains).then(ok => { if (!ok) setState(prev); });
+        sendChains(next.chains).then(ok => { if (!ok) setState(prev); });
     };
 
     const handleReorder = (chainIdx: number, newNodes: NodeDef[]) => {
@@ -199,7 +209,7 @@ export default function App() {
         const next = { ...prev, chains: prev.chains.map((chain, i) => i === chainIdx ? { ...chain, nodes: newNodes } : chain) };
         setState(next);
         setIsDirty(true);
-        setChains(next.chains).then(ok => { if (!ok) setState(prev); });
+        sendChains(next.chains).then(ok => { if (!ok) setState(prev); });
     };
 
     const handleAddNode = (chainIdx: number, node: NodeDef) => {
@@ -212,7 +222,7 @@ export default function App() {
         };
         setState(next);
         setIsDirty(true);
-        setChains(next.chains).then(ok => { if (!ok) setState(prev); });
+        sendChains(next.chains).then(ok => { if (!ok) setState(prev); });
     };
 
     const handleRoutingApply = (chainIdx: number, updated: ChainDef) => {
@@ -221,7 +231,7 @@ export default function App() {
         const next = { ...prev, chains: prev.chains.map((c, i) => i === chainIdx ? updated : c) };
         setState(next);
         setRoutingIdx(null);
-        setChains(next.chains).then(ok => { if (!ok) setState(prev); });
+        sendChains(next.chains).then(ok => { if (!ok) setState(prev); });
     };
 
     const handleDeleteChain = (chainIdx: number) => {
@@ -230,19 +240,18 @@ export default function App() {
         const next = { ...prev, chains: prev.chains.filter((_, i) => i !== chainIdx) };
         setState(next);
         setIsDirty(true);
-        setChains(next.chains).then(ok => { if (!ok) setState(prev); });
+        sendChains(next.chains).then(ok => { if (!ok) setState(prev); });
     };
 
     const handleNewChain = (input: [number, number], output: [number, number]) => {
         if (!state) return;
         const next = { ...state, chains: [...state.chains, { input, output, nodes: [] }] };
         setState(next);
-        setChains(next.chains);
+        sendChains(next.chains);
     };
 
     const handleSaveConfig = async (cfg: typeof audioConfig) => {
-        const ok = await saveConfig(cfg);
-        if (ok) {
+        if (await saveConfig(cfg)) {
             setAudioConfig(cfg);
             if (state && cfg.delay_max_seconds < audioConfig.delay_max_seconds) {
                 state.chains.forEach(chain => chain.nodes.forEach(node => {
@@ -251,8 +260,9 @@ export default function App() {
                     }
                 }));
             }
+            return true;
         }
-        return ok;
+        return false;
     };
 
     // --- Derived ---

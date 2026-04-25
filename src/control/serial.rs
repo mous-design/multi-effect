@@ -4,7 +4,7 @@ use tokio_serial::SerialPortBuilderExt;
 use tracing::info;
 
 use crate::config::master::ConfigRequest;
-use crate::control::EventBus;
+use super::EventBus;
 use super::handle::handle_client;
 
 pub struct SerialControl {

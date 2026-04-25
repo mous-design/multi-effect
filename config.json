@@ -1,6 +1,6 @@
 {
   "audio_device": "default",
-  "buffer_size": 256,
+  "buffer_size": 128,
   "chains": [
     {
       "input": [
@@ -59,7 +59,6 @@
     },
     "net 2": {
       "active": true,
-      "fallback": true,
       "host": "0.0.0.0",
       "port": 9000,
       "type": "net"
@@ -68,7 +67,6 @@
       "active": false,
       "baud": 115200,
       "dev": "/dev/ttyUSB0",
-      "fallback": true,
       "type": "serial"
     }
   },
@@ -80,66 +78,8 @@
   "looper_max_seconds": 30.0,
   "out_channels": 2,
   "presets": {
-    "active": 2,
+    "active": 1,
     "items": [
-      {
-        "chains": [
-          {
-            "input": [
-              1,
-              1
-            ],
-            "nodes": [
-              {
-                "active": true,
-                "feedback": 0,
-                "key": "01-delay",
-                "time": 0,
-                "type": "delay",
-                "wet": 0
-              },
-              {
-                "active": true,
-                "damping": 0,
-                "key": "02-reverb",
-                "room_size": 0,
-                "type": "reverb",
-                "wet": 0
-              },
-              {
-                "active": true,
-                "decay": 1,
-                "key": "03-looper",
-                "type": "looper",
-                "wet": 1
-              }
-            ],
-            "output": [
-              1,
-              2
-            ]
-          }
-        ],
-        "controllers": [
-          {
-            "device": "midi in 1",
-            "mappings": {
-              "70": {
-                "ctrl": [
-                  0.0,
-                  127.0
-                ],
-                "param": [
-                  0.0,
-                  1.0
-                ],
-                "target": "01-delay.feedback"
-              }
-            }
-          }
-        ],
-        "index": 1
-      },
       {
         "chains": [
           {
@@ -154,7 +94,15 @@
                 "key": "01-delay",
                 "time": 0.626,
                 "type": "delay",
-                "wet": 1.0
+                "wet": 0.5
+              },
+              {
+                "active": true,
+                "freq": 1000,
+                "gain_db": 0,
+                "key": "03-eq_param",
+                "q": 1,
+                "type": "eq_param"
               }
             ],
             "output": [
@@ -198,6 +146,73 @@
           }
         ],
         "index": 2
+      },
+      {
+        "chains": [
+          {
+            "input": [
+              1,
+              1
+            ],
+            "nodes": [
+              {
+                "active": true,
+                "feedback": 0.616,
+                "key": "01-delay",
+                "time": 0.626,
+                "type": "delay",
+                "wet": 0.5
+              },
+              {
+                "active": true,
+                "freq": 1000,
+                "gain_db": -3.118,
+                "key": "03-eq_param",
+                "q": 1,
+                "type": "eq_param"
+              }
+            ],
+            "output": [
+              1,
+              2
+            ]
+          }
+        ],
+        "controllers": [
+          {
+            "device": "net 2",
+            "mappings": {
+              "ctrl_1": {
+                "ctrl": [
+                  0.0,
+                  1023.0
+                ],
+                "param": [
+                  0.0,
+                  1.0
+                ],
+                "target": "01-delay.feedback"
+              }
+            }
+          },
+          {
+            "device": "serial 1",
+            "mappings": {
+              "ctrl_1": {
+                "ctrl": [
+                  0.0,
+                  1023.0
+                ],
+                "param": [
+                  0.0,
+                  1.0
+                ],
+                "target": "01-delay.feedback"
+              }
+            }
+          }
+        ],
+        "index": 1
       }
     ]
   },

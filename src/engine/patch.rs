@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::effects::{Chorus, Delay, Eq, Harmonizer, Reverb};
 use crate::effects::eq::EqType;
 use crate::effects::looper::Looper;
-use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use super::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -33,6 +33,7 @@ where
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ChainDef {
     #[serde(deserialize_with = "deserialize_channel_pair")]
     pub input: [u8; 2],
@@ -102,13 +103,13 @@ impl Parameterized for Mix {
                 let (vl, rl) = check_bounds("Mix", "dry", l, 0.0, 1.0);
                 let (vr, rr) = check_bounds("Mix", "dry", r, 0.0, 1.0);
                 self.dry = [vl, vr]; rl.and(rr)
-            }
+            },
             "wet"  => {
                 let [l, r] = value.try_stereo()?;
                 let (vl, rl) = check_bounds("Mix", "wet", l, 0.0, 1.0);
                 let (vr, rr) = check_bounds("Mix", "wet", r, 0.0, 1.0);
                 self.wet = [vl, vr]; rl.and(rr)
-            }
+            },
             "gain" => { let (v, r) = check_bounds("Mix", "gain", value.try_float()?, 0.0, 4.0); self.gain = v; r }
             "pan"  => { let (v, r) = check_bounds("Mix", "pan",  value.try_float()?, -1.0, 1.0); self.pan  = v; r }
             _ => Err(format!("Mix: unknown param '{param}'")),
@@ -244,23 +245,13 @@ impl Chain {
         if let Some((key, rest)) = param.split_once('.') {
             for node in &mut self.nodes {
                 if node.key() == key {
-                    match node.set_param(rest, value) {
-                        Ok(())  => debug!("SET {param} = {value}"),
-                        Err(e)  => warn!("{e}"),
+                    if let Err(e) = node.set_param(rest, value) {
+                        warn!("{e}")
                     }
                     return Ok(());
                 }
             }
         }
-        // @todo I think this is not needed. Remove after some tests.
-        // Fallback: try every node in order
-        // for node in &mut self.nodes {
-        //     match node.set_param(param, value) {
-        //         Ok(()) => { debug!("SET {param}"); return Ok(()); }
-        //         Err(e) if !e.contains("unknown param") => { warn!("{e}"); return Ok(()); }
-        //         Err(_) => {}
-        //     }
-        // }
         Err(format!("no node handles '{param}'"))
     }
 
@@ -525,43 +516,6 @@ fn parse_param_value(v: &Value) -> Result<ParamValue> {
         ])),
         Value::Array(arr) => bail!("expected [number, number], got array with {} elements", arr.len()),
         _ => bail!("expected number or [number, number], got: {v}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Partial-update helper (for TCP UPDATE command)
-// ---------------------------------------------------------------------------
-
-/// Convert a partial-update JSON object into `(path, value)` pairs.
-///
-/// Example:
-/// ```json
-/// { "04-reverb": { "wet": 0.6 }, "09-mix": { "dry": 1.0 } }
-/// ```
-/// → `[("04-reverb.wet", 0.6), ("09-mix.dry", 1.0)]`
-pub fn flatten_update(update: &Value) -> Vec<(String, f32)> {
-    let mut out = Vec::new();
-    flatten_rec(update, String::new(), &mut out);
-    out
-}
-
-fn flatten_rec(v: &Value, prefix: String, out: &mut Vec<(String, f32)>) {
-    match v {
-        Value::Object(map) => {
-            for (k, child) in map {
-                let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
-                flatten_rec(child, path, out);
-            }
-        }
-        Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                out.push((prefix, f as f32));
-            }
-        }
-        Value::Bool(b) => {
-            out.push((prefix, if *b { 1.0 } else { 0.0 }));
-        }
-        _ => {}
     }
 }
 

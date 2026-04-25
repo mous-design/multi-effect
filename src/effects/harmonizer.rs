@@ -178,17 +178,17 @@ impl Parameterized for Harmonizer {
                 let (vr, rr) = check_bounds("Harmonizer", "wet", r, 0.0, 1.0);
                 self.wet = [vl, vr];
                 rl.and(rr)
-            }
+            },
             "root" => {
                 let (v, r) = check_bounds("Harmonizer", "root", value.try_float()?, 0.0, 127.0);
                 self.root = v as u8;
                 r
-            }
+            },
             "vel_sense" => {
                 let (v, r) = check_bounds("Harmonizer", "vel_sense", value.try_float()?, 0.0, 1.0);
                 self.vel_sense = v;
                 r
-            }
+            },
             _ => Err(format!("Harmonizer: unknown param '{param}'")),
         }
     }

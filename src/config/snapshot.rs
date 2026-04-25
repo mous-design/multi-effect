@@ -8,6 +8,7 @@ use super::preset::PresetDef;
 use super::Config;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SnapshotState {
     #[default]
     Clean,
@@ -32,7 +33,12 @@ impl SnapshotState {
 }
 
 /// Read-only snapshot published via watch channel after every mutation.
+///
+/// Serialization shape is full (including `stash`) — used for persistence to disk.
+/// For wire output (e.g. `SNAPSHOT` line over WS), use [`Self::to_view`] which
+/// returns a borrowed view without the internal `stash` field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigSnapshot {
     pub state:    SnapshotState,
     pub preset:      PresetDef,
@@ -40,7 +46,28 @@ pub struct ConfigSnapshot {
     pub preset_indices:  Vec<u8>,
 }
 
+/// Wire-format projection of [`ConfigSnapshot`]: everything a client needs to render,
+/// without the internal `stash` field (which is only meaningful for persistence).
+///
+/// Borrows from the underlying snapshot — zero allocation. Produced by
+/// [`ConfigSnapshot::to_view`].
+#[derive(Serialize)]
+pub struct SnapshotView<'a> {
+    pub state:          &'a SnapshotState,
+    pub preset:         &'a PresetDef,
+    pub preset_indices: &'a [u8],
+}
+
 impl ConfigSnapshot {
+    /// Borrowed projection for wire output — excludes the internal `stash` field.
+    pub fn to_view(&self) -> SnapshotView<'_> {
+        SnapshotView {
+            state:          &self.state,
+            preset:         &self.preset,
+            preset_indices: &self.preset_indices,
+        }
+    }
+
     pub fn restore_or_build(cfg: &Config) -> Result<Self> {
         Ok(Self::restore_state(&cfg.state_save_path)?.unwrap_or_else(|| Self::build(cfg)))
     }

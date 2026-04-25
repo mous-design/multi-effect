@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn, debug};
 use anyhow::{Result, Context, bail};
 
-use super::Config;
+use super::{Config, ConfigPatch};
 use super::preset::PresetDef;
 use super::snapshot::{ConfigSnapshot, SnapshotState::*};
 use super::ChainDef;
@@ -26,18 +26,18 @@ pub type OptionResp = Option<oneshot::Sender<Result<()>>>;
 /// Inbound requests to the config master.
 pub enum ConfigRequest {
     // -- Reads (need response) --
-    GetConfig       { resp: Resp<Result<Value>> },
-    GetSnapshot { resp: Resp<Result<ConfigSnapshot>> },
+    GetConfig       { resp: Resp<Result<ConfigPatch>> },
+    GetSnapshot     { resp: Resp<Result<ConfigSnapshot>> },
     GetDevices      { resp: Resp<Result<Value>> },
     // -- Config mutations (need response for HTTP) --
-    UpdateConfig      { body: Value, resp: OptionResp },
-    SwitchPreset      { slot: u8, resp: OptionResp },
-    SavePreset        { slot: u8, resp: OptionResp },
-    DeletePreset      { slot: u8, resp: OptionResp },
-    PutDevice         { alias: String, def: DeviceDef, resp: OptionResp },
-    DeleteDevice      { alias: String, resp: OptionResp },
-    RenameDevice      { old_alias: String, new_alias: String, def: DeviceDef, resp: OptionResp },
-    UpdateControllers { controllers: Vec<ControllerDef>, resp: OptionResp },
+    UpdateConfig      { config: ConfigPatch, source: String, resp: OptionResp },
+    SwitchPreset      { slot: u8, source: String, resp: OptionResp },
+    SavePreset        { slot: u8, source: String, resp: OptionResp },
+    DeletePreset      { slot: u8, source: String, resp: OptionResp },
+    PutDevice         { alias: String, def: DeviceDef, source: String, resp: OptionResp },
+    DeleteDevice      { alias: String, source: String, resp: OptionResp },
+    RenameDevice      { old_alias: String, new_alias: String, source: String, resp: OptionResp },
+    UpdateControllers { controllers: Vec<ControllerDef>, source: String, resp: OptionResp },
     ApplySet          { path: String, value: f32, source: String, resp: OptionResp },
     ApplyCtrl         { channel_id: String, raw: f32, alias: String,
                         source: String, resp: OptionResp },
@@ -54,14 +54,14 @@ pub enum ConfigRequest {
                         resp: Resp<Result<Option<(String, f32)>>> },
 
     // -- Chain structure update --
-    SetChains         { json: String, resp: OptionResp },
+    SetChains         { chains: Vec<ChainDef>, source: String, resp: OptionResp },
 
     // -- Fire-and-forget (MIDI notes) --
     ApplyControl(ControlMessage), // @todo maybe rename this to ApplyMidiControl, otherwise confusing with ApplyCtrl
-    ToggleCompare { resp: OptionResp },
+    ToggleCompare { source: String, resp: OptionResp },
 
     // -- Internal --
-    Reload { resp: OptionResp },
+    Reload { source: String, resp: OptionResp },
     SaveState,
 }
 
@@ -135,7 +135,7 @@ impl ConfigMaster {
                 }
                 self.apply_controllers(&self.snapshot.preset.controllers.clone());
                 info!("Loaded initial preset {}", self.snapshot.preset.index);
-            }
+            },
             Err(e) => warn!("Initial chain build failed: {e}"),
         }
 
@@ -155,75 +155,75 @@ impl ConfigMaster {
         match req {
             // Reads
             ConfigRequest::GetConfig { resp } => {
-                let _ = resp.send(self.read_config());
-            }
+                let _ = resp.send(Ok(ConfigPatch::from_config(&self.cfg)));
+            },
             ConfigRequest::GetSnapshot { resp } => {
                 let _ = resp.send(Ok(self.snapshot.clone()));
-            }
+            },
             ConfigRequest::GetDevices { resp } => {
                 let snd = serde_json::to_value(&self.cfg.control_devices)
                     .unwrap_or(Value::Array(vec![]));
                 let _ = resp.send(Ok(snd));
             }
             // Mutations
-            ConfigRequest::UpdateConfig { body, resp } => {
-                Self::respond(resp, self.handle_update_config(&body));
-            }
-            ConfigRequest::SwitchPreset { slot, resp } => {
-                Self::respond(resp, self.handle_switch_preset(slot));
-            }
-            ConfigRequest::SavePreset { slot, resp } => {
-                Self::respond(resp, self.handle_save_preset(slot));
-            }
-            ConfigRequest::DeletePreset { slot, resp } => {
-                Self::respond(resp, self.handle_delete_preset(slot));
-            }
-            ConfigRequest::PutDevice { alias, def, resp } => {
-                Self::respond(resp, self.handle_put_device(alias, def));
-            }
-            ConfigRequest::DeleteDevice { alias, resp } => {
-                Self::respond(resp, self.handle_delete_device(&alias));
-            }
-            ConfigRequest::RenameDevice { old_alias, new_alias, def, resp } => {
-                Self::respond(resp, self.handle_rename_device(&old_alias, &new_alias, def));
-            }
-            ConfigRequest::UpdateControllers { controllers, resp } => {
-                Self::respond(resp, self.handle_update_controllers(controllers));
-            }
-            ConfigRequest::SetChains { json, resp } => {
-                Self::respond(resp, self.handle_set_chains(&json));
-            }
+            ConfigRequest::UpdateConfig { config, source, resp } => {
+                Self::respond(resp, self.handle_update_config(config, &source));
+            },
+            ConfigRequest::SwitchPreset { slot, source, resp } => {
+                Self::respond(resp, self.handle_switch_preset(slot, &source));
+            },
+            ConfigRequest::SavePreset { slot, source, resp } => {
+                Self::respond(resp, self.handle_save_preset(slot, &source));
+            },
+            ConfigRequest::DeletePreset { slot, source, resp } => {
+                Self::respond(resp, self.handle_delete_preset(slot, &source));
+            },
+            ConfigRequest::PutDevice { alias, def, source, resp } => {
+                Self::respond(resp, self.handle_put_device(alias, def, &source));
+            },
+            ConfigRequest::DeleteDevice { alias, source, resp } => {
+                Self::respond(resp, self.handle_delete_device(&alias, &source));
+            },
+            ConfigRequest::RenameDevice { old_alias, new_alias, source, resp } => {
+                Self::respond(resp, self.handle_rename_device(&old_alias, &new_alias, &source));
+            },
+            ConfigRequest::UpdateControllers { controllers, source, resp } => {
+                Self::respond(resp, self.handle_update_controllers(controllers, &source));
+            },
+            ConfigRequest::SetChains { chains, source, resp } => {
+                Self::respond(resp, self.handle_set_chains(chains, &source));
+            },
             ConfigRequest::ApplySet { path, value, source, resp } => {
                 Self::respond(resp, self.handle_apply_set(&path, value, &source));
-            }
+            },
             ConfigRequest::ApplyCtrl { channel_id, raw, alias, source, resp } => {
                 Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, &source));
-            }
+            },
             ConfigRequest::ApplyAction { path, action, source, resp } => {
                 Self::respond(resp, self.handle_apply_action(&path, &action, &source));
-            }
+            },
             ConfigRequest::ApplyReset { source, resp } => {
                 Self::respond(resp, self.handle_apply_reset(&source));
-            }
+            },
             ConfigRequest::ReverseMap { path, value, alias, resp } => {
                 let result = self.lookup_reverse(&path, &alias)
                     .map(|(ch, def)| (ch, def.to_ctrl(value)));
                 let _ = resp.send(Ok(result));
-            }
+            },
             ConfigRequest::ReverseMapRounded { path, value, alias, resp } => {
                 let result = self.lookup_reverse(&path, &alias)
                     .map(|(ch, def)| (ch, def.smart_round_ctrl(def.to_ctrl(value))));
                 let _ = resp.send(Ok(result));
-            }
+            },
             ConfigRequest::ApplyControl(msg) => {
                 self.handle_apply_control(msg);
-            }
-            ConfigRequest::ToggleCompare { resp } => {
-                Self::respond(resp,self.handle_toggle_compare());
-            }
-            ConfigRequest::Reload { resp }=> {
-                Self::respond(resp,self.handle_reload());
-            }
+            },
+            ConfigRequest::ToggleCompare { source, resp } => {
+                Self::respond(resp,self.handle_toggle_compare(&source));
+            },
+            ConfigRequest::Reload { source, resp }=> {
+                Self::respond(resp,self.handle_reload(&source));
+            },
             ConfigRequest::SaveState => {
                 self.handle_save_state();
             }
@@ -231,37 +231,22 @@ impl ConfigMaster {
     }
 
     // -----------------------------------------------------------------------
-    // Read handlers
-    // -----------------------------------------------------------------------
-
-    fn read_config(&self) -> Result<Value> {
-        Ok(serde_json::json!({
-            "in_channels":        self.cfg.in_channels,
-            "out_channels":       self.cfg.out_channels,
-            "sample_rate":        self.cfg.sample_rate,
-            "buffer_size":        self.cfg.buffer_size,
-            "audio_device":       self.cfg.audio_device,
-            "delay_max_seconds":  self.cfg.delay_max_seconds,
-            "looper_max_seconds": self.cfg.looper_max_seconds,
-        }))
-    }
-
-    // -----------------------------------------------------------------------
     // Mutation handlers
     // -----------------------------------------------------------------------
 
-    fn handle_update_config(&mut self, body: &Value) -> Result<()> {
-        if let Some(v) = body["sample_rate"].as_u64()       { self.cfg.sample_rate       = v as u32; }
-        if let Some(v) = body["buffer_size"].as_u64()       { self.cfg.buffer_size       = v as u32; }
-        if let Some(v) = body["audio_device"].as_str()       { self.cfg.audio_device      = v.to_string(); }
-        if let Some(v) = body["in_channels"].as_u64()       { self.cfg.in_channels       = v as u16; }
-        if let Some(v) = body["out_channels"].as_u64()      { self.cfg.out_channels      = v as u16; }
-        if let Some(v) = body["delay_max_seconds"].as_f64() { self.cfg.delay_max_seconds = v as f32; }
+    fn handle_update_config(&mut self, config: ConfigPatch, source: &str) -> Result<()> {
+        if let Some(v) = config.sample_rate       { self.cfg.sample_rate       = v as u32; }
+        if let Some(v) = config.buffer_size       { self.cfg.buffer_size       = v as u32; }
+        if let Some(v) = config.audio_device   { self.cfg.audio_device      = v.to_string(); }
+        if let Some(v) = config.in_channels       { self.cfg.in_channels       = v as u16; }
+        if let Some(v) = config.out_channels      { self.cfg.out_channels      = v as u16; }
+        if let Some(v) = config.delay_max_seconds { self.cfg.delay_max_seconds = v as f32; }
         self.cfg.persist()?;
+        info!("Updated config [source={source}]");
         Ok(())
     }
 
-    fn handle_switch_preset(&mut self, slot: u8) -> Result<()> {
+    fn handle_switch_preset(&mut self, slot: u8, source: &str) -> Result<()> {
         let preset = self.cfg.presets.get(slot)
             .with_context(|| format!("preset {slot} not found"))?.clone();
 
@@ -274,11 +259,11 @@ impl ConfigMaster {
         self.snapshot.load_preset(preset, Clean);
         self.cfg.presets.active = slot;
         self.notify_preset_loaded();
-        info!("Loaded preset {slot}");
+        info!("Loaded preset {slot} [source={source}]");
         Ok(())
     }
 
-    fn handle_save_preset(&mut self, slot: u8) -> Result<()> {
+    fn handle_save_preset(&mut self, slot: u8, source: &str) -> Result<()> {
         self.snapshot.set_to_slot(slot);
         self.cfg.presets.save_to_slot(self.snapshot.preset.clone());
         self.cfg.presets.active = slot;
@@ -287,10 +272,11 @@ impl ConfigMaster {
         if self.snapshot.set_state(Clean) {
             self.notify_state_changed();
         }
+        info!("Saved preset {slot} [source={source}]");
         Ok(())
     }
 
-    fn handle_delete_preset(&mut self, slot: u8) -> Result<()> {
+    fn handle_delete_preset(&mut self, slot: u8, source: &str) -> Result<()> {
         if !self.cfg.presets.remove_slot(slot) {
             bail!("preset not found");
         }
@@ -308,10 +294,11 @@ impl ConfigMaster {
         }
 
         self.cfg.persist()?;
+        info!("Deleted preset {slot} [source={source}]");
         Ok(())
     }
 
-    fn handle_put_device(&mut self, alias: String, def: DeviceDef) -> Result<()> {
+    fn handle_put_device(&mut self, alias: String, def: DeviceDef, source: &str) -> Result<()> {
         let was_active = self.cfg.control_devices.get(&alias).map(|d| d.is_active()).unwrap_or(false);
         let is_active = def.is_active();
 
@@ -331,52 +318,59 @@ impl ConfigMaster {
             self.device_active.insert(alias.clone(), tx);
             self.spawn_device_task(&alias, &def, rx);
         }
+        info!("Updated device {alias} [source={source}]");
         Ok(())
     }
 
-    fn handle_delete_device(&mut self, alias: &str) -> Result<()> {
+    fn handle_delete_device(&mut self, alias: &str, source: &str) -> Result<()> {
         self.cfg.control_devices.remove(alias);
         self.cfg.presets.remove_device(alias);
         if let Some(tx) = self.device_active.get(alias) {
             let _ = tx.send(false);
         }
         self.cfg.persist()?;
+        info!("Deleted device {alias} [source={source}]");
         Ok(())
     }
 
-    fn handle_rename_device(&mut self, old: &str, new: &str, def: DeviceDef) -> Result<()> {
-        if old == new {
-            self.cfg.control_devices.insert(old.to_string(), def);
-            self.cfg.persist()?;
-            return Ok(());
+    fn handle_rename_device(&mut self, old: &str, new: &str, source: &str) -> Result<()> {
+        if old == new { return Ok(()); }
+
+        if self.cfg.control_devices.contains_key(new) {
+            bail!("Device '{new}' already exists");
         }
-        if !self.cfg.control_devices.contains_key(old) {
-            bail!("device not found");
-        }
-        self.cfg.control_devices.remove(old);
+        let def = self.cfg.control_devices.remove(old)
+            .with_context(|| format!("Device '{old}' not found"))?;
         self.cfg.control_devices.insert(new.to_string(), def);
+
+        // Keep sibling maps in sync.
+        if let Some(ctrl) = self.controller_map.remove(old) {
+            self.controller_map.insert(new.to_string(), ctrl);
+        }
+        if let Some(tx) = self.device_active.remove(old) {
+            self.device_active.insert(new.to_string(), tx);
+        }
+
+        // All references in the controllers of the presets must be renamed.
         self.cfg.presets.rename_device(old, new);
         self.cfg.persist()?;
+        info!("Renamed device {old} to {new} [source={source}]");
         Ok(())
     }
 
-    fn handle_update_controllers(&mut self, controllers: Vec<ControllerDef>) -> Result<()> {
+    fn handle_update_controllers(&mut self, controllers: Vec<ControllerDef>, source: &str) -> Result<()> {
         self.snapshot.preset.controllers = controllers;
         self.clear_controllers();
         self.apply_controllers(&self.snapshot.preset.controllers.clone());
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed();
         }
+        info!("Updated controllers [source={source}]");
         Ok(())
     }
 
     /// Replace chains in the current preset (add/delete/reorder nodes or chains).
-    fn handle_set_chains(&mut self, json: &str) -> Result<()> {
-        let body: serde_json::Value = serde_json::from_str(json)?;
-        let chain_defs: Vec<ChainDef> = serde_json::from_value(
-            body.get("chains").cloned().unwrap_or_default()
-        )?;
-
+    fn handle_set_chains(&mut self, chain_defs: Vec<ChainDef>, source: &str) -> Result<()> {
         let chains = self.build_chains(&chain_defs)?;
         self.audio.push_patch(chains)
             .context("patch channel full, patch not applied")?;
@@ -384,12 +378,12 @@ impl ConfigMaster {
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed();
         }
-        info!("Applied PATCH ({} chains)", self.snapshot.preset.chains.len());
+        info!("Applied PATCH ({} chains) [source={source}]", self.snapshot.preset.chains.len());
         Ok(())
     }
 
     fn handle_apply_set(&mut self, path: &String, value: f32, source: &str) -> Result<()> {
-        debug!("SET {path} {value} [source={source}]");
+        debug!("SET {path} {value:.4} [source={source}]");
         if self.snapshot.apply_set(&path, value)? {
             self.notify_state_changed();
         }
@@ -400,9 +394,9 @@ impl ConfigMaster {
     }
 
     fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, source: &str) -> Result<()> {
-        let mappings = self.controller_map.get(alias)
-            .cloned().unwrap_or_default();
-        if let Some((path, value)) = control::translate_ctrl(channel_id, raw, &mappings) {
+        let translated = self.controller_map.get(alias)
+            .and_then(|m| control::translate_ctrl(channel_id, raw, m));
+        if let Some((path, value)) = translated {
             self.handle_apply_set(&path, value, source)?;
         }
         Ok(())
@@ -442,7 +436,8 @@ impl ConfigMaster {
         self.bus.send(msg).ok();
     }
 
-    fn handle_toggle_compare(&mut self) -> Result<()> {
+    fn handle_toggle_compare(&mut self, source: &str) -> Result<()> {
+        debug!("COMPARE [source={source}]");
         if self.snapshot.toggle_compare(&self.cfg.presets).is_none() {
             return Ok(());
         }
@@ -455,7 +450,8 @@ impl ConfigMaster {
         Ok(())
     }
 
-    fn handle_reload(&mut self) -> Result<()> {
+    fn handle_reload(&mut self, source: &str) -> Result<()> {
+        debug!("RELOAD [source={source}]");
         let tx = self.reload_tx.clone(); 
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -560,7 +556,7 @@ impl ConfigMaster {
                         tracing::error!("Serial '{alias}': {e}");
                     }
                 });
-            }
+            },
             DeviceDef::Net { host, port, .. } => {
                 let net = NetworkControl::new(
                     alias.to_string(), host.clone(), *port, bus.clone(), master_tx,
@@ -571,11 +567,11 @@ impl ConfigMaster {
                         tracing::error!("Network '{alias}': {e}");
                     }
                 });
-            }
+            },
             DeviceDef::MidiIn { dev, channel, .. } => {
                 let midi = MidiControl::new(alias.to_string(), dev.clone(), channel.clone());
                 midi.run(master_tx);
-            }
+            },
             DeviceDef::MidiOut { dev, channel, .. } => {
                 let midi_out = MidiOutControl::new(dev.clone(), *channel, alias.to_string(), master_tx);
                 midi_out.run(bus);

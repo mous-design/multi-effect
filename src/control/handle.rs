@@ -1,11 +1,12 @@
 use anyhow::{Result, Context, bail};
-use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 
+use super::mapping::{ControllerDef, DeviceDef};
+use crate::engine::patch::ChainDef;
 use crate::config::master::{ConfigRequest, snd_request};
+use crate::config::ConfigPatch;
 use super::{connection_id, ControlMessage, EventBus};
-use crate::engine::patch;
 
 /// Run a full-duplex control session on `stream` until one of:
 /// - the peer disconnects (inbound EOF or a write error);
@@ -57,29 +58,25 @@ where
                                 // exists we can smart-round-target using the param's known range.
                                 _ => format!("SET {path} {value}\n"),
                             }
-                        }
+                        },
                         ControlMessage::Reset { .. }               => "RESET\n".to_string(),
-                        ControlMessage::NoteOn      { .. }
-                        | ControlMessage::NoteOff   { .. }
-                        | ControlMessage::Action    { .. }
-                        | ControlMessage::NodeEvent { .. }
-                        => continue,
-                        ControlMessage::PresetLoaded { ref preset, state: ref s, .. }
-                        => format!("PRESET {}\nSTATE {s}\n", serde_json::to_string(preset).unwrap_or_default()),
+                        ControlMessage::PresetLoaded { ref preset, .. }
+                        => format!("PRESET {}\n", serde_json::to_string(preset).unwrap_or_default()),
                         ControlMessage::StateChanged { ref state, preset_index, .. }
                         => format!("STATE {state} {preset_index}\n"),
+                        _ => continue,
                     };
                     if writer.write_all(line.as_bytes()).await.is_err() {
                         break; // peer disconnected
                     }
-                }
+                },
                 ack = ack_rx.recv() => {
                     match ack {
                         Some(line) => {
                             if writer.write_all(line.as_bytes()).await.is_err() {
                                 break; // peer disconnected
                             }
-                        }
+                        },
                         None => break,  // inbound dropped ack_tx
                     }
                 }
@@ -101,7 +98,7 @@ where
                 handle_command(&line, &master_tx, &source).await
             };
             let response = match res {
-                Ok(())  => "OK\n".to_string(),
+                Ok(line)  => line,
                 Err(e)  => format!("ERR {e}\n"),
             };
             // If outbound is gone (writer dead), stop reading too.
@@ -124,14 +121,11 @@ async fn handle_ctrl(
     master_tx: &mpsc::Sender<ConfigRequest>,
     alias:     &str,
     source:    &str,
-) -> Result<()> {
-    let parts: Vec<&str> = line.splitn(3, ' ').collect();
-    if parts.len() != 3 {
-        bail!("Malformed CTRL command: {line}");
-    }
-    let channel_id = parts[1];
-    let raw: f32 = parts[2].trim().parse()
-        .with_context(|| format!("CTRL value not a number: {}", parts[2]))?;
+) -> Result<String> {
+    let (_, rest) = line.split_once(' ').context("malformed CTRL")?;
+    let (channel_id, raw_str) = rest.split_once(' ').context("malformed CTRL")?;
+    let raw: f32 = raw_str.trim().parse()
+        .with_context(|| format!("CTRL value not a number: {raw_str}"))?;
 
     snd_request(master_tx, |tx| ConfigRequest::ApplyCtrl {
         channel_id: channel_id.to_string(),
@@ -139,21 +133,30 @@ async fn handle_ctrl(
         alias: alias.to_string(),
         source: source.to_string(),
         resp: Some(tx),
-    }).await
+    }).await?;
+    Ok("OK\n".into())
 }
 
-pub(crate) async fn handle_command(
+async fn handle_command(
     line:      &str,
     master_tx: &mpsc::Sender<ConfigRequest>,
     source:    &str,
-) -> Result<()> {
+) -> Result<String> {
     let (cmd, rest) = split_cmd(line);
-    let src = source.to_string();
+    let source = source.to_string();
 
-    match cmd {
-        // ------------------------------------------------------------------
-        // SET <key.param> <value>
-        // ------------------------------------------------------------------
+    let res = match cmd {
+        "FETCH_CONFIG" => {
+            let config = snd_request(master_tx, |tx| ConfigRequest::GetConfig {resp: tx}).await?;
+            format!("CONFIG {}\n", serde_json::to_string(&config)?)
+        },
+        "SAVE_CONFIG" => {
+            let config: ConfigPatch = serde_json::from_str(rest)?;
+            snd_request(master_tx, |tx| ConfigRequest::UpdateConfig {
+                resp: Some(tx), source, config,
+            }).await?;
+            "OK\n".into()
+        },
         "SET" => {
             let (path, val_str) = rest
                 .split_once(' ')
@@ -161,78 +164,111 @@ pub(crate) async fn handle_command(
             let val_str = val_str.trim();
             if let Ok(value) = val_str.parse::<f32>() {
                 snd_request(master_tx, |tx| ConfigRequest::ApplySet {
-                     path: path.to_string(), value, source: src, resp: Some(tx)
+                     path: path.to_string(), value, source, resp: Some(tx)
                 }).await?;
             } else {
                 // Non-numeric value → action dispatch (e.g. "SET 01-looper.action rec")
                 snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
-                    path: path.to_string(), action: val_str.to_string(), source: src, resp: Some(tx)
+                    path: path.to_string(), action: val_str.to_string(), source, resp: Some(tx)
                 }).await?;
             }
+            "OK\n".into()
         },
-
-        // ------------------------------------------------------------------
-        // UPDATE <json-object>
-        // ------------------------------------------------------------------
-        "UPDATE" => {
-            let v: Value = serde_json::from_str(rest)?;
-            let pairs = patch::flatten_update(&v);
-            if pairs.is_empty() {
-                bail!("no numeric values found in update object");
-            }
-            for (path, value) in &pairs {
-                snd_request(master_tx, |tx| ConfigRequest::ApplySet {
-                     path: path.clone(), value: *value, source: src.clone(), resp: Some(tx)
-                }).await?;
-            }
-        },
-
-        // ------------------------------------------------------------------
-        // CHAINS <json>
-        // ------------------------------------------------------------------
         "CHAINS" => {
+            let chains: Vec<ChainDef> = serde_json::from_str(rest)?;
             snd_request(master_tx, |tx| ConfigRequest::SetChains {
-                json: rest.to_string(), resp: Some(tx),
+                source, chains, resp: Some(tx),
             }).await?;
-        }
-
-        // ------------------------------------------------------------------
-        "RESET" => {
-            snd_request(master_tx, |tx| ConfigRequest::ApplyReset {
-                source: src, resp: Some(tx),
-            }).await?;
+            "OK\n".into()
         },
-
-        "PROGRAM" => {
+        "PRESET" => {
             let slot: u8 = rest.trim()
                 .parse()
                 .context("program number must be 0-127")?;
             snd_request(master_tx, |tx| ConfigRequest::SwitchPreset {
-                slot, resp: Some(tx),
+                source, slot, resp: Some(tx),
             }).await?;
+            "OK\n".into()            
         },
-
-        // ------------------------------------------------------------------
-        // SAVE_PRESET <slot>
-        // ------------------------------------------------------------------
         "SAVE_PRESET" => {
             let slot: u8 = rest.trim()
                 .parse()
                 .context("slot must be 0..127")?;
             snd_request(master_tx, |tx| ConfigRequest::SavePreset {
-                slot, resp: Some(tx),
+                source, slot, resp: Some(tx),
             }).await?;
+            "OK\n".into()
         },
-
+        "DELETE_PRESET" => {
+            let slot: u8 = rest.trim()
+                .parse()
+                .context("slot must be 0..127")?;
+            snd_request(master_tx, |tx| ConfigRequest::DeletePreset {
+                source, slot, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
+        },        
         "COMPARE" => {
             snd_request(master_tx, |tx| ConfigRequest::ToggleCompare {
-                resp: Some(tx),
+                source, resp: Some(tx),
             }).await?;
+            "OK\n".into()
         },
-
+        "PUT_CONTROLLERS" => {
+            let controllers: Vec<ControllerDef> = serde_json::from_str(rest)?;
+            snd_request(master_tx, |tx| ConfigRequest::UpdateControllers {
+                resp: Some(tx), source, controllers,
+            }).await?;
+            "OK\n".into()
+        },
+        "FETCH_DEVICES" => {
+            let devices = snd_request(master_tx, |tx| ConfigRequest::GetDevices {resp: tx}).await?;
+            format!("DEVICES {}\n", serde_json::to_string(&devices)?)
+        },
+        "PUT_DEVICE" => {
+            let (alias, val_str) = rest
+                .split_once(' ')
+                .context("usage: PUT_DEVICE <alias> <def>")?;
+            let alias = alias.trim().to_string();
+            let def: DeviceDef = serde_json::from_str(val_str)?;
+            snd_request(master_tx, |tx| ConfigRequest::PutDevice {
+                alias, def, source, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
+        },
+        "DELETE_DEVICE" => {
+            let alias = rest.trim().to_string();
+            snd_request(master_tx, |tx| ConfigRequest::DeleteDevice {
+                alias, source, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
+        },
+        "SET_DEVICE_NAME" => {
+            let (old_alias, new_alias) = rest
+                .split_once(' ')
+                .context("usage: SET_DEVICE_NAME <old_alias> <new_alias>")?;
+            let old_alias = old_alias.trim().to_string();
+            let new_alias = new_alias.trim().to_string();
+            snd_request(master_tx, |tx| ConfigRequest::RenameDevice {
+                old_alias, new_alias, source, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
+        },
+        "RELOAD" => {
+            snd_request(master_tx, |tx| ConfigRequest::Reload {
+                source, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
+        },
+        "RESET" => {
+            snd_request(master_tx, |tx| ConfigRequest::ApplyReset {
+                source, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
+        },
         other => bail!("unknown command '{other}'"),
     };
-    Ok(())
+    Ok(res)
 }
 
 fn split_cmd(line: &str) -> (&str, &str) {
