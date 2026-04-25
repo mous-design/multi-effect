@@ -20,11 +20,15 @@ export function useConnection(onMessage: (msg: string, param: string) => void) {
     useEffect(() => {
         const cleanup = createWs(
             (msg, param) => onMessageRef.current(msg, param),
-            () => setConnected(true),
+            () => {
+                // Connection just opened — refresh config and devices.
+                // Also re-fires after a reconnect, so the UI re-syncs after a reload.
+                setConnected(true);
+                fetchDevices().then(devs => devs && setDevices(devs));
+                fetchConfig().then(cfg => cfg && setAudioConfig(cfg));
+            },
             () => setConnected(false),
         );
-        fetchDevices().then(devs => devs && setDevices(devs));
-        fetchConfig().then(cfg => cfg && setAudioConfig(cfg));
         return cleanup;
     }, []);
 

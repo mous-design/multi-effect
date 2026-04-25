@@ -50,20 +50,23 @@ pub enum ControlMessage {
     NodeEvent { key: String, event: String, data: serde_json::Value },
     /// The current preset's structural content has changed (load / save / compare).
     /// UI reads `preset.index` from the JSON to know which slot is active.
-    PresetLoaded { preset: PresetDef },
+    PresetLoaded { preset: PresetDef, source: String },
     /// State transition only (Clean / Dirty / Comparing).
-    StateChanged { state: String },
+    StateChanged { state: String, source: String },
     /// The list of occupied preset slots has changed (save to empty slot, delete).
-    PresetIndices { indices: Vec<u8> },
+    PresetIndices { indices: Vec<u8>, source: String },
 }
 
 impl ControlMessage {
     /// Returns the source identifier for messages that carry one, empty string otherwise.
     pub fn source(&self) -> &str {
         match self {
-            Self::SetParam { source, .. }
-            | Self::Reset { source, .. }
-            | Self::Action { source, .. } => source,
+            Self::SetParam      { source, .. }
+            | Self::Reset       { source, .. }
+            | Self::Action      { source, .. }
+            | Self::PresetLoaded  { source, .. }
+            | Self::StateChanged  { source, .. }
+            | Self::PresetIndices { source, .. } => source,
             _ => "",
         }
     }

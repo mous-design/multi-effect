@@ -55,10 +55,16 @@ function handleLine(line: string, onMessage: (msg: string, param: string) => voi
     let [msg, param] = splitN(line, ' ', 2);
     if (msg === 'ERR') {
         pending.shift()?.reject(new Error(param));
-        return;        
+        return;
     }
+    // Resolve a pending request whose expected response type matches.
+    // SNAPSHOT is special: it's also the canonical "apply current state" event,
+    // so it ALSO goes through onMessage even when received as a response.
+    // Other typed responses (CONFIG, DEVICES) skip onMessage — only the caller
+    // wants the data.
     if (pending.length && pending[0].expect === msg) {
         pending.shift()?.resolve(param);
+        if (msg === 'SNAPSHOT') onMessage(msg, param);
         return;
     }
     onMessage(msg, param);
@@ -114,12 +120,16 @@ export async function savePreset(n: number):Promise<boolean> {
     return (await sendWs(`SAVE_PRESET ${n}`))[0];
 }
 
+// Switch to preset `n`. Server replies with SNAPSHOT (originator is filtered
+// out of the broadcast), which `handleLine` also dispatches to `onMessage`,
+// so the SNAPSHOT case in App.tsx applies the new state automatically.
 export async function sendProgram(n: number): Promise<boolean> {
-    return (await sendWs(`PRESET ${n}`))[0];
+    return (await sendWs(`PRESET ${n}`, 'SNAPSHOT'))[0];
 }
 
+// Toggle compare-mode. Same response shape as sendProgram.
 export async function sendCompare(): Promise<boolean> {
-    return (await sendWs('COMPARE'))[0];
+    return (await sendWs('COMPARE', 'SNAPSHOT'))[0];
 }
 
 export async function fetchConfig(): Promise<AudioConfig|null> {

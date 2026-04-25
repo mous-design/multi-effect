@@ -52,6 +52,18 @@ export default function App() {
     const [routingIdx, setRoutingIdx] = useState<number | null>(null);
     const [showSettings, setShowSettings] = useState(false);
 
+    // Apply a SNAPSHOT message body (full state replacement).
+    // Used both for initial WS handshake and for PROGRAM/COMPARE responses.
+    const applySnapshot = (snap: any) => {
+        const preset = snap.preset ?? {};
+        setState({ chains: preset.chains ?? [] });
+        setControllers(preset.controllers ?? []);
+        if (typeof preset.index === 'number') setActivePreset(preset.index);
+        if (Array.isArray(snap.preset_indices)) setPresetDefs(snap.preset_indices);
+        setIsDirty(snap.state === 'Dirty');
+        setIsComparing(snap.state === 'Comparing');
+    };
+
     // --- Connection (WS + config + devices) ---
     const { connected, audioConfig, setAudioConfig, devices } = useConnection((msg, params) => {
         switch(msg) {
@@ -76,17 +88,9 @@ export default function App() {
                 });
                 break;
             }
-            case 'SNAPSHOT': {
-                const snap = JSON.parse(params);
-                const preset = snap.preset ?? {};
-                setState({ chains: preset.chains ?? [] });
-                setControllers(preset.controllers ?? []);
-                if (typeof preset.index === 'number') setActivePreset(preset.index);
-                if (Array.isArray(snap.preset_indices)) setPresetDefs(snap.preset_indices);
-                setIsDirty(snap.state === 'Dirty');
-                setIsComparing(snap.state === 'Comparing');
+            case 'SNAPSHOT':
+                applySnapshot(JSON.parse(params));
                 break;
-            }
             case 'PRESET': {
                 const preset = JSON.parse(params);
                 setState({ chains: preset.chains ?? [] });
@@ -158,6 +162,10 @@ export default function App() {
         if (await savePreset(savePresetNum)) {
             setActivePreset(savePresetNum);
             setIsDirty(false);
+            // Optimistically add to preset list (server filters out our INDICES broadcast).
+            setPresetDefs(prev =>
+                prev.includes(savePresetNum) ? prev : [...prev, savePresetNum].sort((a, b) => a - b),
+            );
             setSavedFeedback(true);
             setTimeout(() => setSavedFeedback(false), 2000);
         }
@@ -166,6 +174,9 @@ export default function App() {
     const handleQuickSave = async () => {
         if (await savePreset(activePreset)) {
             setIsDirty(false);
+            setPresetDefs(prev =>
+                prev.includes(activePreset) ? prev : [...prev, activePreset].sort((a, b) => a - b),
+            );
             setSavedFeedback(true);
             setTimeout(() => setSavedFeedback(false), 2000);
         }

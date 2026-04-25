@@ -258,8 +258,8 @@ impl ConfigMaster {
         self.apply_controllers(&preset.controllers);
         self.snapshot.load_preset(preset, Clean);
         self.cfg.presets.active = slot;
-        self.notify_preset_loaded();
-        self.notify_state_changed();
+        self.notify_preset_loaded(source);
+        self.notify_state_changed(source);
         info!("Loaded preset {slot} [source={source}]");
         Ok(())
     }
@@ -272,12 +272,12 @@ impl ConfigMaster {
         self.snapshot.preset_indices = self.cfg.presets.indices();
         self.cfg.persist()?;
         // Always notify: preset.index may have changed; state went to Clean.
-        self.notify_preset_loaded();
+        self.notify_preset_loaded(source);
         if self.snapshot.set_state(Clean) {
-            self.notify_state_changed();
+            self.notify_state_changed(source);
         }
         if self.snapshot.preset_indices != prev_indices {
-            self.notify_preset_indices();
+            self.notify_preset_indices(source);
         }
         info!("Saved preset {slot} [source={source}]");
         Ok(())
@@ -288,13 +288,13 @@ impl ConfigMaster {
             bail!("preset not found");
         }
         self.snapshot.preset_indices = self.cfg.presets.indices();
-        self.notify_preset_indices();
+        self.notify_preset_indices(source);
 
         // If this is the active preset, clear all live objects
         if slot == self.cfg.presets.active {
             self.snapshot.load_preset(PresetDef::default(), Dirty);
-            self.notify_preset_loaded();
-            self.notify_state_changed();
+            self.notify_preset_loaded(source);
+            self.notify_state_changed(source);
             self.clear_controllers();
             self.cfg.presets.active = PRESET_NONE;
             if self.audio.push_patch(Vec::new()).is_err() {
@@ -371,8 +371,10 @@ impl ConfigMaster {
         self.snapshot.preset.controllers = controllers;
         self.clear_controllers();
         self.apply_controllers(&self.snapshot.preset.controllers.clone());
+        // Preset content changed — broadcast so other clients see the new mappings.
+        self.notify_preset_loaded(source);
         if self.snapshot.set_state(Dirty) {
-            self.notify_state_changed();
+            self.notify_state_changed(source);
         }
         info!("Updated controllers [source={source}]");
         Ok(())
@@ -384,8 +386,10 @@ impl ConfigMaster {
         self.audio.push_patch(chains)
             .context("patch channel full, patch not applied")?;
         self.snapshot.preset.chains = chain_defs;
+        // Preset content changed — broadcast so other clients see the new chains.
+        self.notify_preset_loaded(source);
         if self.snapshot.set_state(Dirty) {
-            self.notify_state_changed();
+            self.notify_state_changed(source);
         }
         info!("Applied PATCH ({} chains) [source={source}]", self.snapshot.preset.chains.len());
         Ok(())
@@ -394,7 +398,7 @@ impl ConfigMaster {
     fn handle_apply_set(&mut self, path: &String, value: f32, source: &str) -> Result<()> {
         debug!("SET {path} {value:.4} [source={source}]");
         if self.snapshot.apply_set(&path, value)? {
-            self.notify_state_changed();
+            self.notify_state_changed(source);
         }
         let cm = ControlMessage::SetParam { path: path.clone(), value, source: source.to_string() };
         self.audio.push_control(cm.clone())?;
@@ -455,8 +459,8 @@ impl ConfigMaster {
             .context("patch channel full, preset not loaded")?;
         self.clear_controllers();
         self.apply_controllers(&self.snapshot.preset.controllers.clone());
-        self.notify_preset_loaded();
-        self.notify_state_changed();
+        self.notify_preset_loaded(source);
+        self.notify_state_changed(source);
         Ok(())
     }
 
@@ -482,25 +486,31 @@ impl ConfigMaster {
     // Helpers
     // -----------------------------------------------------------------------
     /// Push a PresetLoaded event on the bus (preset content only).
-    /// UI reads `preset.index` from the JSON.
-    fn notify_preset_loaded(&self) {
+    /// UI reads `preset.index` from the JSON. The originator's `source`
+    /// is filtered out by the outbound dispatcher, so they don't echo to themselves.
+    fn notify_preset_loaded(&self, source: &str) {
         self.bus.send(ControlMessage::PresetLoaded {
             preset: self.snapshot.preset.clone(),
+            source: source.to_string(),
         }).ok();
     }
 
     /// Push a StateChanged event on the bus (Clean / Dirty / Comparing).
-    fn notify_state_changed(&self) {
+    /// `source` filters out the originator.
+    fn notify_state_changed(&self, source: &str) {
         self.bus.send(ControlMessage::StateChanged {
             state: self.snapshot.state.label().to_string(),
+            source: source.to_string(),
         }).ok();
     }
 
     /// Push a PresetIndices event on the bus (occupied preset slots).
     /// Fired when the slot list actually changes (save to empty slot, delete).
-    fn notify_preset_indices(&self) {
+    /// `source` filters out the originator.
+    fn notify_preset_indices(&self, source: &str) {
         self.bus.send(ControlMessage::PresetIndices {
             indices: self.snapshot.preset_indices.clone(),
+            source: source.to_string(),
         }).ok();
     }
 

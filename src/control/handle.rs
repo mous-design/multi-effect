@@ -60,12 +60,14 @@ where
                             }
                         },
                         ControlMessage::Reset { .. } => "RESET\n".to_string(),
-                        ControlMessage::PresetLoaded { ref preset } =>
+                        ControlMessage::PresetLoaded { ref preset, .. } =>
                             format!("PRESET {}\n", serde_json::to_string(preset).unwrap_or_default()),
-                        ControlMessage::StateChanged { ref state } =>
+                        ControlMessage::StateChanged { ref state, .. } =>
                             format!("STATE {state}\n"),
-                        ControlMessage::PresetIndices { ref indices } =>
+                        ControlMessage::PresetIndices { ref indices, .. } =>
                             format!("INDICES {}\n", serde_json::to_string(indices).unwrap_or_default()),
+                        ControlMessage::NodeEvent { ref key, ref event, ref data } =>
+                            format!("EVENT {key} {event} {}\n", serde_json::to_string(data).unwrap_or_default()),
                         _ => continue,
                     };
                     if writer.write_all(line.as_bytes()).await.is_err() {
@@ -188,9 +190,12 @@ async fn handle_command(
                 .parse()
                 .context("program number must be 0-127")?;
             snd_request(master_tx, |tx| ConfigRequest::SwitchPreset {
-                source, slot, resp: Some(tx),
+                source: source.clone(), slot, resp: Some(tx),
             }).await?;
-            "OK\n".into()            
+            // Return the new snapshot inline — originator is filtered out of the
+            // PresetLoaded broadcast, so this is how they get the new content.
+            let snap = snd_request(master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await?;
+            format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_view())?)
         },
         "SAVE_PRESET" => {
             let slot: u8 = rest.trim()
@@ -212,9 +217,12 @@ async fn handle_command(
         },        
         "COMPARE" => {
             snd_request(master_tx, |tx| ConfigRequest::ToggleCompare {
-                source, resp: Some(tx),
+                source: source.clone(), resp: Some(tx),
             }).await?;
-            "OK\n".into()
+            // Return the new snapshot inline — originator is filtered out of the
+            // PresetLoaded broadcast.
+            let snap = snd_request(master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await?;
+            format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_view())?)
         },
         "PUT_CONTROLLERS" => {
             let controllers: Vec<ControllerDef> = serde_json::from_str(rest)?;
