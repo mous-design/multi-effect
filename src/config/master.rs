@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn, debug};
 use anyhow::{Result, Context, bail};
 
 use super::{Config, ConfigPatch};
 use super::preset::PresetDef;
-use super::snapshot::{ConfigSnapshot, SnapshotState::*};
+use super::snapshot::{ConfigSnapshot, SnapshotState, SnapshotState::*};
 use super::ChainDef;
 use super::preset::PRESET_NONE;
 use crate::control;
@@ -21,47 +20,50 @@ use crate::engine::patch::{self, Chain};
 // Public types
 // ---------------------------------------------------------------------------
 
-pub type Resp<T> = oneshot::Sender<T>;
-pub type OptionResp = Option<oneshot::Sender<Result<()>>>;
+pub type Resp<T> = oneshot::Sender<Result<T>>;
+pub type OptionResp<T> = Option<Resp<T>>;
+pub type OptionRespEmpty = Option<Resp<()>>;
+pub type OptionRespBool = Option<Resp<bool>>;
+
 /// Inbound requests to the config master.
 pub enum ConfigRequest {
     // -- Reads (need response) --
-    GetConfig       { resp: Resp<Result<ConfigPatch>> },
-    GetSnapshot     { resp: Resp<Result<ConfigSnapshot>> },
-    GetDevices      { resp: Resp<Result<Value>> },
+    GetConfig       { resp: Resp<ConfigPatch> },
+    GetSnapshot     { resp: Resp<ConfigSnapshot> },
+    GetDevices      { resp: Resp<HashMap<String, DeviceDef>> },
     // -- Config mutations (need response for HTTP) --
-    UpdateConfig      { config: ConfigPatch, source: String, resp: OptionResp },
-    SwitchPreset      { slot: u8, source: String, resp: OptionResp },
-    SavePreset        { slot: u8, source: String, resp: OptionResp },
-    DeletePreset      { slot: u8, source: String, resp: OptionResp },
-    PutDevice         { alias: String, def: DeviceDef, source: String, resp: OptionResp },
-    DeleteDevice      { alias: String, source: String, resp: OptionResp },
-    RenameDevice      { old_alias: String, new_alias: String, source: String, resp: OptionResp },
-    UpdateControllers { controllers: Vec<ControllerDef>, source: String, resp: OptionResp },
-    ApplySet          { path: String, value: f32, source: String, resp: OptionResp },
+    UpdateConfig      { config: ConfigPatch, source: String, resp: OptionRespEmpty },
+    SwitchPreset      { slot: u8, source: String, resp: OptionRespEmpty },
+    SavePreset        { slot: u8, source: String, resp: OptionRespEmpty },
+    DeletePreset      { slot: u8, source: String, resp: OptionRespEmpty },
+    PutDevice         { alias: String, def: DeviceDef, source: String, resp: OptionRespEmpty },
+    DeleteDevice      { alias: String, source: String, resp: OptionRespEmpty },
+    RenameDevice      { old_alias: String, new_alias: String, source: String, resp: OptionRespEmpty },
+    UpdateControllers { controllers: Vec<ControllerDef>, source: String, resp: OptionRespEmpty },
+    ApplySet          { path: String, value: f32, source: String, resp: OptionResp<SnapshotState> },
     ApplyCtrl         { channel_id: String, raw: f32, alias: String,
-                        source: String, resp: OptionResp },
-    ApplyAction       { path: String, action: String, source: String, resp: OptionResp },
-    ApplyReset        { source: String, resp: OptionResp },
+                        source: String, resp: OptionResp<SnapshotState> },
+    ApplyAction       { path: String, action: String, source: String, resp: OptionRespEmpty },
+    ApplyReset        { source: String, resp: OptionRespEmpty },
     /// Reverse-map a parameter to (channel_id, raw_value) without rounding.
     /// Use for binary protocols (MIDI) that do their own integer rounding.
     ReverseMap        { path: String, value: f32, alias: String,
-                        resp: Resp<Result<Option<(String, f32)>>> },
+                        resp: Resp<Option<(String, f32)>> },
     /// Same as `ReverseMap` but the raw value is pre-rounded via the mapping's
     /// cached ctrl multiplier. Use for text protocols (serial / TCP) so the
     /// wire output has clean decimals via default `Display`.
     ReverseMapRounded { path: String, value: f32, alias: String,
-                        resp: Resp<Result<Option<(String, f32)>>> },
+                        resp: Resp<Option<(String, f32)>> },
 
     // -- Chain structure update --
-    SetChains         { chains: Vec<ChainDef>, source: String, resp: OptionResp },
+    SetChains         { chains: Vec<ChainDef>, source: String, resp: OptionRespEmpty },
 
     // -- Fire-and-forget (MIDI notes) --
     ApplyControl(ControlMessage), // @todo maybe rename this to ApplyMidiControl, otherwise confusing with ApplyCtrl
-    ToggleCompare { source: String, resp: OptionResp },
+    ToggleCompare { source: String, resp: OptionRespEmpty },
 
     // -- Internal --
-    Reload { source: String, resp: OptionResp },
+    Reload { source: String, resp: OptionRespEmpty },
     SaveState,
 }
 
@@ -147,8 +149,10 @@ impl ConfigMaster {
         self.handle_save_state();
         info!("ConfigMaster shutting down.");
     }
-    fn respond(resp: OptionResp, value: Result<()>) {
-        if let Some(resp) = resp { let _ = resp.send(value); }
+    fn respond<T>(resp: OptionResp<T>, value: Result<T>) {
+        if let Some(resp) = resp {
+            let _ = resp.send(value);
+        }
     }
 
     fn handle(&mut self, req: ConfigRequest) {
@@ -161,9 +165,7 @@ impl ConfigMaster {
                 let _ = resp.send(Ok(self.snapshot.clone()));
             },
             ConfigRequest::GetDevices { resp } => {
-                let snd = serde_json::to_value(&self.cfg.control_devices)
-                    .unwrap_or(Value::Array(vec![]));
-                let _ = resp.send(Ok(snd));
+                let _ = resp.send(Ok(self.cfg.control_devices.clone()));
             }
             // Mutations
             ConfigRequest::UpdateConfig { config, source, resp } => {
@@ -371,7 +373,6 @@ impl ConfigMaster {
         self.snapshot.preset.controllers = controllers;
         self.clear_controllers();
         self.apply_controllers(&self.snapshot.preset.controllers.clone());
-        // Preset content changed — broadcast so other clients see the new mappings.
         self.notify_preset_loaded(source);
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed(source);
@@ -386,7 +387,7 @@ impl ConfigMaster {
         self.audio.push_patch(chains)
             .context("patch channel full, patch not applied")?;
         self.snapshot.preset.chains = chain_defs;
-        // Preset content changed — broadcast so other clients see the new chains.
+        // Explicit structural mutation: always notify (see handle_update_controllers).
         self.notify_preset_loaded(source);
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed(source);
@@ -395,24 +396,27 @@ impl ConfigMaster {
         Ok(())
     }
 
-    fn handle_apply_set(&mut self, path: &String, value: f32, source: &str) -> Result<()> {
-        debug!("SET {path} {value:.4} [source={source}]");
+    fn handle_apply_set(&mut self, path: &String, value: f32, source: &str) -> Result<SnapshotState> {
+        debug!("SET {path} {value:.3} [source={source}]");
         if self.snapshot.apply_set(&path, value)? {
-            self.notify_state_changed(source);
+            if self.snapshot.set_state(Dirty) {
+                self.notify_state_changed(source);
+            }
+            let cm = ControlMessage::SetParam { path: path.clone(), value, source: source.to_string() };
+            self.audio.push_control(cm.clone())?;
+            self.bus.send(cm).ok();
         }
-        let cm = ControlMessage::SetParam { path: path.clone(), value, source: source.to_string() };
-        self.audio.push_control(cm.clone())?;
-        self.bus.send(cm).ok();
-        Ok(())
+        Ok(self.snapshot.state)
     }
 
-    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, source: &str) -> Result<()> {
+    fn handle_apply_ctrl(&mut self, channel_id: &str, raw: f32, alias: &str, source: &str) -> Result<SnapshotState> {
         let translated = self.controller_map.get(alias)
             .and_then(|m| control::translate_ctrl(channel_id, raw, m));
         if let Some((path, value)) = translated {
-            self.handle_apply_set(&path, value, source)?;
+            self.handle_apply_set(&path, value, source)
+        } else {
+            Ok(self.snapshot.state)
         }
-        Ok(())
     }
 
     fn handle_apply_action(&mut self, path: &str, action: &str, source: &str) -> Result<()> {

@@ -131,14 +131,14 @@ async fn handle_ctrl(
     let raw: f32 = raw_str.trim().parse()
         .with_context(|| format!("CTRL value not a number: {raw_str}"))?;
 
-    snd_request(master_tx, |tx| ConfigRequest::ApplyCtrl {
+    let state = snd_request(master_tx, |tx| ConfigRequest::ApplyCtrl {
         channel_id: channel_id.to_string(),
         raw,
         alias: alias.to_string(),
         source: source.to_string(),
         resp: Some(tx),
     }).await?;
-    Ok("OK\n".into())
+    Ok(format!("STATE {}\n", state.label().to_string()))
 }
 
 async fn handle_command(
@@ -167,16 +167,17 @@ async fn handle_command(
                 .context("usage: SET <key.param> <value>")?;
             let val_str = val_str.trim();
             if let Ok(value) = val_str.parse::<f32>() {
-                snd_request(master_tx, |tx| ConfigRequest::ApplySet {
+                let state = snd_request(master_tx, |tx| ConfigRequest::ApplySet {
                      path: path.to_string(), value, source, resp: Some(tx)
                 }).await?;
+                format!("STATE {}\n", state.label().to_string())
             } else {
                 // Non-numeric value → action dispatch (e.g. "SET 01-looper.action rec")
                 snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
                     path: path.to_string(), action: val_str.to_string(), source, resp: Some(tx)
                 }).await?;
+                "OK\n".into()
             }
-            "OK\n".into()
         },
         "CHAINS" => {
             let chains: Vec<ChainDef> = serde_json::from_str(rest)?;

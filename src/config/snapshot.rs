@@ -87,7 +87,7 @@ impl ConfigSnapshot {
         self.state = state;
     }
 
-    /// Update a single node parameter.  `param_path` = "node-key.param".
+    /// Update a single node parameter.  `param_path` = "node-key.param". Return if changed
     pub fn apply_set(&mut self, param_path: &str, value: f32) -> Result<bool> {
         let Some((node_key, param)) = param_path.split_once('.') else {
             bail!("invalid param path '{param_path}': missing '.'");
@@ -95,13 +95,17 @@ impl ConfigSnapshot {
         for chain in self.preset.chains.iter_mut() {
             for node in chain.nodes.iter_mut() {
                 if node.key == node_key {
-                    node.params[param] = Value::from(value);
-                    // If comparing, we can delete the stash
-                    if matches!(self.state, Comparing | ComparingPersisted) {
-                        self.stash = None;
+                    let new = Value::from(value);
+                    if node.params.get(param) != Some(&new) {
+                        node.params[param] = new;
+                        // If comparing, we can delete the stash
+                        if matches!(self.state, Comparing | ComparingPersisted) {
+                            self.stash = None;
+                        }
+                        return Ok(true);
+                    } else {
+                        return Ok(false);
                     }
-                    return Ok(self.set_state(Dirty));
-
                 }
             }
         }

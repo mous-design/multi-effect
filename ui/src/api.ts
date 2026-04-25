@@ -108,8 +108,12 @@ export async function sendChains(chains: object[]): Promise<boolean> {
     return (await sendWs(`CHAINS ${chainsStr}`))[0];
 }
 
+// Booleans go on the wire as 0/1 so they hit the numeric SET path on the
+// server (and broadcast as SetParam, not Action). `true`/`false` would parse
+// as a non-numeric action and be invisible to other clients.
 export async function sendSet(path: string, value: number | boolean): Promise<boolean> {
-    return (await sendWs(`SET ${path} ${value}`))[0];
+    const v = typeof value === 'boolean' ? (value ? 1 : 0) : value;
+    return (await sendWs(`SET ${path} ${v}`))[0];
 }
 
 export async function sendAction(target: string, action: string): Promise<boolean> {

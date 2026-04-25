@@ -159,9 +159,14 @@ export default function App() {
 
     const handleConfirmSave = async () => {
         setShowSavePopup(false);
+        // If we're comparing, the displayed preset is the saved version and the
+        // user's edits live in `stash` on the server. Exit compare first so the
+        // edits become active, then save them.
+        if (isComparing) await sendCompare();
         if (await savePreset(savePresetNum)) {
             setActivePreset(savePresetNum);
             setIsDirty(false);
+            setIsComparing(false);
             // Optimistically add to preset list (server filters out our INDICES broadcast).
             setPresetDefs(prev =>
                 prev.includes(savePresetNum) ? prev : [...prev, savePresetNum].sort((a, b) => a - b),
@@ -172,8 +177,10 @@ export default function App() {
     };
 
     const handleQuickSave = async () => {
+        if (isComparing) await sendCompare();
         if (await savePreset(activePreset)) {
             setIsDirty(false);
+            setIsComparing(false);
             setPresetDefs(prev =>
                 prev.includes(activePreset) ? prev : [...prev, activePreset].sort((a, b) => a - b),
             );
@@ -362,7 +369,7 @@ export default function App() {
                         onAddNode={handleAddNode}
                         onDeleteChain={handleDeleteChain}
                         onRouting={setRoutingIdx}
-                        onSaveControllers={setControllers}
+                        onSaveControllers={(c) => { setControllers(c); setIsDirty(true); }}
                     />
                 ))}
                 <BottomBar
