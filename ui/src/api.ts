@@ -58,15 +58,14 @@ function handleLine(line: string, onMessage: (msg: string, param: string) => voi
         return;
     }
     // Resolve a pending request whose expected response type matches.
-    // SNAPSHOT is special: it's also the canonical "apply current state" event,
-    // so it ALSO goes through onMessage even when received as a response.
-    // Other typed responses (CONFIG, DEVICES) skip onMessage — only the caller
-    // wants the data.
     if (pending.length && pending[0].expect === msg) {
         pending.shift()?.resolve(param);
-        if (msg === 'SNAPSHOT') onMessage(msg, param);
-        return;
     }
+    // Always dispatch event-shaped messages through onMessage — including ones
+    // that just resolved a pending. This way SNAPSHOT/STATE/PRESET responses
+    // flow through the same handler as their unsolicited-broadcast counterparts.
+    // Pure data responses (CONFIG, DEVICES) and acks (OK) hit the App's switch
+    // default and no-op.
     onMessage(msg, param);
 }
 
@@ -111,9 +110,13 @@ export async function sendChains(chains: object[]): Promise<boolean> {
 // Booleans go on the wire as 0/1 so they hit the numeric SET path on the
 // server (and broadcast as SetParam, not Action). `true`/`false` would parse
 // as a non-numeric action and be invisible to other clients.
+//
+// Server replies with `STATE <state>` (not OK) — it knows authoritatively
+// whether the snapshot transitioned to Dirty, so the UI lets the response
+// drive isDirty/isComparing rather than guessing optimistically.
 export async function sendSet(path: string, value: number | boolean): Promise<boolean> {
     const v = typeof value === 'boolean' ? (value ? 1 : 0) : value;
-    return (await sendWs(`SET ${path} ${v}`))[0];
+    return (await sendWs(`SET ${path} ${v}`, 'STATE'))[0];
 }
 
 export async function sendAction(target: string, action: string): Promise<boolean> {

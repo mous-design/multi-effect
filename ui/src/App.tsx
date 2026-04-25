@@ -208,7 +208,9 @@ export default function App() {
     const handleSet = (path: string, value: number | boolean) => {
         const [nodeKey, param] = splitN(path, '.', 2);
         if (!nodeKey || !param) return;
-        setIsDirty(true);
+        // Optimistic param update for instant knob feedback. Dirty/Comparing flags
+        // are set authoritatively by the server's `STATE` response (handled by
+        // the SNAPSHOT-style dispatch in handleLine).
         setState(prev => {
             if (!prev) return prev;
             return {
