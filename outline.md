@@ -44,7 +44,7 @@ This asks for a parallel-chain. This is a sub-container that can hold parallel-c
 I think it makes sense that such a container then holds the mode, and acturally we should add an third mode:
 • independant
 • parallel
-• serial
+• serial
 
 # Abstract param info
 ```rust
@@ -97,6 +97,8 @@ CTRL knob sweep over TCP/serial (now round-trips through master)
 MIDI CC in + MIDI CC out (both completely rewired)
 Preset switch (controller mappings now owned by master, no Arc sync)
 Reload logic
+14-bit MIDI CC out (CCs 0–31)
+PRESET / STATE / INDICES / EVENT broadcasts reach UI correctly
 
 # porting embedded
 Choose RTIC or Embassy 
@@ -113,37 +115,3 @@ phase, like eq, phaser, flanger (?), exciter. Or they completely replace dry, li
 distortion, eq, tremolo, exciter.
 Others can have analog dry. These are all effects that can (or must) have some 
 lantency. These include chorus, reverb, delay, looper.
-
-# ui websocket speaks text-protocol
-Websocket must stop using json, instead just pass the same protocol as serial/net uses.
-
-
-
-
-Warnings explained:
-
-NodeEvent { key, event, data } — fields never read.
-Previously the JSON outbound sent ControlMessage::NodeEvent to the UI as {type:"node_event",...}. Now in handle.rs outbound, NodeEvent is continue'd — dropped on the floor. If your UI was using node events (e.g., looper playing/recording status), that info no longer reaches the UI.
-preset_indices on PresetLoaded and StateChanged — never read.
-Currently the PRESET and STATE wire lines don't include preset_indices. If the UI needs the list of occupied preset slots to render the preset grid, it's not in the stream anymore.
-Do you want to add wire formats for these? A few options:
-
-NodeEvent: EVENT {key} {event} {json_data}\n — similar shape to current PRESET line.
-preset_indices: could extend the STATE line: STATE {state} {preset_index} {indices_csv}\n. Or new line type: INDICES 0,1,3,5\n.
-Or if looper status is coming via SET 01-looper.status rec SetParam events (I don't know your looper's design), no action needed. Same for preset_indices — if the UI is happy with just current index, no action needed.
-
-Everything else works. Adapter + handle_client route correctly. The handle_ws body is now 20 lines. All transports (serial / net / ws) share one text-protocol code path. As planned.
-
-Protocol is now:
-
-SET, CTRL — parameter changes
-CHAINS — structural update
-RESET — state flush
-PRESET, SAVE_PRESET — preset ops
-COMPARE — toggle compare
-SNAPSHOT {json} - preset + state + preset_indexes
-STATE <state> <index> - current new state with preset index
-EVENT <key> <event> {json_data}
-Action — special case of SET, emitted when UI sends non-numeric SET (SET 01-looper.action rec).
-
-One command = one line of space-separated tokens (with optional JSON payload for CHAINS). No nested JSON parsing for line-oriented transports.

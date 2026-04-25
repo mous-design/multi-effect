@@ -11,113 +11,120 @@ Signal path: ADC → Rust engine → DAC. The dry signal is mixed in analogue �
 ## Running
 
 ```bash
-cargo run                                        # loads config.yml
-cargo run -- -c my-config.yml                   # specific config (YAML or JSON) @todo update this
+cargo run                          # loads ./config.json
+cargo run -- -c my-config.json     # specific config
+cargo run -- -v                    # verbose logging
+cargo run -- -f                    # fresh start: ignore saved snapshot state
 ```
+
+### Command-line flags
+
+| Flag | Description |
+|---|---|
+| `-c <path>` / `--config <path>` | Config file (default: `config.json`) |
+| `-v` / `--verbose` | Enable debug-level logging |
+| `-f` / `--fresh` | Skip restoring snapshot state (start clean) |
+
+Log level can be controlled at runtime via the `RUST_LOG` env var (e.g. `RUST_LOG=debug`).
+
+Audio device, sample rate, buffer size, etc. are configured in `config.json` — not via CLI flags.
 
 ---
 
-## Configuration — config.yml
+## Configuration — config.json
 
-Device settings and the startup patch live in one file.
+```json
+{
+  "sample_rate":         48000,
+  "buffer_size":         256,
+  "audio_device":        "default",
+  "in_channels":         1,
+  "out_channels":        2,
+  "delay_max_seconds":   2.0,
+  "looper_max_seconds":  30.0,
+  "looper_max_buffers":  8,
+  "http_port":           8080,
+  "log_target":          "stderr",
+  "state_save_path":     "/tmp/multi-effect-state.json",
+  "state_save_interval": 300,
 
-```yaml
-sample_rate:         48000
-buffer_size:         256
-audio_device:              default        # or e.g. "USB Audio Interface"
-in_channels:         1              # physical input channels
-out_channels:        2              # physical output channels
-control_port:        9000
-delay_max_seconds:   2.0            # delay buffer size at startup
-looper_max_seconds:  30.0           # looper buffer size at startup
-# midi_device: "USB MIDI Interface"
-
-chains:
-  - key: "01-main"
-    input:  [1, 1]   # physical input channels (1-based)
-    output: [1, 2]   # physical output channels
-    nodes:
-      - key: "04-delay"
-        type: delay
-        time_ms:  500
-        feedback: 0.35
-        wet:      1.0
-      - key: "06-mix"
-        type: mix
-        dry: 0.0
-        wet: 1.0
+  "control_devices": { ... },
+  "presets":         { ... },
+  "chains":          [ ... ]
+}
 ```
 
-Both `.yml` / `.yaml` and `.json` are accepted.
-
-### Command-line overrides @todo fix this!
-
-Any config field can be overridden at startup. `-c` selects the config file;
-all other flags overwrite the loaded config.
-
-| Flag                    | Config field          | Example                         |
-|-------------------------|-----------------------|---------------------------------|
-| `-c <path>`             | —                     | `-c /etc/multi-effect.yml`      |
-| `-p <path>`             | `patch`               | `-p my-patch.yml`               |
-| `--sample-rate <n>`     | `sample_rate`         | `--sample-rate 44100`           |
-| `--buffer-size <n>`     | `buffer_size`         | `--buffer-size 512`             |
-| `--device <name>`       | `device`              | `--device "USB Audio"`          |
-| `--in-channels <n>`     | `in_channels`         | `--in-channels 1`               |
-| `--out-channels <n>`    | `out_channels`        | `--out-channels 2`              |
-| `--control-port <n>`    | `control_port`        | `--control-port 9001`           |
-| `--midi-device <name>`  | `midi_device`         | `--midi-device "USB MIDI"`      |
-| `--delay-max-seconds <f>`  | `delay_max_seconds`  | `--delay-max-seconds 4.0`      |
-| `--looper-max-seconds <f>` | `looper_max_seconds` | `--looper-max-seconds 60.0`   |
-| `--log-target <target>` | —                     | `--log-target syslog`           |
-
-`--log-target` accepts `stderr` (default) or `syslog`.
-Log level is controlled by the `RUST_LOG` environment variable (e.g. `RUST_LOG=debug`).
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `sample_rate` | u32 | 48000 | Audio sample rate in Hz |
+| `buffer_size` | u32 | 256 | Frames per CPAL callback |
+| `audio_device` | string | `"default"` | CPAL device name (or `"default"`) |
+| `in_channels` | u16 | 2 | Physical input channels |
+| `out_channels` | u16 | 2 | Physical output channels |
+| `delay_max_seconds` | f32 | 2.0 | Delay buffer size at startup |
+| `looper_max_seconds` | f32 | 30.0 | Looper buffer[0] size at startup |
+| `looper_max_buffers` | usize | 8 | Max overdub layers |
+| `http_port` | u16 | 8080 | HTTP/WebSocket port (0 = disabled) |
+| `log_target` | string | `"stderr"` | `"stderr"` or `"syslog"` |
+| `state_save_path` | path | `/tmp/multi-effect-state.json` | Where snapshot state is persisted |
+| `state_save_interval` | u64 | 300 | Seconds between auto-saves (0 = disabled) |
+| `control_devices` | map | `{}` | Control device aliases → connection config |
+| `presets` | object | empty | Numbered preset slots |
+| `chains` | array | `[]` | Startup chains (used when no preset is active) |
 
 ---
 
-## Patch format
+## Patch format — chains and nodes
 
-Patches can be embedded in `config.yml` (under `chains:`) or loaded as a standalone file with `-p`.
-YAML is preferred for hand-editing — it supports comments and you can comment out nodes.
+A **chain** is a signal-flow unit with input/output routing and a sequence of nodes. Multiple chains run in parallel; their outputs sum.
+
+```json
+{
+  "key":    "01-main",
+  "input":  [1, 1],
+  "output": [1, 2],
+  "nodes": [
+    { "key": "04-delay",  "type": "delay",  "time": 0.5, "feedback": 0.4, "wet": 0.5 },
+    { "key": "06-mix",    "type": "mix",    "dry": 0.0, "wet": 1.0 }
+  ]
+}
+```
+
+### Channel routing
+`input` / `output` are **1-based** physical channel numbers. A single integer expands to `[n, n]`; a pair `[L, R]` selects two channels. `0` means silent / no output.
+
+```json
+"input":  [1, 1]    // mono mic on ch 1 → both stereo halves
+"input":  [1, 2]    // stereo
+"output": [1, 2]    // stereo out
+```
 
 ### Node keys
-
-Keys are **globally unique**, stable IDs. Recommended format: `{index:02}-{type}` (e.g. `04-delay`).
-Gaps in numbering are fine. Keys are used to address nodes over the control protocol.
-
-### input / output routing
-
-`input` and `output` are 1-based physical channel numbers. A single integer sets both channels to the same physical channel.
-
-```yaml
-input: [1, 1]    # mono mic (ch 1) → L and R
-input: [1, 2]    # stereo interface
-output: [1, 2]   # stereo out
-```
+Globally unique stable IDs. Recommended format: `{index:02}-{type}` (e.g. `04-delay`). Used to address nodes over the control protocol.
 
 ---
 
 ## Effect parameters
 
-All numeric parameters accept integers or floats.
-Out-of-range values are clamped and logged as a warning.
-`wet` and `dry` accept either a single float (applied to both channels) or `[left, right]`.
+All numeric params accept integers or floats. Out-of-range values are clamped and logged. `wet` and `dry` accept either a single float (applied to both channels) or `[L, R]`.
 
 ### delay
 
 | Parameter  | Range        | Default | Description                       |
 |------------|--------------|---------|-----------------------------------|
-| `time_ms`  | ~1 – 2000    | 500     | Delay time in ms                  |
+| `time`     | 0.0 – `delay_max_seconds` | 0.5 | Delay time in **seconds** |
 | `feedback` | 0.0 – 1.0    | 0.4     | Feedback amount (0 = single echo) |
 | `wet`      | 0.0 – 1.0    | 0.5     | Output level                      |
+| `active`   | bool         | true    | Bypass when false                 |
 
 ### reverb
 
 | Parameter   | Range     | Default | Description                              |
 |-------------|-----------|---------|------------------------------------------|
 | `room_size` | 0.0 – 1.0 | 0.5     | Room size (larger = longer decay)        |
-| `damping`   | 0.0 – 1.0 | 0.5     | High-frequency damping (1 = most damped) |
+| `damping`   | 0.0 – 1.0 | 0.5     | High-frequency damping                   |
 | `wet`       | 0.0 – 1.0 | 0.33    | Output level                             |
+| `active`    | bool      | true    | Bypass when false                        |
 
 ### chorus
 
@@ -126,131 +133,151 @@ Out-of-range values are clamped and logged as a warning.
 | `rate_hz`  | 0.01 – 20.0  | 1.0     | LFO rate in Hz         |
 | `depth_ms` | 0.5 – 35.0   | 5.0     | Modulation depth in ms |
 | `wet`      | 0.0 – 1.0    | 0.5     | Output level           |
+| `active`   | bool         | true    | Bypass when false      |
 
-### eq\_param — parametric peak/bell
+### eq (peak/bell, low-shelf, high-shelf)
+
+Set `eq_type` to `"peak"`, `"low_shelf"`, or `"high_shelf"`.
 
 | Parameter  | Range            | Default | Description                       |
 |------------|------------------|---------|-----------------------------------|
-| `freq_hz`  | 20 – Nyquist     | 1000    | Centre frequency in Hz            |
+| `freq_hz`  | 20 – Nyquist     | 1000    | Centre/shelf frequency in Hz      |
 | `q`        | 0.1 – 30.0       | 1.0     | Bandwidth (higher = narrower)     |
 | `gain_db`  | −24 – +24        | 0.0     | Boost (+) or cut (−) in dB        |
-
-### eq\_low — low-shelf
-
-| Parameter  | Range            | Default | Description                       |
-|------------|------------------|---------|-----------------------------------|
-| `freq_hz`  | 20 – Nyquist     | 100     | Shelf frequency in Hz             |
-| `q`        | 0.1 – 30.0       | 0.707   | Shelf slope                       |
-| `gain_db`  | −24 – +24        | 0.0     | Boost (+) or cut (−) in dB        |
-
-### eq\_high — high-shelf
-
-| Parameter  | Range            | Default | Description                       |
-|------------|------------------|---------|-----------------------------------|
-| `freq_hz`  | 20 – Nyquist     | 10000   | Shelf frequency in Hz             |
-| `q`        | 0.1 – 30.0       | 0.707   | Shelf slope                       |
-| `gain_db`  | −24 – +24        | 0.0     | Boost (+) or cut (−) in dB        |
-
-For a 3-band EQ, chain `eq_low → eq_param → eq_high`.
+| `active`   | bool             | true    | Bypass when false                 |
 
 ### mix
 
-Controls how much dry and processed signal reaches the output. Typically placed last in the chain.
+Final output stage. Combines dry and processed signals.
 
 | Parameter | Range     | Default | Description                                         |
 |-----------|-----------|---------|-----------------------------------------------------|
-| `dry`     | 0.0 – ... | 0.0     | Dry (unprocessed) gain — use 0.0 if mixing analogue |
-| `wet`     | 0.0 – ... | 0.0     | Processed signal gain                               |
+| `dry`     | 0.0 – 1.0 | 1.0     | Dry signal level (use 0.0 for analogue dry mixing)  |
+| `wet`     | 0.0 – 1.0 | 1.0     | Effect signal level                                 |
+| `gain`    | 0.0 – 4.0 | 1.0     | Overall output level                                |
+| `pan`     | −1.0 – 1.0 | 0.0    | −1 = full L, 0 = centre, +1 = full R                |
 
 ### looper
 
-| Parameter          | Range     | Default | Description                                              |
-|--------------------|-----------|---------|----------------------------------------------------------|
-| `record`           | 0 / 1     | —       | 1 = start recording, 0 = stop and start playback         |
-| `stop`             | any       | —       | Stop playback, keep loop in memory                       |
-| `overdub`          | 0 / 1     | —       | 1 = enter overdub mode, 0 = return to playback           |
-| `loop_gain`        | 0.0 – ... | 1.0     | Playback level of the loop                               |
-| `overdub_feedback` | 0.0 – 1.0 | 0.9     | How much of the previous loop survives each overdub pass |
+Transport-driven, controlled via actions (see `SET <key>.action <value>`):
+
+| Action     | Effect                                                  |
+|------------|---------------------------------------------------------|
+| `rec`      | Start recording                                         |
+| `play`     | Stop recording, start playback                          |
+| `overdub`  | Toggle overdub on top of current loop                   |
+| `stop`     | Stop playback (loop kept in memory)                     |
+| `reset`    | Clear all layers                                        |
+
+| Parameter          | Range     | Default | Description                                       |
+|--------------------|-----------|---------|---------------------------------------------------|
+| `wet`              | 0.0 – 1.0 | 1.0     | Playback level                                    |
+| `decay`            | 0.0 – 1.0 | 1.0     | How much each overdub layer fades on next pass    |
+| `active`           | bool      | true    | Bypass when false                                 |
 
 ---
 
-## MIDI
+## Control devices
 
-MIDI input is configured under `midi:` in `config.yml`.  Each block targets one channel (or all channels with `"*"`) and maps CC numbers to parameter paths.
+Devices are configured under `control_devices` in `config.json`. Each device has an alias (the JSON key) and a typed connection config.
 
-```yaml
-# midi_device: "USB MIDI Interface"   # omit → first available port
-
-midi:
-  - channel: 1          # or "*" for omni
-    controls:
-      1:                # CC 1 — Modulation Wheel
-        target: "05-chorus.wet"
-      7:                # CC 7 — Channel Volume
-        target: "04-delay.wet"
-      11:               # CC 11 — Expression
-        target: "04-delay.feedback"
-        max: 0.95       # keep below self-oscillation
-      74:               # CC 74 — Filter Cutoff
-        target: "07-eq_param.freq_hz"
-        min: 200.0
-        max: 8000.0
+```json
+"control_devices": {
+  "serial-1":  { "type": "serial",   "dev": "/dev/ttyUSB0", "baud": 115200 },
+  "tcp-net":   { "type": "net",      "port": 9000 },
+  "midi-kbd":  { "type": "midi-in",  "dev": "Launchkey", "channel": 1 },
+  "midi-out":  { "type": "midi-out", "channel": 1 }
+}
 ```
 
-- `min` / `max` default to `0.0` / `1.0`; the CC value is linearly mapped to that range.
-- Program Change messages are forwarded as `PRESET` events to all chains.
-- With `RUST_LOG=multi_effect=debug`, **every incoming MIDI message is logged** — useful when you don't know what your device sends.
+| Type | Fields | Description |
+|---|---|---|
+| `serial` | `dev`, `baud` (default 115200), `active` | USB/UART serial line |
+| `net` | `host` (default `0.0.0.0`), `port`, `active` | TCP server |
+| `midi-in` | `dev` (substring match, optional), `channel` (`"*"` for omni), `active` | MIDI input |
+| `midi-out` | `dev`, `channel` (1–16), `active` | MIDI output |
+
+### Mappings (per preset)
+
+Each preset can attach a controller mapping per device. Mappings live in `presets[N].controllers`:
+
+```json
+"controllers": [
+  {
+    "device": "midi-kbd",
+    "mappings": {
+      "7":  { "target": "06-mix.gain", "ctrl": [0, 127], "param": [0.0, 1.0] },
+      "11": { "target": "04-delay.feedback", "ctrl": [0, 127], "param": [0.0, 0.95] },
+      "74": { "target": "07-eq.freq_hz", "ctrl": [0, 127], "param": [200, 8000], "log": true }
+    }
+  }
+]
+```
+
+For MIDI: keys are CC numbers as strings. For serial/net: any channel ID.
+
+`ctrl` and `param` are `[min, max]` ranges. `log: true` enables logarithmic mapping (useful for frequencies). Reverse mapping (param → controller) is applied automatically when broadcasting outbound events.
+
+MIDI Program Change (`0xC0`) maps to preset switching automatically.
 
 ---
 
-## TCP control protocol — port 9000
+## Line protocol — net / serial / WebSocket
 
-One command per line (UTF-8). Response is `OK` or `ERR <reason>`.
+All transports speak the same line-based text protocol. One command per line (UTF-8). One response per command.
 
-### Commands
+### Inbound commands (client → server)
 
-#### `SET <key.param> <value>`
-Set a single parameter on a named node.
+| Command | Reply | Description |
+|---|---|---|
+| `SET <path> <value>` | `OK` / `ERR` | Set a parameter (numeric value) |
+| `SET <path> <action>` | `OK` / `ERR` | Dispatch an action (non-numeric value) |
+| `CTRL <channel_id> <raw>` | `OK` / `ERR` | Mapped control change (translated by master) |
+| `CHAINS <json>` | `OK` / `ERR` | Replace all chains (JSON array of `ChainDef`) |
+| `PRESET <0–127>` | `OK` / `ERR` | Switch to preset slot |
+| `SAVE_PRESET <0–127>` | `OK` / `ERR` | Save current state to preset slot |
+| `DELETE_PRESET <0–127>` | `OK` / `ERR` | Delete preset slot |
+| `COMPARE` | `OK` / `ERR` | Toggle compare mode (saved vs working) |
+| `RESET` | `OK` / `ERR` | Reset all effect state |
+| `RELOAD` | `OK` / `ERR` | Re-read config.json and restart audio |
+| `FETCH_CONFIG` | `CONFIG <json>` / `ERR` | Get current audio config |
+| `SAVE_CONFIG <json>` | `OK` / `ERR` | Update audio config (partial — fields are optional) |
+| `FETCH_DEVICES` | `DEVICES <json>` / `ERR` | Get device list |
+| `PUT_DEVICE <alias> <json>` | `OK` / `ERR` | Add/update a device |
+| `DELETE_DEVICE <alias>` | `OK` / `ERR` | Remove a device |
+| `SET_DEVICE_NAME <old> <new>` | `OK` / `ERR` | Rename a device alias |
+| `PUT_CONTROLLERS <json>` | `OK` / `ERR` | Replace controller mappings of current preset |
+
+### Outbound broadcasts (server → all clients)
+
+Sent unsolicited when state changes. The originating client is filtered (no echo).
+
+| Line | When | Description |
+|---|---|---|
+| `SET <path> <value>` | Any param change | Param updated (echo to all *other* clients) |
+| `CTRL <ch> <raw>` | Param change with reverse mapping | Mapped form for devices that prefer it |
+| `RESET` | After RESET command | Effect state cleared |
+| `PRESET <preset_json>` | Preset switch / save / compare | Full preset content; `preset.index` indicates active slot |
+| `STATE <state>` | State transition | `Clean` / `Dirty` / `Comparing` |
+| `INDICES <json_array>` | Save to empty slot / delete | Updated list of occupied preset slots |
+| `EVENT <key> <event_name> <json>` | Effect-internal event | E.g. looper status / loop wrap |
+
+### WebSocket handshake
+
+On WS connect, the server immediately pushes:
 
 ```
-SET 04-delay.time_ms 800
-SET 04-delay.feedback 0.4
-SET 06-mix.wet 0.8
+SNAPSHOT <json>
 ```
 
-#### `UPDATE <json>`
-Set multiple parameters in one call. Nested JSON object: `{ "node-key": { "param": value } }`.
-
-```
-UPDATE {"04-delay":{"time_ms":800,"feedback":0.4},"03-reverb":{"wet":0.3}}
-```
-
-#### `PATCH <json>`
-Hot-swap to a completely new patch (full chain array in JSON). Takes effect at the next audio block.
-
-```
-PATCH {"chains":[{"key":"01-main","input":[1,1],"output":[1,2],"nodes":[...]}]}
-```
-
-#### `RESET`
-Reset all effect state (clear delay buffers, reverb tails, etc.).
-
-```
-RESET
-```
-
-#### `PRESET <0-127>`
-Send a preset change event to all chains.
-
-```
-PRESET 5
-```
+…containing `state`, `preset`, and `preset_indices`. Subsequent updates arrive as the broadcasts above.
 
 ### Testing with netcat
 
 ```bash
-echo "SET 04-delay.time_ms 500" | nc localhost 9000
-echo "UPDATE {\"04-delay\":{\"wet\":0.5}}" | nc localhost 9000
+echo "SET 04-delay.time 0.8" | nc localhost 9000     # if a Net device is configured at port 9000
+echo "PRESET 1"              | nc localhost 9000
+echo "FETCH_CONFIG"          | nc localhost 9000
 ```
 
 ---
@@ -263,46 +290,46 @@ Each chain processes one stereo block per audio callback:
 dry_buf  ← physical input channels (routed by chain.input)
 eff_buf  ← 0.0
 
-for each node:
+for each node in chain.nodes:
     node.process(dry_buf, eff_buf)
-        # each Device reads dry_buf[f] + eff_buf[f] as its input
-        # and writes its wet output back to eff_buf[f]
+        # Each Device reads dry_buf[f] + eff_buf[f] as its input
+        # and writes wet output to eff_buf[f].
         #
         # Mix node:
-        #   eff_buf[ch] = dry_buf[ch] * dry[ch] + eff_buf[ch] * wet[ch]
+        #   out[ch] = dry_buf[ch] * dry[ch] + eff_buf[ch] * wet[ch]
 
 output_channels += eff_buf              # routed by chain.output
 ```
 
-Multiple chains run in parallel and their outputs are summed.
+Multiple chains run in parallel and their outputs are summed. The dry signal is **not** mixed by the engine in analogue-bypass mode — set `dry: 0.0` on the final mix node and let your hardware add the dry path.
 
+---
 
-## Line protocol (net/serial/web socket)
-Each request is a one-line request, it returns a one-line response.
-The response is either `OK|Err <error message>`, or CONFIG|DEVICES
-**Requests -> Response**
-`CHAINS <chains: json> -> OK|ERR <error msg>` Set chains for the snapshot
-`SET <path: str> <value: float> -> OK|ERR <error msg>` Set value of a controller
-`SET <path: str> <action: str> -> OK|ERR <error msg>` Perform action (e.q. play, pause) 
-`SAVE_PRESET <preset int 1..127> -> OK|ERR <error msg>` Save preset to given slot
-`DELETE_PRESET <preset in 1..127> -> OK|ERR <error msg>` Delete preset on given slot
-`PRESET <preset in 1..127> -> OK|ERR <error msg>` Switch to preset of given slot
-`COMPARE -> OK|ERR <error msg>` Switch to compare mode
-`FETCH_CONFIG -> CONFIG <config: json>|Err <error msg>` Ask for config
-`SAVE_CONFIG <config: json> -> OK|ERR <error msg>` Save the config
-`FETCH_DEVICES -> DEVICES <devices: json>|Err <error msg>` Ask for devices
-`PUT_DEVICE <alias: str> <value: str> -> OK|ERR <error msg>` Save a device
-`SET_DEVICE_NAME <old_alias: str> <new_alias: str> -> OK|ERR <error msg>` Rename a device
-`DELETE_DEVICE <alias: str> -> OK|ERR <error msg>` Delete a device
-`RELOAD -> OK|ERR <error msg>` Reload the system (SIGHUP)
-`PUT_CONTROLLERS <controllers: json> -> OK|ERR <error msg>` Save the controllers
+## Architecture summary
 
-**Broadcasts**
-Broadcasts ar unsolisited messages. Each device may receive one and chooses to either process it or ignore it.
-As far as a request-variant exists, the format is the same. Broadcasts are sent to inform other controllers of 
-a change. The change is not broadcasted to the source-controller.
-`SET <path: str> <value: float>` Set value of controller 
-`SET <path: str> <action: str>` Perform action (e.q. play, pause)
-`COMPARE` Switch to compare mode @todo this needed??
-`STATE <state>`  Switch to state (clean, dirty, compare)
-`SNAPSHOT <snapshot: json> Big set of data: complete preset, state and preset_indexes.
+```
+┌───────────────┐                                    
+│  control      │  inbound: text protocol            
+│  transports   │ ────────────────►  master_tx       
+│  serial / net │                       │            
+│  ws / midi    │ ◄──────── bus ◄───────┤            
+└───────────────┘     (broadcast)       │            
+                                        ▼            
+                                 ┌───────────────┐   
+                                 │  ConfigMaster │   
+                                 │  (sole owner  │   
+                                 │  of state)    │   
+                                 └─────┬─────────┘   
+                                       │ rtrb        
+                                       ▼ (lock-free) 
+                                 ┌───────────────┐   
+                                 │  Audio engine │   
+                                 │  (cpal thread)│   
+                                 └───────────────┘   
+```
+
+- **Master** owns all configuration and snapshot state — single writer.
+- All inbound control flows through `master_tx` (mpsc).
+- Master pushes to audio via lock-free SPSC ring buffers (`rtrb`).
+- Master broadcasts state changes on the bus (tokio `broadcast`); all transports subscribe.
+- All wire-format I/O happens at the transport layer; master speaks only typed Rust values.
