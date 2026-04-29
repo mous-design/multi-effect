@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
+
+use crate::engine::device::auto_multiplier;
 
 fn default_ctrl()           -> [f32; 2]   { [0.0, 127.0]   }
 fn default_param()          -> [f32; 2]   { [0.0, 1.0]     }
@@ -9,21 +10,6 @@ fn default_host()           -> String     { "0.0.0.0".into() }
 fn default_true()           -> bool       { true            }
 fn default_channel()        -> MidiChannel { MidiChannel::Omni }
 fn default_midi_out_channel() -> u8       { 1               }
-
-/// System-wide target resolution for outbound rounding. Roughly equivalent to
-/// 14-bit precision (16384). Picking 10000 gives slightly friendlier decimal
-/// counts on common ranges (e.g. 2 decimals on [0,127] instead of 3).
-const OUTBOUND_RESOLUTION: f32 = 10000.0;
-
-/// Compute the smallest power-of-10 multiplier `m` such that rounding a value
-/// to the nearest `1/m` preserves at least `OUTBOUND_RESOLUTION` steps across
-/// the given range.
-fn auto_multiplier(range: f32) -> f32 {
-    let r = range.abs();
-    if r <= 0.0 { return 1.0; }
-    let d = (OUTBOUND_RESOLUTION / r).log10().ceil().clamp(0.0, 10.0);
-    10_f32.powi(d as i32)
-}
 
 /// Round a value to the nearest `1/multiplier`.
 fn smart_round(value: f32, multiplier: f32) -> f32 {
@@ -128,8 +114,8 @@ impl ControlDef {
     pub fn new(target: String, ctrl: [f32; 2], param: [f32; 2], log: bool) -> Self {
         Self {
             target, ctrl, param, log,
-            ctrl_mult:   auto_multiplier(ctrl[1]  - ctrl[0]),
-            target_mult: auto_multiplier(param[1] - param[0]),
+            ctrl_mult:   auto_multiplier(ctrl[0], ctrl[1]),
+            target_mult: auto_multiplier(param[0], param[1]),
         }
     }
 

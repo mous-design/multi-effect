@@ -1,98 +1,121 @@
-use tracing::warn;
-use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use std::collections::HashMap;
+use crate::engine::device::{override_float, find_param_info, check_bounds,
+    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
-const DELAY_MIN_SAMPLES:usize = 50;
-/// Stereo tape-style delay.
+pub const NAME: &str = "delay";
+
+/// Stereo feedback delay.
 ///
-/// Each channel has its own `RingBuffer`.  Processing is independent per
-/// channel, which works naturally for both stereo and dual-mono use.
+/// Each channel has its own `RingBuffer`; processing is independent per
+/// channel, so the effect works naturally for both stereo and dual-mono use.
 ///
-/// Signal model per channel:
+/// Signal model per sample per channel:
 /// ```text
-/// delayed  = buf.read_at(delay_samples)
-/// buf.write(input + delayed * feedback)
-/// output   = delayed * wet[ch]
+/// delayed = buf.read_at(delay_samples)         // tap from `time` seconds ago
+/// buf.write(inp + delayed * feedback)          // recurrence — feedback drives repeats
+/// output  = inp + delayed * wet[ch]            // input passes through; wet tap is added
 /// ```
 ///
-/// The dry signal is **not** added here — it is injected by the `Chain`
-/// before this node (`inp = dry + prev_effect`).
+/// Per the chain convention, `inp` already carries `dry + prior_effects`
+/// (the `Chain` mixes them in before each node). The `Mix` node at the chain
+/// tail subtracts the dry component so the engine emits wet-only — dry is
+/// re-added in analog downstream.
 pub struct Delay {
+    params_info: [ParamInfo; 4],
     pub key: String,
     bufs: [RingBuffer; 2],
+    pub active: bool,
     delay_samples: usize,
     pub feedback: f32,
     /// Per-channel output level: `[left, right]`. 0.0 = silent, 1.0 = full.
     pub wet: [f32; 2],
-    pub active: bool,
     sample_rate: f32,
 }
-
+fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
+    [
+        ParamInfo::new_discrete_bool("active", true, None),
+        ParamInfo::new_continuous_float(
+            "time",
+            override_float(param_type_props, "delay.time.min", 0.1),
+            override_float(param_type_props, "delay.time.max", 2.0),
+            override_float(param_type_props, "delay.time.default", 1.0),
+            true, // @todo see how this works.
+            None,
+            Some("s"),
+        ),
+        ParamInfo::new_continuous_float(
+            "feedback",
+            override_float(param_type_props, "delay.feedback.min", 0.0),
+            override_float(param_type_props, "delay.feedback.max", 1.0),
+            override_float(param_type_props, "delay.feedback.default", 0.4),
+            false,
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_float(
+            "wet",
+            override_float(param_type_props, "delay.wet.min", 0.0),
+            override_float(param_type_props, "delay.wet.max", 1.0),
+            override_float(param_type_props, "delay.wet.default", 0.5),
+            false,
+            None,
+            None,
+        ),
+    ]
+}
 impl Delay {
-    pub fn new(key: impl Into<String>, sample_rate: f32, max_delay_seconds: f32) -> Self {
-        let requested = (sample_rate * max_delay_seconds) as usize;
-        let min_buf = 2 * DELAY_MIN_SAMPLES;
-        if requested < min_buf {
-            warn!("Delay: max_delay_seconds {max_delay_seconds} too small (< {} samples), clamping to {min_buf}", min_buf);
-        }
-        let max_samples = requested.max(min_buf) + 1;
-        let default_delay = (sample_rate * 0.5) as usize;
-
+    pub fn new(key: impl Into<String>, sample_rate: f32, param_type_props: &HashMap<String, OverrideValue>) -> Self {
+        let params_info = build_params_info(param_type_props);
+        let feedback = find_param_info(&params_info,"feedback").continuous_float_default();
+        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+        let active = find_param_info(&params_info,"active").bool_default();
+        let info_time = find_param_info(&params_info,"time");
+        let max_samples = (sample_rate * info_time.continuous_float_max()) as usize;
+        let delay_samples = (sample_rate * info_time.continuous_float_default()) as usize;
         Self {
-            key: key.into(),
+            params_info, key: key.into(),
             bufs: [RingBuffer::new(max_samples), RingBuffer::new(max_samples)],
-            delay_samples: default_delay.min(max_samples),
-            feedback: 0.4,
-            wet: [0.5; 2],
-            active: true,
-            sample_rate,
+            delay_samples,
+            feedback, wet: [wet; 2], active, sample_rate,
         }
-    }
-
-    pub fn set_time(&mut self, seconds: f32) -> Result<(), String> {
-        self.delay_samples = (seconds * self.sample_rate) as usize;
-        let cap = self.bufs[0].capacity();
-        if self.delay_samples >= cap {
-            self.delay_samples = cap - 1;
-            return Err(format!("Delay time clamped to {} samples", self.delay_samples));
-        }
-        if self.delay_samples < DELAY_MIN_SAMPLES {
-            self.delay_samples = DELAY_MIN_SAMPLES;
-            return Err(format!("Delay time too short, clamped to {} samples", DELAY_MIN_SAMPLES));
-        }
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn time(&self) -> f32 {
-        self.delay_samples as f32 / self.sample_rate
     }
 }
 
 impl Parameterized for Delay {
+     fn get_params_info(&self) -> &[ParamInfo] {
+        &self.params_info
+    }
+
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         match param {
-            "active"   => { self.active = value.try_bool()?; Ok(()) }
-            "time"     => self.set_time(value.try_float()?),
-            "feedback" => { let (v, r) = check_bounds("Delay", "feedback", value.try_float()?, 0.0, 1.0); self.feedback = v; r }
-            "wet"      => {
+            "active" => {
+                self.active = value.try_bool()?;
+                Ok(())
+            },
+            "time" => {
+                let info = find_param_info(self.get_params_info(), "time");
+                let (v, r) =
+                    check_bounds(info, value.try_float()?, NAME);
+                self.delay_samples = (v * self.sample_rate) as usize;
+                r
+            },
+            "feedback" => {
+                let info = find_param_info(self.get_params_info(), "feedback");
+                let (v, r) =
+                    check_bounds(info, value.try_float()?, NAME);
+                self.feedback = v;
+                r
+            },
+            "wet" => {
+                let info = find_param_info(self.get_params_info(), "wet");
                 let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds("Delay", "wet", l, 0.0, 1.0);
-                let (vr, rr) = check_bounds("Delay", "wet", r, 0.0, 1.0);
+                let (vl, rl) = check_bounds(info, l, NAME);
+                let (vr, rr) = check_bounds(info, r, NAME);
                 self.wet = [vl, vr];
                 rl.and(rr)
             },
-            _ => Err(format!("Delay: unknown param '{param}'")),
-        }
-    }
-
-    fn get_param(&self, param: &str) -> Option<f32> {
-        match param {
-            "active"   => Some(if self.active { 1.0 } else { 0.0 }),
-            "time"     => Some(self.time()),
-            "feedback" => Some(self.feedback),
-            "wet"      => Some(self.wet[0]),
-            _ => None,
+            _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }
 }
@@ -100,18 +123,9 @@ impl Parameterized for Delay {
 impl Device for Delay {
     fn key(&self) -> &str { &self.key }
 
-    fn type_name(&self) -> &str { "delay" }
+    fn type_name(&self) -> &str { NAME }
 
     fn is_active(&self) -> bool { self.active }
-
-    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert("active".into(),   self.active.into());
-        m.insert("time".into(),     self.time().into());
-        m.insert("feedback".into(), self.feedback.into());
-        m.insert("wet".into(),      serde_json::json!(self.wet));
-        m
-    }
 
     fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
         for e in eff.iter_mut() {

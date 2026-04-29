@@ -34,7 +34,7 @@ pub fn run(http_port: u16, master_tx: mpsc::Sender<ConfigRequest>, bus: EventBus
 
 pub fn router(state: AppState, ui_dist_path: &str) -> Router {
     Router::new()
-        .route("/ws",                  get(ws_handler))
+        .route("/ws", get(ws_handler))
         .nest_service("/", ServeDir::new(ui_dist_path))
         .layer(CorsLayer::permissive())
         .with_state(state)

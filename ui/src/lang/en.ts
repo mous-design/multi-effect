@@ -13,7 +13,7 @@ const en: Record<string, string> = {
     'type.harmonizer': 'Harmonizer',
     'type.looper': 'Looper',
     'type.mix': 'Mix',
-    'type.eq_param': 'EQ Mid',
+    'type.eq_mid': 'EQ Mid',
     'type.eq_low': 'EQ Low',
     'type.eq_high': 'EQ High',
 

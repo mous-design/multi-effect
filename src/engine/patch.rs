@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::effects::{Chorus, Delay, Eq, Harmonizer, Reverb};
+use crate::effects::{chorus, delay, eq, harmonizer, reverb,looper};
 use crate::effects::eq::EqType;
-use crate::effects::looper::Looper;
-use super::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use super::device::{Device, Frame, Parameterized, ParamValue};
+use super::mix;
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -59,91 +59,6 @@ pub struct NodeDef {
 
     #[serde(flatten)]
     pub params: serde_json::Map<String, Value>,
-}
-
-// ---------------------------------------------------------------------------
-// Runtime types
-// ---------------------------------------------------------------------------
-
-/// Final output stage: scales the accumulated effect signal and compensates
-/// for dry bleed in analogue-bypass setups.
-///
-/// Formula: `out[ch] = (eff[ch] - dry[ch]) * wet[ch] + dry[ch] * dry_param[ch]`
-///
-/// - `wet`: output level of the pure effect signal (eff minus dry).  Default: `1.0`.
-/// - `dry`: output level of the original dry signal.  `1.0` = full dry (digital mode),
-///   `0.0` = no dry output (analogue-bypass mode, hardware adds dry).  Default: `1.0`.
-/// - `gain`: overall output level (post-pan).  Default: `1.0`.
-/// - `pan`:  -1.0 = full left, 0.0 = centre, +1.0 = full right.  Default: `0.0`.
-pub struct Mix {
-    pub key: String,
-    /// Per-channel gain applied to the dry signal
-    pub dry: [f32; 2],
-    /// Per-channel gain applied to the accumulated effect signal
-    pub wet: [f32; 2],
-    /// Overall output level (0.0 = silence, 1.0 = unity). Default: 1.0.
-    pub gain: f32,
-    /// Pan: -1.0 = full left, 0.0 = centre, +1.0 = full right. Default: 0.0.
-    pub pan: f32,
-    pub active: bool,
-}
-
-impl Mix {
-    pub fn new(key: impl Into<String>) -> Self {
-        Self { key: key.into(), dry: [1.0; 2], wet: [1.0; 2], gain: 1.0, pan: 0.0, active: true }
-    }
-}
-
-impl Parameterized for Mix {
-    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
-        match param {
-            "active" => { self.active = value.try_bool()?; Ok(()) }
-            "dry"  => {
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds("Mix", "dry", l, 0.0, 1.0);
-                let (vr, rr) = check_bounds("Mix", "dry", r, 0.0, 1.0);
-                self.dry = [vl, vr]; rl.and(rr)
-            },
-            "wet"  => {
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds("Mix", "wet", l, 0.0, 1.0);
-                let (vr, rr) = check_bounds("Mix", "wet", r, 0.0, 1.0);
-                self.wet = [vl, vr]; rl.and(rr)
-            },
-            "gain" => { let (v, r) = check_bounds("Mix", "gain", value.try_float()?, 0.0, 4.0); self.gain = v; r }
-            "pan"  => { let (v, r) = check_bounds("Mix", "pan",  value.try_float()?, -1.0, 1.0); self.pan  = v; r }
-            _ => Err(format!("Mix: unknown param '{param}'")),
-        }
-    }
-}
-
-impl Device for Mix {
-    fn key(&self) -> &str { &self.key }
-
-    fn type_name(&self) -> &str { "mix" }
-
-    fn is_active(&self) -> bool { self.active }
-
-    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert("active".into(), self.active.into());
-        m.insert("dry".into(),  serde_json::json!(self.dry));
-        m.insert("wet".into(),  serde_json::json!(self.wet));
-        m.insert("gain".into(), serde_json::json!(self.gain));
-        m.insert("pan".into(),  serde_json::json!(self.pan));
-        m
-    }
-
-    fn process(&mut self, dry: &[Frame], eff: &mut [Frame]) {
-        // Pan: the louder side stays at 1.0, the quieter side fades to 0.
-        let pan_l = (1.0 - self.pan).min(1.0);
-        let pan_r = (1.0 + self.pan).min(1.0);
-        for (e, &d) in eff.iter_mut().zip(dry.iter()) {
-            e[0] = ((e[0] - d[0]) * self.wet[0] + d[0] * self.dry[0]) * self.gain * pan_l;
-            e[1] = ((e[1] - d[1]) * self.wet[1] + d[1] * self.dry[1]) * self.gain * pan_r;
-        }
-    }
-    fn reset(&mut self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -267,15 +182,6 @@ impl Chain {
                 }
             }
         }
-        // @todo I think this is not needed. Remove after some tests.
-        // Fallback: try every node
-        // for node in &mut self.nodes {
-        //     match node.set_action(path, action) {
-        //         Ok(()) => { debug!("ACTION {path} {action}"); return Ok(()); }
-        //         Err(e) if !e.contains("unknown action") => { warn!("{e}"); return Ok(()); }
-        //         Err(_) => {}
-        //     }
-        // }
         Err(format!("no node handles action '{path}'"))
     }
 
@@ -296,22 +202,6 @@ impl Chain {
         for node in &mut self.nodes {
             node.on_note_off(note);
         }
-    }
-
-    /// Serialise this chain to a JSON value matching the patch file format.
-    #[allow(dead_code)]
-    pub fn to_json(&self) -> serde_json::Value {
-        let nodes: Vec<serde_json::Value> = self.nodes.iter().map(|d| {
-            let mut obj = d.to_params();
-            obj.insert("key".into(),  d.key().into());
-            obj.insert("type".into(), d.type_name().into());
-            serde_json::Value::Object(obj)
-        }).collect();
-        serde_json::json!({
-            "input":  self.input,
-            "output": self.output,
-            "nodes":  nodes,
-        })
     }
 }
 
@@ -372,15 +262,15 @@ fn apply_params<P: Parameterized>(
 fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
     let sr = cfg.sample_rate as f32;
     let mut device: Box<dyn Device> = match def.device_type.as_str() {
-        "mix"        => Box::new(Mix::new(&def.key)),
-        "looper"     => Box::new(Looper::new(&def.key, sr, cfg.looper_max_seconds, cfg.looper_max_buffers)),
-        "delay"      => Box::new(Delay::new(&def.key, sr, cfg.delay_max_seconds)),
-        "reverb"     => Box::new(Reverb::new(&def.key, sr)),
-        "chorus"     => Box::new(Chorus::new(&def.key, sr)),
-        "harmonizer" => Box::new(Harmonizer::new(&def.key, sr)),
-        "eq_param" => Box::new(Eq::new(&def.key, EqType::Peak,      sr)),
-        "eq_low"   => Box::new(Eq::new(&def.key, EqType::LowShelf,  sr)),
-        "eq_high"  => Box::new(Eq::new(&def.key, EqType::HighShelf, sr)),
+        mix::NAME        => Box::new(mix::Mix::new(&def.key, &cfg.param_type_props)),
+        looper::NAME     => Box::new(looper::Looper::new(&def.key, sr, &cfg.param_type_props)),
+        delay::NAME      => Box::new(delay::Delay::new(&def.key, sr, &cfg.param_type_props)),
+        reverb::NAME     => Box::new(reverb::Reverb::new(&def.key, sr, &cfg.param_type_props)),
+        chorus::NAME     => Box::new(chorus::Chorus::new(&def.key, sr, &cfg.param_type_props)),
+        harmonizer::NAME => Box::new(harmonizer::Harmonizer::new(&def.key, sr, &cfg.param_type_props)),
+        eq::NAME_MID     => Box::new(eq::Eq::new(&def.key, EqType::Peak,      sr, &cfg.param_type_props)),
+        eq::NAME_LOW     => Box::new(eq::Eq::new(&def.key, EqType::LowShelf,  sr, &cfg.param_type_props)),
+        eq::NAME_HIGH    => Box::new(eq::Eq::new(&def.key, EqType::HighShelf, sr, &cfg.param_type_props)),
         other      => bail!("unknown device type: '{other}'"),
     };
     apply_params(&mut device, &def.params, &def.key)?;
@@ -393,7 +283,7 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
 // ---------------------------------------------------------------------------
 
 fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
-    const EQ_TYPES: &[&str] = &["eq_param", "eq_low", "eq_high"];
+    const EQ_TYPES: &[&str] = &["eq_mid", "eq_low", "eq_high"];
 
     for (mix_pos, mix_node) in nodes.iter().enumerate()
         .filter(|(_, n)| n.device_type == "mix")
@@ -414,90 +304,6 @@ fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
 pub fn load_patch_def(defs: &Vec<ChainDef>, cfg: &Config) -> Result<Vec<Chain>> {
     defs.iter().enumerate().map(|(i, c)| build_chain(i, c, cfg)).collect()
 }
-
-// pub fn load_str(json: &str, cfg: &Config) -> Result<Vec<Chain>> {
-//     let def: Vec<ChainDef> = serde_json::from_str(json).context("load_str: patch JSON parse error")?;
-//     load_patch_def(&def, cfg)
-// }
-
-// pub fn load_value(json: Value, cfg: &Config) -> Result<Vec<Chain>> {
-//     let def: Vec<ChainDef> = serde_json::from_value(json).context("load_value: deserializing ChainDefs")?;
-//     load_patch_def(&def, cfg)
-// }
-
-// pub fn load_from_config(cfg: &Config, with_state: bool) -> Result<Vec<Chain>> {
-//     // --- Determine startup chains: config structure + saved params overlay ---
-//     let state_path = cfg.state_save_path;
-//     let chains = cfg.startup_chains_def();
-    
-//     let merged = if with_state && state_path.exists() {
-//         match std::fs::read_to_string(&state_path) {
-//             Err(e) => {
-//                 warn!("Could not read state file ({}): {e}", state_path.display());
-//                 chains
-//             }
-//             Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-//                 Err(e) => {
-//                     warn!("State file contains invalid JSON, ignoring: {e}");
-//                     chains
-//                 }
-//                 Ok(saved) => {
-//                     info!("Loading saved state (params overlay): {}", state_path.display());
-//                     // merge_state_params(chains, &saved)
-//                     // @todo make some logic here...
-//                     chains
-//                 }
-//             }
-//         }
-//     } else {
-//         info!("No saved state, loading chains from config");
-//         chains
-//     };
-//     load_patch_def(merged, cfg)
-// }
-
-/// Use `structure` (from config/preset) as the authoritative chain/node layout,
-/// but overlay saved param values from `saved` for any node key that still exists.
-/// This ensures structural changes in config are always respected while preserving knob positions.
-// pub fn merge_state_params(chains: Vec<ChainDef>, saved: &Value) -> Vec<ChainDef> {
-//     // Collect all saved nodes by key into a flat map.
-//     let mut saved_nodes: HashMap<&str, &Value> = HashMap::new();
-//     if let Some(chains) = saved["chains"].as_array() {
-//         for chain in chains {
-//             if let Some(nodes) = chain["nodes"].as_array() {
-//                 for node in nodes {
-//                     if let Some(key) = node["key"].as_str() {
-//                         saved_nodes.insert(key, node);
-//                     }
-//                 }
-//             }
-//         }
-//     }
-
-//     let mut result = chains;
-//     if let Some(chains) = result["chains"].as_array_mut() {
-//         for chain in chains {
-//             if let Some(nodes) = chain["nodes"].as_array_mut() {
-//                 for node in nodes {
-//                     let key = match node["key"].as_str() {
-//                         Some(k) => k.to_string(),
-//                         None    => continue,
-//                     };
-//                     if let Some(saved_node) = saved_nodes.get(key.as_str()) {
-//                         if let (Some(n), Some(s)) = (node.as_object_mut(), saved_node.as_object()) {
-//                             for (k, v) in s {
-//                                 if k != "key" && k != "type" {
-//                                     n.insert(k.clone(), v.clone());
-//                                 }
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     result
-// }
 
 /// Parse a JSON value into a `ParamValue`.
 ///

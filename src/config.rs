@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use persist_fs::{persist,load};
 use crate::{control::mapping::DeviceDef, engine::patch::ChainDef};
 use preset::PresetDefs;
+use crate::engine::device::OverrideValue;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -25,8 +26,6 @@ pub struct ConfigPatch {
     audio_device:       Option<String>,
     in_channels:        Option<u16>,
     out_channels:       Option<u16>,
-    delay_max_seconds:  Option<f32>,
-    looper_max_seconds: Option<f32>,
 }
 impl ConfigPatch {
     pub fn from_config(cfg: &Config) -> Self {
@@ -36,8 +35,6 @@ impl ConfigPatch {
             audio_device:       Some(cfg.audio_device.clone()),
             in_channels:        Some(cfg.in_channels),
             out_channels:       Some(cfg.out_channels),
-            delay_max_seconds:  Some(cfg.delay_max_seconds),
-            looper_max_seconds: Some(cfg.looper_max_seconds),
         }
     }
 }
@@ -67,18 +64,6 @@ pub struct Config {
     #[serde(default)]
     pub control_devices: HashMap<String, DeviceDef>,
 
-    /// Maximum delay time in seconds (determines delay buffer size at startup)
-    #[serde(default = "Config::default_delay_max_seconds")]
-    pub delay_max_seconds: f32,
-
-    /// Maximum loop length in seconds (initial buffer size for buffer[0])
-    #[serde(default = "Config::default_looper_max_seconds")]
-    pub looper_max_seconds: f32,
-
-    /// Maximum number of overdub layers (0 = limited only by memory, default 8)
-    #[serde(default = "Config::default_looper_max_buffers")]
-    pub looper_max_buffers: usize,
-
     /// Port for the HTTP/WebSocket control API (0 = disabled).
     #[serde(default = "Config::default_http_port")]
     pub http_port: u16,
@@ -90,6 +75,11 @@ pub struct Config {
     /// Preset slots and active-preset pointer.
     #[serde(default)]
     pub presets: PresetDefs,
+
+    /// Override values for indiviual properties of params_info. Each key is 
+    /// `<effect-name>.<param-name>.<property>`.
+    /// The effect decides which properties are actually overwritable.
+    pub param_type_props: HashMap<String, OverrideValue>,
 
     /// Log target: "stderr" (default) or "syslog"
     #[serde(default = "Config::default_log_target")]
@@ -109,9 +99,6 @@ pub struct Config {
 }
 
 impl Config {
-    fn default_delay_max_seconds()   -> f32    { 2.0  }
-    fn default_looper_max_seconds()  -> f32    { 30.0 }
-    fn default_looper_max_buffers()  -> usize  { 8    }
     fn default_log_target()          -> String { "stderr".into() }
     fn default_state_save_interval() -> u64    { 300 }
     fn default_state_save_path()     -> PathBuf { PathBuf::from("/tmp/multi-effect-state.json") }
@@ -133,7 +120,7 @@ impl Config {
                 "-f" | "--fresh"  => {
                     skip_state = true;
                 },
-                _ => bail!("Unknown option {arg}"), 
+                _ => bail!("Unknown option {arg}"),
             }
         }
         let cfg = Config::load(PathBuf::from(config_path_str))?;
@@ -183,12 +170,10 @@ impl Default for Config {
             control_devices:      HashMap::new(),
             chains:               Vec::new(),
             presets:              PresetDefs::default(),
+            param_type_props:          HashMap::new(),
             state_save_path:      Self::default_state_save_path(),
             log_target:           Self::default_log_target(),
             state_save_interval:  Self::default_state_save_interval(),
-            delay_max_seconds:    Self::default_delay_max_seconds(),
-            looper_max_seconds:   Self::default_looper_max_seconds(),
-            looper_max_buffers:   Self::default_looper_max_buffers(),
             http_port:            Self::default_http_port(),
             config_path:          PathBuf::new(),
         }

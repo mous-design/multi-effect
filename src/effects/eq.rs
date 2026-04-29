@@ -1,6 +1,8 @@
 use std::f32::consts::PI;
+use std::collections::HashMap;
 
-use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{override_float, find_param_info, check_bounds,
+    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EqType {
@@ -11,6 +13,11 @@ pub enum EqType {
     /// High-shelf: boost or cut above the shelf frequency.
     HighShelf,
 }
+
+pub const NAME_MID: &str = "eq_mid";
+pub const NAME_LOW: &str = "eq_low";
+pub const NAME_HIGH: &str = "eq_high";
+
 
 /// Second-order parametric EQ section (Transposed Direct Form II).
 ///
@@ -24,11 +31,13 @@ pub enum EqType {
 ///
 /// Chain multiple `Eq` nodes for multi-band EQ:
 /// ```text
-/// eq_low → eq_param → eq_param → eq_high
+/// eq_low → eq_mid → eq_mid → eq_high
 /// ```
 pub struct Eq {
+    params_info: [ParamInfo; 4],
     pub key: String,
     pub eq_type:  EqType,
+    pub active: bool,
     pub freq_hz:  f32,
     pub q:        f32,
     pub gain_db:  f32,
@@ -40,27 +49,60 @@ pub struct Eq {
     // Transposed DF-II state: w[channel][0..1]
     w: [[f32; 2]; 2],
 
-    pub active: bool,
     sample_rate: f32,
 }
 
+fn build_params_info(param_type_props: &HashMap<String, OverrideValue>, eq_type: EqType) -> [ParamInfo; 4] {
+    let (def_freq, def_q, def_gain, def_key_freq, def_key_q, def_key_gain) = match eq_type {
+        EqType::LowShelf =>  (100.0, 0.707, 0.0, "eq_low.freq.default", "eq_low.q.default", "eq_low.gain_db.default"),
+        EqType::Peak     => (1000.0, 1.0, 0.0, "eq_mid.freq.default", "eq_mid.q.default", "eq_mid.gain_db.default"),
+        EqType::HighShelf => (10000.0, 0.707, 0.0, "eq_high.freq.default", "eq_high.q.default","eq_high.gain_db.default"),
+    };
+    [
+        ParamInfo::new_discrete_bool("active", true, None),
+        ParamInfo::new_continuous_float(
+            "freq",
+            override_float(param_type_props, "eq.freq.min", 20.0),
+            override_float(param_type_props, "eq.freq.max", 20000.0),
+            override_float(param_type_props, def_key_freq, def_freq),
+            true,
+            None,
+            Some("Hz")
+        ),
+        ParamInfo::new_continuous_float(
+            "q",
+            override_float(param_type_props, "eq.q.min", 0.1),
+            override_float(param_type_props, "eq.q.max", 10.0),
+            override_float(param_type_props, def_key_q, def_q),
+            true,
+            None,
+            None
+        ),
+        ParamInfo::new_continuous_float(
+            "gain_db",
+            override_float(param_type_props, "eq.gain_db.min", -15.0),
+            override_float(param_type_props, "eq.gain_db.max", 15.0),
+            override_float(param_type_props, def_key_gain, def_gain),
+            false,
+            None,
+            Some("dB")
+        ),
+    ]
+}
 impl Eq {
-    pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32) -> Self {
-        let (freq_hz, q) = match eq_type {
-            EqType::Peak     => (1000.0, 1.0),
-            EqType::LowShelf =>  (100.0, 0.707),
-            EqType::HighShelf => (10000.0, 0.707),
-        };
+    pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32,
+        param_type_props: &HashMap<String, OverrideValue>) -> Self {
+        let params_info = build_params_info(param_type_props, eq_type);
+        let active = find_param_info(&params_info,"active").bool_default();
+        let freq_hz = find_param_info(&params_info,"freq").continuous_float_default();
+        let q = find_param_info(&params_info,"q").continuous_float_default();
+        let gain_db = find_param_info(&params_info,"gain_db").continuous_float_default();
         let mut eq = Self {
-            key: key.into(),
-            eq_type,
-            freq_hz,
-            q,
-            gain_db: 0.0,
+            params_info, key: key.into(), eq_type,
+            active, freq_hz, q, gain_db,
             b0: 1.0, b1: 0.0, b2: 0.0,
             a1: 0.0, a2: 0.0,
             w: [[0.0; 2]; 2],
-            active: true,
             sample_rate,
         };
         eq.update_coefficients();
@@ -117,28 +159,39 @@ impl Eq {
 }
 
 impl Parameterized for Eq {
-    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
-        let name = match self.eq_type {
-            EqType::Peak      => "EqParam",
-            EqType::LowShelf  => "EqLow",
-            EqType::HighShelf => "EqHigh",
-        };
-        match param {
-            "active"  => { self.active = value.try_bool()?; Ok(()) }
-            "freq"    => { let (v, r) = check_bounds(name, "freq",    value.try_float()?, 20.0, self.sample_rate * 0.499); self.freq_hz = v; self.update_coefficients(); r }
-            "q"       => { let (v, r) = check_bounds(name, "q",       value.try_float()?, 0.1,  30.0); self.q       = v; self.update_coefficients(); r }
-            "gain_db" => { let (v, r) = check_bounds(name, "gain_db", value.try_float()?, -24.0, 24.0); self.gain_db = v; self.update_coefficients(); r }
-            _ => Err(format!("{name}: unknown param '{param}'")),
-        }
+     fn get_params_info(&self) -> &[ParamInfo] {
+        &self.params_info
     }
 
-    fn get_param(&self, param: &str) -> Option<f32> {
+    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        let name = self.type_name();
         match param {
-            "active"  => Some(if self.active { 1.0 } else { 0.0 }),
-            "freq"    => Some(self.freq_hz),
-            "q"       => Some(self.q),
-            "gain_db" => Some(self.gain_db),
-            _ => None,
+            "active" => {
+                self.active = value.try_bool()?;
+                Ok(())
+            },
+            "freq" => {
+                let info = find_param_info(self.get_params_info(), "freq");
+                let (v, r) = check_bounds(info, value.try_float()?, name);
+                self.freq_hz = v;
+                self.update_coefficients();
+                r
+            },
+            "q" => {
+                let info = find_param_info(self.get_params_info(), "q");
+                let (v, r) = check_bounds(info, value.try_float()?, name);
+                self.q = v;
+                self.update_coefficients();
+                r
+            },
+            "gain_db" => {
+                let info = find_param_info(self.get_params_info(), "gain_db");
+                let (v, r) = check_bounds(info, value.try_float()?, name);
+                self.gain_db = v;
+                self.update_coefficients();
+                r
+            },
+            _ => Err(format!("{name}: unknown param '{param}'")),
         }
     }
 }
@@ -148,24 +201,13 @@ impl Device for Eq {
 
     fn type_name(&self) -> &str {
         match self.eq_type {
-            EqType::Peak      => "eq_param",
-            EqType::LowShelf  => "eq_low",
-            EqType::HighShelf => "eq_high",
+            EqType::Peak      => NAME_MID,
+            EqType::LowShelf  => NAME_LOW,
+            EqType::HighShelf => NAME_HIGH,
         }
     }
 
     fn is_active(&self) -> bool { self.active }
-
-    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert("active".into(),  self.active.into());
-        m.insert("freq".into(),    self.freq_hz.into());
-        if self.eq_type == EqType::Peak {
-            m.insert("q".into(), self.q.into());
-        }
-        m.insert("gain_db".into(), self.gain_db.into());
-        m
-    }
 
     fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
         for e in eff.iter_mut() {

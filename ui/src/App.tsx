@@ -289,13 +289,6 @@ export default function App() {
     const handleSaveConfig = async (cfg: typeof audioConfig) => {
         if (await saveConfig(cfg)) {
             setAudioConfig(cfg);
-            if (state && cfg.delay_max_seconds < audioConfig.delay_max_seconds) {
-                state.chains.forEach(chain => chain.nodes.forEach(node => {
-                    if (node.type === 'delay' && typeof node.time === 'number' && node.time > cfg.delay_max_seconds) {
-                        handleSet(`${node.key}.time`, cfg.delay_max_seconds);
-                    }
-                }));
-            }
             return true;
         }
         return false;
@@ -364,7 +357,6 @@ export default function App() {
                         controllers={controllers}
                         devices={devices}
                         allNodes={state.chains.flatMap(c => c.nodes)}
-                        delayMaxSeconds={audioConfig.delay_max_seconds}
                         onSet={handleSet}
                         onDelete={handleDelete}
                         onReorder={handleReorder}

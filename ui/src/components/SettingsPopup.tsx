@@ -21,14 +21,12 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
     const [audio_device, setDevice] = useState(config.audio_device);
     const [in_channels, setInChannels] = useState(config.in_channels);
     const [out_channels, setOutChannels] = useState(config.out_channels);
-    const [delay_max_seconds, setDelayMaxSeconds] = useState(config.delay_max_seconds);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState(false);
 
     async function handleSave() {
-        const looper_max_seconds = 30; // @todo must be in the form?
         const ok = await onSave({ sample_rate, buffer_size, audio_device: audio_device,
-            in_channels, out_channels, delay_max_seconds, looper_max_seconds });
+            in_channels, out_channels });
         if (ok) { setSaved(true); setError(false); }
         else { setError(true); }
     }
@@ -57,10 +55,6 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
                     <FormRow label={t('ui.out_channels')}>
                         <input type="number" min={1} max={32} value={out_channels}
                             onChange={e => setOutChannels(Number(e.target.value))} className="preset-input" />
-                    </FormRow>
-                    <FormRow label={t('ui.delay_max')}>
-                        <input type="number" min={0.1} max={30} step={0.1} value={delay_max_seconds}
-                            onChange={e => setDelayMaxSeconds(Number(e.target.value))} className="preset-input" />
                     </FormRow>
                 </tbody>
             </table>

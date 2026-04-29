@@ -28,3 +28,9 @@ Thumbs.db
 
 # Frontend dependencies (build output ui/dist is tracked)
 ui/node_modules/
+
+# Claude and workflow related
+.claude
+CLAUDE.md
+PRODUCT.md
+todo.md

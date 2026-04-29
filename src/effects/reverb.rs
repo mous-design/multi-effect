@@ -1,4 +1,6 @@
-use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use std::collections::HashMap;
+use crate::engine::device::{override_float, find_param_info, check_bounds,
+    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
 // ---------------------------------------------------------------------------
@@ -9,6 +11,8 @@ const COMB_TUNING_L: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 161
 const COMB_TUNING_R: [usize; 8] = [1139, 1211, 1300, 1379, 1445, 1514, 1580, 1640];
 const ALLPASS_TUNING_L: [usize; 4] = [556, 441, 341, 225];
 const ALLPASS_TUNING_R: [usize; 4] = [579, 464, 364, 248];
+
+pub const NAME: &str = "reverb";
 
 fn scale_size(size: usize, sample_rate: f32) -> usize {
     ((size as f32 * sample_rate / 44100.0) as usize).max(1)
@@ -87,18 +91,62 @@ impl AllpassFilter {
 /// - `wet`       (0–1): output level, same for both channels
 /// - `wet_l` / `wet_r`: per-channel output level
 pub struct Reverb {
+    params_info: [ParamInfo; 4],
     pub key: String,
     combs: [Vec<CombFilter>; 2],
     allpasses: [Vec<AllpassFilter>; 2],
+    pub active: bool,
     pub room_size: f32,
     pub damping: f32,
     /// Per-channel output level: `[left, right]`.
     pub wet: [f32; 2],
-    pub active: bool,
+    /// `wet[ch] / num_combs` — precomputed in `update_params` so the audio
+    /// loop does a single multiply instead of a multiply + divide per sample.
+    wet_norm: [f32; 2],
+}
+
+fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
+    [
+        ParamInfo::new_discrete_bool("active", true, None),
+        ParamInfo::new_continuous_float(
+            "room_size",
+            override_float(param_type_props, "reverb.room_size.min", 0.0),
+            override_float(param_type_props, "reverb.room_size.max", 1.0),
+            override_float(param_type_props, "reverb.room_size.default", 0.7),
+            false,
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_float(
+            "damping",
+            override_float(param_type_props, "reverb.damping.min", 0.0),
+            override_float(param_type_props, "reverb.damping.max", 1.0),
+            override_float(param_type_props, "reverb.damping.default", 0.5),
+            false,
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_float(
+            "wet",
+            override_float(param_type_props, "reverb.wet.min", 0.0),
+            override_float(param_type_props, "reverb.wet.max", 1.0),
+            override_float(param_type_props, "reverb.wet.default", 0.3),
+            false,
+            None,
+            None,
+        ),
+    ]
 }
 
 impl Reverb {
-    pub fn new(key: impl Into<String>, sample_rate: f32) -> Self {
+    pub fn new(key: impl Into<String>, sample_rate: f32,
+        param_type_props: &HashMap<String, OverrideValue>) -> Self {
+        let params_info = build_params_info(param_type_props);
+        let active = find_param_info(&params_info,"active").bool_default();
+        let room_size = find_param_info(&params_info,"room_size").continuous_float_default();
+        let damping = find_param_info(&params_info,"damping").continuous_float_default();
+        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+
         let build_combs = |tuning: &[usize]| {
             tuning.iter().map(|&s| CombFilter::new(scale_size(s, sample_rate))).collect()
         };
@@ -107,13 +155,10 @@ impl Reverb {
         };
 
         let mut r = Self {
-            key: key.into(),
+            params_info, key: key.into(),
             combs: [build_combs(&COMB_TUNING_L), build_combs(&COMB_TUNING_R)],
             allpasses: [build_allpasses(&ALLPASS_TUNING_L), build_allpasses(&ALLPASS_TUNING_R)],
-            room_size: 0.7,
-            damping: 0.5,
-            wet: [0.3; 2],
-            active: true,
+            active, room_size, damping, wet: [wet; 2], wet_norm: [0.0; 2],
         };
         r.update_params();
         r
@@ -122,39 +167,52 @@ impl Reverb {
     fn update_params(&mut self) {
         let feedback = self.room_size * 0.28 + 0.70;
         let damp = self.damping * 0.4; // Freeverb scaleDamp: user 1.0 → internal 0.4
+        let inv_num_combs = 1.0 / self.combs[0].len() as f32;
         for ch in 0..2 {
             for comb in &mut self.combs[ch] {
                 comb.feedback = feedback;
                 comb.damp = damp;
             }
+            self.wet_norm[ch] = self.wet[ch] * inv_num_combs;
         }
     }
 }
 
 impl Parameterized for Reverb {
-    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
-        match param {
-            "active"    => { self.active = value.try_bool()?; Ok(()) }
-            "room_size" => { let (v, r) = check_bounds("Reverb", "room_size", value.try_float()?, 0.0, 1.0); self.room_size = v; self.update_params(); r }
-            "damping"   => { let (v, r) = check_bounds("Reverb", "damping",   value.try_float()?, 0.0, 1.0); self.damping   = v; self.update_params(); r }
-            "wet"       => {
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds("Reverb", "wet", l, 0.0, 1.0);
-                let (vr, rr) = check_bounds("Reverb", "wet", r, 0.0, 1.0);
-                self.wet = [vl, vr];
-                rl.and(rr)
-            },
-            _ => Err(format!("Reverb: unknown param '{param}'")),
-        }
+    fn get_params_info(&self) -> &[ParamInfo] {
+        &self.params_info
     }
 
-    fn get_param(&self, param: &str) -> Option<f32> {
+    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         match param {
-            "active"    => Some(if self.active { 1.0 } else { 0.0 }),
-            "room_size" => Some(self.room_size),
-            "damping"   => Some(self.damping),
-            "wet"       => Some(self.wet[0]),
-            _ => None,
+            "active" => {
+                self.active = value.try_bool()?;
+                Ok(())
+            },
+            "room_size" => {
+                let info = find_param_info(self.get_params_info(), "room_size");
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.room_size = v;
+                self.update_params();
+                r
+            },
+            "damping" => {
+                let info = find_param_info(self.get_params_info(), "damping");
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.damping = v;
+                self.update_params();
+                r
+            },
+            "wet" => {
+                let info = find_param_info(self.get_params_info(), "wet");
+                let [l, r] = value.try_stereo()?;
+                let (vl, rl) = check_bounds(info, l, NAME);
+                let (vr, rr) = check_bounds(info, r, NAME);
+                self.wet = [vl, vr];
+                self.update_params();
+                rl.and(rr)
+            },
+            _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }
 }
@@ -162,22 +220,11 @@ impl Parameterized for Reverb {
 impl Device for Reverb {
     fn key(&self) -> &str { &self.key }
 
-    fn type_name(&self) -> &str { "reverb" }
+    fn type_name(&self) -> &str { NAME }
 
     fn is_active(&self) -> bool { self.active }
 
-    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert("active".into(),    self.active.into());
-        m.insert("room_size".into(), self.room_size.into());
-        m.insert("damping".into(),   self.damping.into());
-        m.insert("wet".into(),       serde_json::json!(self.wet));
-        m
-    }
-
     fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
-        let num_combs = self.combs[0].len() as f32;
-
         for e in eff.iter_mut() {
             let inp = *e;
             // Mono mix of current signal; L/R decorrelate via different delay tunings.
@@ -194,7 +241,7 @@ impl Device for Reverb {
                     sig = ap.process(sig);
                 }
 
-                e[ch] = inp[ch] + sig * self.wet[ch] / num_combs;
+                e[ch] = inp[ch] + sig * self.wet_norm[ch];
             }
         }
     }

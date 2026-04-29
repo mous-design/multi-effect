@@ -9,7 +9,7 @@ const EQ_PARAMS: Record<string, { min: number; max: number; label: string; unit?
 };
 
 const TYPE_SHORT: Record<string, string> = {
-  eq_param: 'Peak',
+  eq_mid: 'Peak',
   eq_low:   'Low',
   eq_high:  'High',
 };

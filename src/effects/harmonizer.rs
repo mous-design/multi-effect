@@ -1,8 +1,9 @@
 use std::f32::consts::TAU;
-
+use std::collections::HashMap;
 use tracing::debug;
 
-use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{override_float, override_int, find_param_info, check_bounds,
+    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -19,6 +20,8 @@ const DEFAULT_GRAIN_MS: f32 = 50.0;
 
 /// Note-off fade time in milliseconds.
 const RELEASE_MS: f32 = 50.0;
+
+pub const NAME: &str = "harmonizer";
 
 // ---------------------------------------------------------------------------
 // Voice
@@ -79,13 +82,14 @@ fn lerp_frame(buf: &[Frame], pos: f32, n: usize) -> Frame {
 /// # MIDI
 /// Note On → start voice.  Note Off → begin 50 ms fade-out.
 pub struct Harmonizer {
+    params_info: [ParamInfo; 4],
     pub key:     String,
     pub active:  bool,
-    pub wet:     [f32; 2],
     /// MIDI note that plays back at 1:1 speed (unshifted).
     pub root:      u8,
     /// Velocity sensitivity: 0.0 = ignore velocity (fixed volume), 1.0 = full sensitivity.
     pub vel_sense: f32,
+    pub wet:     [f32; 2],
 
     input_buf:   Vec<Frame>,
     write_pos:   usize,
@@ -96,11 +100,50 @@ pub struct Harmonizer {
 
     sample_rate: f32,
     voices:      Vec<Voice>,
-    debug_tick:  u32,   // rate-limiter for in-process debug logging
+    debug_tick:  u32, // rate-limiter for in-process debug logging
 }
 
+fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
+    [
+        ParamInfo::new_discrete_bool("active", true, None),
+        ParamInfo::new_continuous_int(
+            "root",
+            override_int(param_type_props, "harmonizer.root.min", 0),
+            override_int(param_type_props, "harmonizer.root.max", 127),
+            override_int(param_type_props, "harmonizer.root.default", 57),
+            None,
+            None
+        ),
+        ParamInfo::new_continuous_float(
+            "vel_sense",
+            override_float(param_type_props, "harmonizer.vel_sense.min", 0.0),
+            override_float(param_type_props, "harmonizer.vel_sense.max", 1.0),
+            override_float(param_type_props, "harmonizer.vel_sense.default", 0.0),
+            false,
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_float(
+            "wet",
+            override_float(param_type_props, "harmonizer.wet.min", 0.0),
+            override_float(param_type_props, "harmonizer.wet.max", 1.0),
+            override_float(param_type_props, "harmonizer.wet.default", 0.5),
+            false,
+            None,
+            None,
+        ),
+    ]
+}
 impl Harmonizer {
-    pub fn new(key: impl Into<String>, sample_rate: f32) -> Self {
+    pub fn new(key: impl Into<String>, sample_rate: f32,
+        param_type_props: &HashMap<String, OverrideValue>) -> Self {
+
+        let params_info = build_params_info(param_type_props);
+        let active = find_param_info(&params_info,"active").bool_default();
+        let root = find_param_info(&params_info,"root").continuous_int_default() as u8;
+        let vel_sense = find_param_info(&params_info,"vel_sense").continuous_float_default();
+        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+
         let buf_size   = (sample_rate * INPUT_BUF_MS / 1000.0) as usize;
         // Grain size in samples (no power-of-two rounding — must stay well below buf_size/2)
         let grain_size = ((sample_rate * DEFAULT_GRAIN_MS / 1000.0) as usize).max(64);
@@ -110,11 +153,8 @@ impl Harmonizer {
             .collect();
 
         Self {
-            key:         key.into(),
-            active:      true,
-            wet:         [1.0; 2],
-            root:      57, // A3
-            vel_sense: 0.0,
+            params_info, key: key.into(),
+            active, wet: [wet; 2], root, vel_sense,
             input_buf:   vec![[0.0; 2]; buf_size],
             write_pos:   0,
             buf_size,
@@ -169,37 +209,37 @@ impl Harmonizer {
 // ---------------------------------------------------------------------------
 
 impl Parameterized for Harmonizer {
+     fn get_params_info(&self) -> &[ParamInfo] {
+        &self.params_info
+    }
+
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         match param {
-            "active" => { self.active = value.try_bool()?; Ok(()) }
-            "wet" => {
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds("Harmonizer", "wet", l, 0.0, 1.0);
-                let (vr, rr) = check_bounds("Harmonizer", "wet", r, 0.0, 1.0);
-                self.wet = [vl, vr];
-                rl.and(rr)
+            "active" => {
+                self.active = value.try_bool()?;
+                Ok(())
             },
             "root" => {
-                let (v, r) = check_bounds("Harmonizer", "root", value.try_float()?, 0.0, 127.0);
+                let info = find_param_info(self.get_params_info(), "root");
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
                 self.root = v as u8;
                 r
             },
             "vel_sense" => {
-                let (v, r) = check_bounds("Harmonizer", "vel_sense", value.try_float()?, 0.0, 1.0);
+                let info = find_param_info(self.get_params_info(), "vel_sense");
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
                 self.vel_sense = v;
                 r
             },
-            _ => Err(format!("Harmonizer: unknown param '{param}'")),
-        }
-    }
-
-    fn get_param(&self, param: &str) -> Option<f32> {
-        match param {
-            "active" => Some(if self.active { 1.0 } else { 0.0 }),
-            "wet"       => Some(self.wet[0]),
-            "root"      => Some(self.root as f32),
-            "vel_sense" => Some(self.vel_sense),
-            _           => None,
+            "wet" => {
+                let info = find_param_info(self.get_params_info(), "wet");
+                let [l, r] = value.try_stereo()?;
+                let (vl, rl) = check_bounds(info, l, NAME);
+                let (vr, rr) = check_bounds(info, r, NAME);
+                self.wet = [vl, vr];
+                rl.and(rr)
+            },
+            _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }
 }
@@ -210,17 +250,8 @@ impl Parameterized for Harmonizer {
 
 impl Device for Harmonizer {
     fn key(&self)       -> &str  { &self.key }
-    fn type_name(&self) -> &str  { "harmonizer" }
+    fn type_name(&self) -> &str  { NAME }
     fn is_active(&self) -> bool  { self.active }
-
-    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert("active".into(), self.active.into());
-        m.insert("wet".into(),    serde_json::json!(self.wet));
-        m.insert("root".into(),      serde_json::json!(self.root));
-        m.insert("vel_sense".into(), serde_json::json!(self.vel_sense));
-        m
-    }
 
     fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
         let gs   = self.grain_size;
@@ -242,7 +273,7 @@ impl Device for Harmonizer {
                 let b_phase    = (phase + half) % gs;
                 let ratio      = self.voices[vi].ratio;
                 let raw_vel    = self.voices[vi].velocity;
-        let vel        = self.vel_sense * raw_vel + (1.0 - self.vel_sense);
+                let vel        = self.vel_sense * raw_vel + (1.0 - self.vel_sense);
                 let rel        = self.voices[vi].release;
                 let sust       = self.voices[vi].sustaining;
                 let rstep      = self.voices[vi].release_step;
@@ -327,7 +358,7 @@ impl Device for Harmonizer {
         // MIDI spec: note-on with velocity 0 = note-off
         if velocity == 0 { self.on_note_off(note); return; }
         let semitones = note as f32 - self.root as f32;
-        let ratio     = 2.0_f32.powf(semitones / 12.0);
+        let ratio: f32     = 2.0_f32.powf(semitones / 12.0);
         debug!("Harmonizer '{}': note-on {} vel={} root={} ratio={:.3} voices={}/{}",
             self.key, note, velocity, self.root, ratio, self.voices.len() + 1, MAX_VOICES);
         self.add_voice(note, velocity);

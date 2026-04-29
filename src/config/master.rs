@@ -241,7 +241,6 @@ impl ConfigMaster {
         if let Some(v) = config.audio_device   { self.cfg.audio_device      = v.to_string(); }
         if let Some(v) = config.in_channels       { self.cfg.in_channels       = v as u16; }
         if let Some(v) = config.out_channels      { self.cfg.out_channels      = v as u16; }
-        if let Some(v) = config.delay_max_seconds { self.cfg.delay_max_seconds = v as f32; }
         self.cfg.persist()?;
         info!("Updated config [source={source}]");
         Ok(())

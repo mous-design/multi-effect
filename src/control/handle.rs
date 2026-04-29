@@ -42,7 +42,7 @@ where
                 msg = bus_rx.recv() => {
                     let msg = match msg {
                         Ok(m)  => m,
-                        Err(_) => break,  // bus closed
+                        Err(_) => break, // bus closed
                     };
                     if msg.source() == source { continue; }
 
@@ -54,8 +54,8 @@ where
                                 // `raw` is pre-smart-rounded by master. Default Display prints
                                 // the shortest round-trippable form (e.g. "63.5" not "63.5000").
                                 Ok(Some((ch, raw))) => format!("CTRL {ch} {raw}\n"),
-                                // No reverse mapping: emit the raw param value. Once `get_params`
-                                // exists we can smart-round-target using the param's known range.
+                                // No reverse mapping: emit the raw param value. Could be
+                                // smart-round-targeted via the param's `ParamInfo.round_multiplier`.
                                 _ => format!("SET {path} {value}\n"),
                             }
                         },
@@ -81,7 +81,7 @@ where
                                 break; // peer disconnected
                             }
                         },
-                        None => break,  // inbound dropped ack_tx
+                        None => break, // inbound dropped ack_tx
                     }
                 }
             }
@@ -215,7 +215,7 @@ async fn handle_command(
                 source, slot, resp: Some(tx),
             }).await?;
             "OK\n".into()
-        },        
+        },
         "COMPARE" => {
             snd_request(master_tx, |tx| ConfigRequest::ToggleCompare {
                 source: source.clone(), resp: Some(tx),

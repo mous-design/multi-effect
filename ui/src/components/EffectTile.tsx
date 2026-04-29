@@ -10,16 +10,16 @@ export const PARAM_META: Record<string, { min: number; max: number; unit?: strin
   dry:       { min: 0,    max: 1              },
   gain:      { min: 0,    max: 4              },
   feedback:  { min: 0,    max: 1              },
-  time:      { min: 0,    max: 2,   unit: 's'  },
+  time:      { min: 0,    max: 2,   unit: 's' },
   room_size: { min: 0,    max: 1              },
   damping:   { min: 0,    max: 1              },
   pan:       { min: -1,   max: 1              },
-  rate_hz:   { min: 0.1,  max: 10,  unit: 'Hz' },
-  depth_ms:  { min: 0,    max: 30,  unit: 'ms' },
+  rate_hz:   { min: 0.1,  max: 10,  unit: 'Hz'},
+  depth_ms:  { min: 0,    max: 30,  unit: 'ms'},
   root:      { min: 0,    max: 127            },
   vel_sense: { min: 0,    max: 1              },
   freq:      { min: 50,   max: 10000, unit: 'Hz', log: true },
-  gain_db:   { min: -15,  max: 15,  unit: 'dB' },
+  gain_db:   { min: -15,  max: 15,  unit: 'dB'},
   q:         { min: 0.1,  max: 5              },
   loop_gain: { min: 0,    max: 4              },
 };
@@ -28,14 +28,14 @@ const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 
 
 const PARAM_ORDER: Record<string, string[]> = {
   mix:      ['gain', 'pan', 'dry', 'wet'],
-  eq_param: ['freq', 'gain_db', 'q'],
+  eq_mid: ['freq', 'gain_db', 'q'],
   eq_low:   ['gain_db', 'freq'],
   eq_high:  ['gain_db', 'freq'],
 };
 
 const DEFAULT_HIDDEN: Record<string, string[]> = {
   mix:      ['dry', 'wet'],
-  eq_param: ['q'],
+  eq_mid: ['q'],
   eq_low:   ['freq'],
   eq_high:  ['freq'],
   looper:   ['transport'],
@@ -104,7 +104,6 @@ function saveHidden(preset: string, nodeKey: string, hidden: Set<string>) {
 interface Props {
   node: NodeDef;
   presetName: string;
-  delayMaxSeconds?: number;
   onSet: (path: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
 }
@@ -152,7 +151,7 @@ function useLooperTimer(node: NodeDef): string {
   return `${sInt}.${sTenth}`;
 }
 
-export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete }: Props) {
+export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
   const [hidden, setHidden] = useState(() => loadHidden(presetName, node.key, node.type));
   const [expanded, setExpanded] = useState(false);
   const looperTime = useLooperTimer(node);
@@ -202,9 +201,9 @@ export function EffectTile({ node, presetName, delayMaxSeconds, onSet, onDelete 
     const scalar = scalarOf(val);
     if (scalar !== null) {
       const meta = { ...(PARAM_META[param] ?? { min: 0, max: 1 }) };
-      if (param === 'time' && node.type === 'delay' && delayMaxSeconds !== undefined) {
-        meta.max = delayMaxSeconds;
-      }
+    //   if (param === 'time' && node.type === 'delay' && delayMaxSeconds !== undefined) {
+    //     meta.max = delayMaxSeconds;
+    //   }
       return <Knob nodeKey={node.key} param={param}
         value={scalar} min={meta.min} max={meta.max}
         label={t(`param.${param}`)} unit={meta.unit} log={meta.log}

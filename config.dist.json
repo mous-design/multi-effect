@@ -6,9 +6,6 @@
   "out_channels": 2,
   "control_port": 9000,
 
-  "delay_max_seconds":  2.0,
-  "looper_max_seconds": 30.0,
-
   "active_preset": 1,
   "presets": {
     "1": {

@@ -4,8 +4,7 @@ import { fetchConfig, fetchDevices, createWs } from '../api';
 
 const DEFAULT_CONFIG: AudioConfig = {
     in_channels: 2, out_channels: 2, sample_rate: 48000,
-    buffer_size: 256, audio_device: 'default', delay_max_seconds: 2.0,
-    looper_max_seconds: 30.0
+    buffer_size: 256, audio_device: 'default'
 };
 
 export function useConnection(onMessage: (msg: string, param: string) => void) {

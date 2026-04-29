@@ -5,7 +5,7 @@ import { MappingsPanel } from './MappingsPanel';
 import { ConfirmDelete } from './ConfirmDelete';
 import { t } from '../i18n';
 
-const EQ_TYPES = new Set(['eq_param', 'eq_low', 'eq_high']);
+const EQ_TYPES = new Set(['eq_mid', 'eq_low', 'eq_high']);
 
 type NodeItem = NodeDef | NodeDef[];
 
@@ -36,7 +36,7 @@ function itemKey(item: NodeItem): string {
   return Array.isArray(item) ? item.map(n => n.key).join('|') : item.key;
 }
 
-const EFFECT_TYPES = ['delay', 'reverb', 'chorus', 'looper', 'mix', 'eq_param', 'eq_low', 'eq_high'];
+const EFFECT_TYPES = ['delay', 'reverb', 'chorus', 'looper', 'mix', 'eq_mid', 'eq_low', 'eq_high'];
 
 const DEFAULT_PARAMS: Record<string, object> = {
   delay:      { time: 0.3, feedback: 0.4, wet: 0.5, active: true },
@@ -45,8 +45,8 @@ const DEFAULT_PARAMS: Record<string, object> = {
   harmonizer: { root: 57, wet: 0.5, vel_sense: 0.0, active: true },
   looper:     { wet: 1.0, decay: 1.0, active: true },
   mix:        { dry: 0.0, wet: 1.0, gain: 1.0, pan: 0.0, active: true },
-  eq_param:   { freq: 1000, gain_db: 0, q: 1.0, active: true },
-  eq_low:     { freq: 200,  gain_db: 0, active: true },
+  eq_mid:     { freq: 1000, gain_db: 0, q: 1.0, active: true },
+  eq_low:     { freq: 200, gain_db: 0, active: true },
   eq_high:    { freq: 8000, gain_db: 0, active: true },
 };
 
@@ -57,7 +57,6 @@ interface Props {
   controllers: ControllerDef[];
   devices: DeviceMap;
   allNodes: NodeDef[];
-  delayMaxSeconds: number;
   onSet: (path: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
   onReorder: (chainIdx: number, newNodes: NodeDef[]) => void;
@@ -67,7 +66,7 @@ interface Props {
   onSaveControllers: (controllers: ControllerDef[]) => void;
 }
 
-export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, delayMaxSeconds, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
+export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
   const items = groupNodes(chain.nodes);
 
   const [mappingsOpen, setMappingsOpen] = useState(false);
@@ -219,12 +218,12 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
                 <div className="eq-group-wrapper">
                   {item.map((node) => (
                     <div key={node.key} className="eq-band-wrapper">
-                      <EffectTile node={node} presetName={presetName} delayMaxSeconds={delayMaxSeconds} onSet={onSet} onDelete={onDelete} />
+                      <EffectTile node={node} presetName={presetName} onSet={onSet} onDelete={onDelete} />
                     </div>
                   ))}
                 </div>
               ) : (
-                <EffectTile node={item} presetName={presetName} delayMaxSeconds={delayMaxSeconds} onSet={onSet} onDelete={onDelete} />
+                <EffectTile node={item} presetName={presetName} onSet={onSet} onDelete={onDelete} />
               )}
             </div>
           );

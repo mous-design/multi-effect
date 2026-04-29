@@ -1,4 +1,5 @@
 pub mod device;
+pub mod mix;
 pub mod patch;
 pub mod ring_buffer;
 
@@ -181,8 +182,8 @@ impl AudioEngine {
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let n_out = data.len();
                 let n_in  = n_out / out_ch * in_ch;
-                if n_in  > in_buf.len()  { in_buf.resize(n_in,   0.0); }
-                if n_out > out_buf.len() { out_buf.resize(n_out,  0.0); }
+                if n_in  > in_buf.len()  { in_buf.resize(n_in, 0.0); }
+                if n_out > out_buf.len() { out_buf.resize(n_out, 0.0); }
                 for s in in_buf[..n_in].iter_mut() { *s = in_rx.pop().unwrap_or(0.0); }
                 self.process_block(&in_buf[..n_in], &mut out_buf[..n_out]);
                 data.copy_from_slice(&out_buf[..n_out]);

@@ -40,9 +40,6 @@ Audio device, sample rate, buffer size, etc. are configured in `config.json` —
   "audio_device":        "default",
   "in_channels":         1,
   "out_channels":        2,
-  "delay_max_seconds":   2.0,
-  "looper_max_seconds":  30.0,
-  "looper_max_buffers":  8,
   "http_port":           8080,
   "log_target":          "stderr",
   "state_save_path":     "/tmp/multi-effect-state.json",
@@ -61,9 +58,6 @@ Audio device, sample rate, buffer size, etc. are configured in `config.json` —
 | `audio_device` | string | `"default"` | CPAL device name (or `"default"`) |
 | `in_channels` | u16 | 2 | Physical input channels |
 | `out_channels` | u16 | 2 | Physical output channels |
-| `delay_max_seconds` | f32 | 2.0 | Delay buffer size at startup |
-| `looper_max_seconds` | f32 | 30.0 | Looper buffer[0] size at startup |
-| `looper_max_buffers` | usize | 8 | Max overdub layers |
 | `http_port` | u16 | 8080 | HTTP/WebSocket port (0 = disabled) |
 | `log_target` | string | `"stderr"` | `"stderr"` or `"syslog"` |
 | `state_save_path` | path | `/tmp/multi-effect-state.json` | Where snapshot state is persisted |
@@ -112,7 +106,7 @@ All numeric params accept integers or floats. Out-of-range values are clamped an
 
 | Parameter  | Range        | Default | Description                       |
 |------------|--------------|---------|-----------------------------------|
-| `time`     | 0.0 – `delay_max_seconds` | 0.5 | Delay time in **seconds** |
+| `time`     | 0.0 – 2.0    | 0.5     | Delay time in **seconds** |
 | `feedback` | 0.0 – 1.0    | 0.4     | Feedback amount (0 = single echo) |
 | `wet`      | 0.0 – 1.0    | 0.5     | Output level                      |
 | `active`   | bool         | true    | Bypass when false                 |

@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use crate::control::{ControlMessage, EventBus};
-use crate::engine::device::{check_bounds, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{override_float, override_int, find_param_info, check_bounds,
+    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
 use tracing::warn;
 
 const LOOP_FADE_SAMPLES: usize = 8;
 const LOOP_FADE_STEP: f32 = 1.0 / LOOP_FADE_SAMPLES as f32;
+
+pub const NAME: &str = "looper";
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -67,7 +71,7 @@ pub enum LooperState {
 ///
 /// # Buffer management
 ///
-/// - `buffers[0]` is pre-allocated at `init_len` samples (from `looper_max_seconds`).
+/// - `buffers[0]` is pre-allocated at `init_len` samples (from `max_seconds`).
 /// - Additional overdub buffers are allocated on demand at `loop_len` each.
 /// - `max_buffers = 0` means unlimited (memory only limit).
 /// - When the stack is full: merge `buffers[0] + buffers[1]` → `buffers[0]`
@@ -83,6 +87,7 @@ pub enum LooperState {
 /// | `decay` | 0.0–1.0 | 1.0     | Per-sample decay applied each loop pass      |
 /// | `action`| string  | —       | See actions — dispatched via set_action      |
 pub struct Looper {
+    params_info: [ParamInfo; 5],
     pub key:    String,
     pub active: bool,
 
@@ -108,34 +113,83 @@ pub struct Looper {
 
     sample_rate: f32,
     #[allow(dead_code)]
-    init_len:    usize,  // initial capacity of buffers[0]
+    init_len:    usize, // initial capacity of buffers[0]
 
     // Event bus: set via init_bus(), used to fire NodeEvent messages.
     event_bus: Option<EventBus>,
 }
 
+fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 5] {
+    [
+        ParamInfo::new_discrete_bool("active", true, None),
+        ParamInfo::new_continuous_float(
+            "decay",
+            override_float(param_type_props, "looper.decay.min", 0.0),
+            override_float(param_type_props, "looper.decay.max", 1.0),
+            override_float(param_type_props, "looper.decay.default", 1.0),
+            false,
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_float(
+            "max_seconds",
+            override_float(param_type_props, "looper.max_seconds.min", 1.0),
+            override_float(param_type_props, "looper.max_seconds.max", 300.0),
+            override_float(param_type_props, "looper.max_seconds.default", 30.0),
+            false,
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_int(
+            "max_buffers",
+            override_int(param_type_props, "looper.max_buffers.min", 0),
+            override_int(param_type_props, "looper.max_buffers.max", 16),
+            override_int(param_type_props, "looper.max_buffers.default",4),
+            None,
+            None,
+        ),
+        ParamInfo::new_continuous_float(
+            "wet",
+            override_float(param_type_props, "looper.wet.min", 0.0),
+            override_float(param_type_props, "looper.wet.max", 1.0),
+            override_float(param_type_props, "looper.wet.default", 0.5),
+            false,
+            None,
+            None,
+        ),
+    ]
+}
 impl Looper {
-    pub fn new(key: impl Into<String>, sample_rate: f32, max_seconds: f32, max_buffers: usize) -> Self {
+    pub fn new(key: impl Into<String>, sample_rate: f32, 
+        param_type_props: &HashMap<String, OverrideValue>) -> Self {
+        let params_info = build_params_info(param_type_props);
+        let active = find_param_info(&params_info,"active").bool_default();
+        let decay = find_param_info(&params_info,"decay").continuous_float_default();
+        let max_seconds = find_param_info(&params_info,"max_seconds").continuous_float_default();
+        let max_buffers = find_param_info(&params_info,"max_buffers").continuous_int_default() as usize;
+        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+
         let init_len = (sample_rate * max_seconds) as usize;
-        let sample_rate_stored = sample_rate;
         // Pre-allocate buffer[0] (OS gives us lazily-zeroed pages)
         let buf0 = vec![[0.0f32; 2]; init_len];
         Self {
-            key:           key.into(),
-            active:        true,
+            params_info, key: key.into(),
             state:         LooperState::Idle,
             current_pos:   0,
             loop_len:      0,
             buffers:       vec![buf0],
             merge_buf:     Vec::new(),
             overdub_count: 0,
-            max_buffers,
-            wet:           1.0,
-            decay:         1.0,
+            active,
+            decay,
+
             fade_gain:     1.0,
             fade_delta:    0.0,
             stopping:      false,
-            sample_rate:   sample_rate_stored,
+
+            max_buffers,
+            wet, 
+            sample_rate,
             init_len,
             event_bus:     None,
         }
@@ -609,27 +663,8 @@ impl Looper {
 
 impl Device for Looper {
     fn key(&self)       -> &str  { &self.key }
-    fn type_name(&self) -> &str  { "looper" }
+    fn type_name(&self) -> &str  { NAME }
     fn is_active(&self) -> bool  { self.active }
-
-    fn to_params(&self) -> serde_json::Map<String, serde_json::Value> {
-        let mut m = serde_json::Map::new();
-        m.insert("active".into(),        self.active.into());
-        m.insert("wet".into(),           self.wet.into());
-        m.insert("decay".into(),         self.decay.into());
-        m.insert("state".into(),         format!("{:?}", self.state).into());
-        m.insert("overdub_count".into(), (self.overdub_count as f64).into());
-        m.insert("max_buffers".into(),   (self.max_buffers as f64).into());
-        let loop_secs = if self.sample_rate > 0.0 && self.loop_len > 0 {
-            self.loop_len as f32 / self.sample_rate
-        } else { 0.0 };
-        m.insert("loop_secs".into(), (loop_secs as f64).into());
-        let pos_secs = if self.sample_rate > 0.0 {
-            self.current_pos as f32 / self.sample_rate
-        } else { 0.0 };
-        m.insert("pos_secs".into(), (pos_secs as f64).into());
-        m
-    }
 
     fn init_bus(&mut self, bus: &crate::control::EventBus) {
         self.event_bus = Some(bus.clone());
@@ -769,42 +804,9 @@ impl Device for Looper {
     fn reset(&mut self) {
         self.do_reset();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Parameterized impl
-// ---------------------------------------------------------------------------
-
-impl Parameterized for Looper {
-    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
-        match param {
-            "active"   => { self.active = value.try_bool()?; Ok(()) }
-            "wet"      => { let (v, r) = check_bounds("Looper", "wet",   value.try_float()?, 0.0, 4.0); self.wet   = v; r }
-            "decay"    => { let (v, r) = check_bounds("Looper", "decay", value.try_float()?, 0.0, 1.0); self.decay = v; r }
-            "pos_secs" => {
-                let secs     = value.try_float()?;
-                let max_secs = if self.loop_len > 0 && self.sample_rate > 0.0 {
-                    self.loop_len as f32 / self.sample_rate
-                } else { 0.0 };
-                self.current_pos = (secs.clamp(0.0, max_secs) * self.sample_rate) as usize;
-                Ok(())
-            },
-            _ => Err(format!("Looper: unknown param '{param}'")),
-        }
-    }
-
-    fn get_param(&self, param: &str) -> Option<f32> {
-        match param {
-            "active" => Some(if self.active { 1.0 } else { 0.0 }),
-            "wet"    => Some(self.wet),
-            "decay"  => Some(self.decay),
-            _ => None,
-        }
-    }
-
     fn set_action(&mut self, param: &str, action: &str) -> Result<(), String> {
         if param != "action" {
-            return Err(format!("Looper: unknown action param '{param}'"));
+            return Err(format!("{}: unknown action param '{param}'", NAME));
         }
         match action {
             "rec" | "play" | "pause" | "stop" | "reset" | "undo" => self.dispatch_primitive(action),
@@ -813,4 +815,46 @@ impl Parameterized for Looper {
         Ok(())
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// Parameterized impl
+// ---------------------------------------------------------------------------
+
+impl Parameterized for Looper {
+    fn get_params_info(&self) -> &[ParamInfo] {
+        &self.params_info
+    }
+
+    fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        match param {
+            "active" => {
+                self.active = value.try_bool()?;
+                Ok(())
+            },
+            "decay"    => {
+                let info = find_param_info(self.get_params_info(), "decay");
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.decay = v;
+                r
+            },
+            "wet" => {
+                let info = find_param_info(self.get_params_info(), "wet");
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.wet   = v;
+                r
+            },
+            // Maybe this isn't right. Maybe should be action play <secs>
+            "pos_secs" => {
+                let secs     = value.try_float()?;
+                let max_secs = if self.loop_len > 0 && self.sample_rate > 0.0 {
+                    self.loop_len as f32 / self.sample_rate
+                } else { 0.0 };
+                self.current_pos = (secs.clamp(0.0, max_secs) * self.sample_rate) as usize;
+                Ok(())
+            },
+            "max_seconds" | "max_buffers" => Err(format!("{}: '{param}' is construct only and cannot be set", NAME)),
+            _ => Err(format!("{}: unknown param '{param}'", NAME)),
+        }
+    }
 }
