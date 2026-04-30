@@ -17,16 +17,16 @@ pub const NAME: &str = "mix";
 /// - `pan`:  -1.0 = full left, 0.0 = centre, +1.0 = full right.  Default: `0.0`.
 pub struct Mix {
     params_info: [ParamInfo; 5],
-    pub key: String,
+    key: String,
     /// Per-channel gain applied to the dry signal
-    pub dry: [f32; 2],
+    dry: [f32; 2],
     /// Per-channel gain applied to the accumulated effect signal
-    pub wet: [f32; 2],
+    wet: [f32; 2],
     /// Overall output level (0.0 = silence, 1.0 = unity). Default: 1.0.
-    pub gain: f32,
+    gain: f32,
     /// Pan: -1.0 = full left, 0.0 = centre, +1.0 = full right. Default: 0.0.
-    pub pan: f32,
-    pub active: bool,
+    pan: f32,
+    active: bool,
 }
  
 fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 5] {
@@ -35,22 +35,22 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
         ParamInfo::new_continuous_float(
             "dry", 0.0, 1.0, // Hardcoded ranges, these are structural.
             override_float(param_type_props, "mix.dry.default", 1.0),
-            false, None, None,
+            false, None,
         ),
         ParamInfo::new_continuous_float(
             "wet", 0.0, 1.0, // Hardcoded ranges, these are structural.
             override_float(param_type_props, "mix.wet.default", 1.0),
-            false, None, None,
+            false, None,
         ),
         ParamInfo::new_continuous_float(
             "gain", 0.0, 1.0, // Hardcoded ranges, these are structural.
             override_float(param_type_props, "mix.gain.default", 1.0),
-            false, None, None,
+            false, None,
         ),
         ParamInfo::new_continuous_float(
             "pan", -1.0, 1.0, // Hardcoded ranges, these are structural.
             override_float(param_type_props, "mix.pan.default", 0.0),
-            false, None, None,
+            false, None,
         ),
     ]
 }

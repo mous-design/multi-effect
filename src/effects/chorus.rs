@@ -25,13 +25,13 @@ pub const NAME: &str = "chorus";
 /// Output is **effect-only** — dry is handled by the `Chain`.
 pub struct Chorus {
     params_info: [ParamInfo; 4],
-    pub key: String,
+    key: String,
     bufs: [RingBuffer; 2],
-    pub active: bool,
-    pub rate_hz: f32,
-    pub depth_ms: f32,
+    active: bool,
+    rate_hz: f32,
+    depth_ms: f32,
     /// Per-channel output level: `[left, right]`. 0.0 = silent, 1.0 = full.
-    pub wet: [f32; 2],
+    wet: [f32; 2],
     sample_rate: f32,
     lfo_phase: [f32; 2],
 }
@@ -44,7 +44,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "chorus.rate_hz.max", 10.0),
             override_float(param_type_props, "chorus.rate_hz.default", 1.0),
             true,
-            None,
             Some("Hz")
         ),
         ParamInfo::new_continuous_float(
@@ -53,7 +52,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "chorus.depth_ms.max", 30.0),
             override_float(param_type_props, "chorus.depth_ms.default", 8.0),
             true,
-            None,
             Some("ms")
         ),
         ParamInfo::new_continuous_float(
@@ -62,7 +60,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "chorus.wet.max", 1.0),
             override_float(param_type_props, "chorus.wet.default", 0.5),
             false,
-            None,
             None,
         ),
     ]

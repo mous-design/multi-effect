@@ -23,13 +23,13 @@ pub const NAME: &str = "delay";
 /// re-added in analog downstream.
 pub struct Delay {
     params_info: [ParamInfo; 4],
-    pub key: String,
+    key: String,
     bufs: [RingBuffer; 2],
-    pub active: bool,
+    active: bool,
     delay_samples: usize,
-    pub feedback: f32,
+    feedback: f32,
     /// Per-channel output level: `[left, right]`. 0.0 = silent, 1.0 = full.
-    pub wet: [f32; 2],
+    wet: [f32; 2],
     sample_rate: f32,
 }
 fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
@@ -41,7 +41,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "delay.time.max", 2.0),
             override_float(param_type_props, "delay.time.default", 1.0),
             true, // @todo see how this works.
-            None,
             Some("s"),
         ),
         ParamInfo::new_continuous_float(
@@ -51,7 +50,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "delay.feedback.default", 0.4),
             false,
             None,
-            None,
         ),
         ParamInfo::new_continuous_float(
             "wet",
@@ -59,7 +57,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "delay.wet.max", 1.0),
             override_float(param_type_props, "delay.wet.default", 0.5),
             false,
-            None,
             None,
         ),
     ]

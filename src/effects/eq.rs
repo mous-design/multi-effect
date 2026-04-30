@@ -35,12 +35,12 @@ pub const NAME_HIGH: &str = "eq_high";
 /// ```
 pub struct Eq {
     params_info: [ParamInfo; 4],
-    pub key: String,
-    pub eq_type:  EqType,
-    pub active: bool,
-    pub freq_hz:  f32,
-    pub q:        f32,
-    pub gain_db:  f32,
+    key: String,
+    eq_type:  EqType,
+    active: bool,
+    freq_hz:  f32,
+    q:        f32,
+    gain_db:  f32,
 
     // Normalised biquad coefficients (divided by a0)
     b0: f32, b1: f32, b2: f32,
@@ -66,7 +66,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>, eq_type:
             override_float(param_type_props, "eq.freq.max", 20000.0),
             override_float(param_type_props, def_key_freq, def_freq),
             true,
-            None,
             Some("Hz")
         ),
         ParamInfo::new_continuous_float(
@@ -75,7 +74,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>, eq_type:
             override_float(param_type_props, "eq.q.max", 10.0),
             override_float(param_type_props, def_key_q, def_q),
             true,
-            None,
             None
         ),
         ParamInfo::new_continuous_float(
@@ -84,7 +82,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>, eq_type:
             override_float(param_type_props, "eq.gain_db.max", 15.0),
             override_float(param_type_props, def_key_gain, def_gain),
             false,
-            None,
             Some("dB")
         ),
     ]

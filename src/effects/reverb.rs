@@ -92,14 +92,14 @@ impl AllpassFilter {
 /// - `wet_l` / `wet_r`: per-channel output level
 pub struct Reverb {
     params_info: [ParamInfo; 4],
-    pub key: String,
+    key: String,
     combs: [Vec<CombFilter>; 2],
     allpasses: [Vec<AllpassFilter>; 2],
-    pub active: bool,
-    pub room_size: f32,
-    pub damping: f32,
+    active: bool,
+    room_size: f32,
+    damping: f32,
     /// Per-channel output level: `[left, right]`.
-    pub wet: [f32; 2],
+    wet: [f32; 2],
     /// `wet[ch] / num_combs` — precomputed in `update_params` so the audio
     /// loop does a single multiply instead of a multiply + divide per sample.
     wet_norm: [f32; 2],
@@ -115,7 +115,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "reverb.room_size.default", 0.7),
             false,
             None,
-            None,
         ),
         ParamInfo::new_continuous_float(
             "damping",
@@ -124,7 +123,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "reverb.damping.default", 0.5),
             false,
             None,
-            None,
         ),
         ParamInfo::new_continuous_float(
             "wet",
@@ -132,7 +130,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "reverb.wet.max", 1.0),
             override_float(param_type_props, "reverb.wet.default", 0.3),
             false,
-            None,
             None,
         ),
     ]

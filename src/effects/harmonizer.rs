@@ -83,13 +83,13 @@ fn lerp_frame(buf: &[Frame], pos: f32, n: usize) -> Frame {
 /// Note On → start voice.  Note Off → begin 50 ms fade-out.
 pub struct Harmonizer {
     params_info: [ParamInfo; 4],
-    pub key:     String,
-    pub active:  bool,
+    key:     String,
+    active:  bool,
     /// MIDI note that plays back at 1:1 speed (unshifted).
-    pub root:      u8,
+    root:      u8,
     /// Velocity sensitivity: 0.0 = ignore velocity (fixed volume), 1.0 = full sensitivity.
-    pub vel_sense: f32,
-    pub wet:     [f32; 2],
+    vel_sense: f32,
+    wet:     [f32; 2],
 
     input_buf:   Vec<Frame>,
     write_pos:   usize,
@@ -111,7 +111,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_int(param_type_props, "harmonizer.root.min", 0),
             override_int(param_type_props, "harmonizer.root.max", 127),
             override_int(param_type_props, "harmonizer.root.default", 57),
-            None,
             None
         ),
         ParamInfo::new_continuous_float(
@@ -121,7 +120,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "harmonizer.vel_sense.default", 0.0),
             false,
             None,
-            None,
         ),
         ParamInfo::new_continuous_float(
             "wet",
@@ -129,7 +127,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "harmonizer.wet.max", 1.0),
             override_float(param_type_props, "harmonizer.wet.default", 0.5),
             false,
-            None,
             None,
         ),
     ]

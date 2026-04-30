@@ -22,11 +22,14 @@ use std::collections::HashMap;
 ///
 /// Variant names describe the *data shape* (continuous range vs discrete
 /// labeled set) and *value type*.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Copy` so `ParamInfo` is `Copy` and `const fn` builders work without
+/// invoking a destructor — the canonical lives in flash, all variant
+/// payloads are either scalar or `&'static [_]`.
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "type")]
 pub enum ParamType {
-    /// Continuous numeric value within `[min, max]`. Optionally stepped for
-    /// discrete-numeric params (e.g. `step: 0.1`).
+    /// Continuous numeric value within `[min, max]`.
     ContinuousFloat {
         min:     f32,
         max:     f32,
@@ -38,16 +41,10 @@ pub enum ParamType {
         /// Logarithmic interpolation across the range. Useful for frequencies.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         log:     bool,
-        /// `Some(step)` snaps to multiples of `step` (e.g. `1.0` = integers).
-        /// `None` = fully continuous. The smart-rounding multiplier can be
-        /// derived from this when set.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        step:    Option<f32>,
         #[serde(skip)]
         round_multiplier: f32,
     },
-    /// Continuous numeric value within `[min, max]`. Optionally stepped for
-    /// discrete-numeric params (e.g. `step: 10`).
+    /// Continuous integer value within `[min, max]`.
     ContinuousInt {
         min:     i32,
         max:     i32,
@@ -56,16 +53,11 @@ pub enum ParamType {
         /// `None` for unitless params.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unit:    Option<&'static str>,
-        /// `Some(step)` snaps to multiples of `step` (e.g. `1.0` = integers).
-        /// `None` = fully continuous. The smart-rounding multiplier can be
-        /// derived from this when set.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        step:    Option<i32>,
     },
     /// Discrete choice from a fixed set of float values. Each option has a
     /// label and the numeric value sent to the device on selection.
     DiscreteFloat {
-        options: Vec<DiscreteFloatOption>,
+        options: &'static [DiscreteFloatOption],
         default: f32,
     },
 
@@ -84,12 +76,12 @@ pub enum ParamType {
     /// `actions` list (no labels: actions carry no per-instance data, so the
     /// overhead is just the enum byte).
     Event {
-        actions: Vec<EventAction>,
+        actions: &'static [EventAction],
     },
 }
 
 /// One option in a `DiscreteFloat` parameter.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct DiscreteFloatOption {
     /// Label shown in the UI (e.g. `"eq-low-pass"`). Should be translated
     /// to a human readable label in the UI.
@@ -125,11 +117,35 @@ pub enum EventAction {
     Freeze,
 }
 
+/// Which aspect of a targeted live `ParamMeta` a meta-entry edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum MetaAspect { Min, Max, Default, Step, Log }
+
+/// Role of a `ParamInfo` entry within a canonical list.
+///
+/// `ParamMeta` entries are live params (knob / toggle on the tile).
+/// `TypeMeta` / `InstanceMeta` entries are override-form descriptors —
+/// their `name` matches the targeted live `ParamMeta`'s name; `aspect`
+/// disambiguates which bound (Min / Max / Default / ...) the entry edits.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "tag")]
+pub enum ParamKind {
+    /// Live param. `max_growable_at_runtime: false` means the max is locked
+    /// at construction (delay buffer, chorus depth, looper init buf). Override
+    /// attempts to grow it past the construction-time max are rejected by the
+    /// resolver — master surfaces a reload-required event to the UI.
+    ParamMeta { max_growable_at_runtime: bool },
+    /// Per-effect-type bound editor — appears in the global config form.
+    TypeMeta { aspect: MetaAspect },
+    /// Per-instance bound editor — appears in the tile settings tab.
+    InstanceMeta { aspect: MetaAspect },
+}
+
 /// Metadata describing one parameter of an effect.
 ///
 /// Universal fields only — kind-specific data (range, options, etc.) lives
 /// inside `ParamType`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct ParamInfo {
     /// Short machine-friendly name, matches the `set_param` / `set_action`
     /// key for built-in effects (e.g. `"wet"`, `"room_size"`, `"action"`).
@@ -142,69 +158,114 @@ pub struct ParamInfo {
     /// `#[serde(flatten)]` lifts the variant's fields (and its `"type"` tag)
     /// up into the `ParamInfo` JSON object — wire shape stays flat.
     #[serde(flatten)]
-    pub kind:  ParamType,
+    pub data_kind: ParamType,
+    /// Role of this entry — live param vs override-form descriptor.
+    /// Defaults to `ParamMeta { max_growable_at_runtime: true }` at
+    /// construction; override-form entries are tagged via
+    /// `with_kind_type_meta(aspect)` / `with_kind_instance_meta(aspect)`.
+    pub kind: ParamKind,
 }
 impl ParamInfo {
-    pub fn new_continuous_float(name: &'static str, min: f32, max: f32, default: f32,
-        log: bool, step: Option<f32>, unit: Option<&'static str>) -> Self {
-        let round_multiplier = auto_multiplier(min, max);
+    pub const fn new_continuous_float(name: &'static str, min: f32, max: f32, default: f32,
+        log: bool, unit: Option<&'static str>) -> Self {
+        // round_multiplier left at 0.0 — `build_info` computes it from the
+        // settled (post-override) min/max range.
         ParamInfo {
             name,
-            kind: ParamType::ContinuousFloat { min, max, default, log,  step, unit, round_multiplier }
+            data_kind: ParamType::ContinuousFloat { min, max, default, log, unit, round_multiplier: 0.0 },
+            kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
         }
     }
-    pub fn new_continuous_int(name: &'static str, min: i32, max: i32, default: i32,
-        step: Option<i32>, unit: Option<&'static str>) -> Self {
+    pub const fn new_continuous_int(name: &'static str, min: i32, max: i32, default: i32,
+        unit: Option<&'static str>) -> Self {
         ParamInfo {
             name,
-            kind: ParamType::ContinuousInt { min, max, default, unit,  step }
+            data_kind: ParamType::ContinuousInt { min, max, default, unit },
+            kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
         }
     }
-    pub fn new_discrete_bool(name: &'static str, default: bool,
+    pub const fn new_discrete_bool(name: &'static str, default: bool,
         labels: Option<(&'static str, &'static str)>,) -> Self {
         ParamInfo {
             name,
-            kind: ParamType::DiscreteBool { default, labels }
+            data_kind: ParamType::DiscreteBool { default, labels },
+            kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
         }
     }
+
+    // ----- Builders for orthogonal aspects (chained on top of constructors) -----
+
+    /// Lock the live param's max at construction time (sizes a buffer, etc.).
+    /// Override attempts to grow `<param>.max` past construction-time max are
+    /// rejected by the resolver — master surfaces a reload-required event.
+    /// Only valid on `ParamMeta` entries; panics otherwise (compile error in
+    /// const contexts).
+    pub const fn with_non_growable(self) -> Self {
+        match self.kind {
+            ParamKind::ParamMeta { .. } => Self {
+                kind: ParamKind::ParamMeta { max_growable_at_runtime: false },
+                ..self
+            },
+            _ => panic!("with_non_growable: only valid for ParamMeta entries"),
+        }
+    }
+
+    /// Tag this entry as a per-effect-type bound editor for the targeted live
+    /// param (matched by `name`). `aspect` selects which bound is edited.
+    pub const fn with_kind_type_meta(self, aspect: MetaAspect) -> Self {
+        Self {
+            kind: ParamKind::TypeMeta { aspect },
+            ..self
+        }
+    }
+
+    /// Tag this entry as a per-instance bound editor for the targeted live
+    /// param. Same shape as `with_kind_type_meta` but applied per-tile.
+    pub const fn with_kind_instance_meta(self, aspect: MetaAspect) -> Self {
+        Self {
+            kind: ParamKind::InstanceMeta { aspect },
+            ..self
+        }
+    }
+
     pub fn continuous_float_default(&self) -> f32 {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::ContinuousFloat { default, .. } => *default,
             _ => panic!("{}: expected ContinuousFloat", self.name),
         }
     }
     pub fn continuous_float_min(&self) -> f32 {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::ContinuousFloat { min, .. } => *min,
             _ => panic!("{}: expected ContinuousFloat", self.name),
         }
     }
     pub fn continuous_float_max(&self) -> f32 {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::ContinuousFloat { max, .. } => *max,
             _ => panic!("{}: expected ContinuousFloat", self.name),
         }
     }
     pub fn continuous_int_default(&self) -> i32 {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::ContinuousInt { default, .. } => *default,
             _ => panic!("{}: expected ContinuousInt", self.name),
         }
     }
     pub fn continuous_int_min(&self) -> i32 {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::ContinuousInt { min, .. } => *min,
             _ => panic!("{}: expected ContinuousInt", self.name),
         }
     }
     pub fn continuous_int_max(&self) -> i32 {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::ContinuousInt { max, .. } => *max,
             _ => panic!("{}: expected ContinuousInt", self.name),
         }
     }
     pub fn bool_default(&self) -> bool {
-        match &self.kind {
+        match &self.data_kind {
             ParamType::DiscreteBool { default, .. } => *default,
             _ => panic!("{}: expected DiscreteBool", self.name),
         }
@@ -304,6 +365,45 @@ impl From<[f32; 2]> for ParamValue {
 // Override helpers
 // ---------------------------------------------------------------------------
 
+/// Structured override key — replaces the legacy stringly-keyed
+/// `"effect.param.aspect"` composite. The targeted live `ParamMeta`'s
+/// `name` is `param`; `aspect` selects which bound (Min/Max/Default/...).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MetaTarget {
+    pub param:  String,
+    pub aspect: MetaAspect,
+}
+
+/// Per-effect override map. Master pre-filters the global config map to the
+/// entries for a given effect type before passing in to `Effect::new`.
+pub type OverrideMap = HashMap<MetaTarget, OverrideValue>;
+
+/// Resolve a per-instance `params_info` array from the canonical metadata
+/// + type-3 + type-2 overrides. Each layer narrows; canonical is the
+/// absolute envelope.
+///
+/// Resolution order (each step clamps to the previous step's result):
+/// 1. Start with each `ParamMeta` entry from canonical (cloned).
+/// 2. **TODO**: apply each `TypeMeta` override, clamped to canonical bounds.
+/// 3. **TODO**: apply each `InstanceMeta` override, clamped to type-3-resolved.
+/// 4. **TODO**: if an applied max would exceed construction-time max AND
+///    `max_growable_at_runtime == false`, reject and signal reload-required.
+/// 5. Compute `round_multiplier` on every `ContinuousFloat` from the final
+///    (post-override) min/max range.
+pub fn build_info<const N: usize>(
+    canonical: &[ParamInfo; N],
+    _type_overrides: &OverrideMap,
+    _instance_overrides: &OverrideMap,
+) -> [ParamInfo; N] {
+    let mut resolved = canonical.clone();
+    // Final pass: compute round_multiplier from settled live bounds.
+    for info in resolved.iter_mut() {
+        if let ParamType::ContinuousFloat { min, max, round_multiplier, .. } = &mut info.data_kind {
+            *round_multiplier = auto_multiplier(*min, *max);
+        }
+    }
+    resolved
+}
 
 pub fn override_float(map: &HashMap<String, OverrideValue>, key: &str, default: f32) -> f32 {
     let Some(v) = map.get(key) else { return default; };

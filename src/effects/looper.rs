@@ -88,8 +88,8 @@ pub enum LooperState {
 /// | `action`| string  | —       | See actions — dispatched via set_action      |
 pub struct Looper {
     params_info: [ParamInfo; 5],
-    pub key:    String,
-    pub active: bool,
+    key:    String,
+    active: bool,
 
     // --- State machine ---
     state:       LooperState,
@@ -103,8 +103,8 @@ pub struct Looper {
     max_buffers:  usize,            // max total layers incl. base; 0 = unlimited
 
     // --- Parameters ---
-    pub wet:   f32,
-    pub decay: f32,
+    wet:   f32,
+    decay: f32,
 
     // --- Fading ---
     fade_gain:  f32,   // 0.0 = silent, 1.0 = full; applied to loop output
@@ -129,7 +129,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "looper.decay.default", 1.0),
             false,
             None,
-            None,
         ),
         ParamInfo::new_continuous_float(
             "max_seconds",
@@ -138,14 +137,12 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "looper.max_seconds.default", 30.0),
             false,
             None,
-            None,
         ),
         ParamInfo::new_continuous_int(
             "max_buffers",
             override_int(param_type_props, "looper.max_buffers.min", 0),
             override_int(param_type_props, "looper.max_buffers.max", 16),
             override_int(param_type_props, "looper.max_buffers.default",4),
-            None,
             None,
         ),
         ParamInfo::new_continuous_float(
@@ -154,7 +151,6 @@ fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [Para
             override_float(param_type_props, "looper.wet.max", 1.0),
             override_float(param_type_props, "looper.wet.default", 0.5),
             false,
-            None,
             None,
         ),
     ]
