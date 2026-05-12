@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::sync::{mpsc, watch};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{info, warn};
-use super::config::master::{ConfigRequest, snd_request};
+use super::config::master::ConfigRequest;
 use super::control::EventBus;
 use super::control::handle::handle_client;
 
@@ -50,18 +50,9 @@ async fn ws_handler(ws: WebSocketUpgrade, State(s): State<AppState>) -> Response
 
 /// WebSocket handler: adapts the socket into an `AsyncRead + AsyncWrite` byte
 /// stream and hands off to the universal `handle_client`. Same text protocol as
-/// serial / TCP — one code path for all transports.
-async fn handle_ws(mut socket: WebSocket, state: AppState) {
-    // Initial snapshot: push the current preset + state as the UI's first frames,
-    // so the UI can render immediately without waiting for the next bus event.
-    if let Ok(snap) = snd_request(&state.master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await {
-        let initial = format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_view()).unwrap_or_default());
-        if socket.send(Message::Text(initial.into())).await.is_err() {
-            warn!("WS client disconnected before initial snapshot");
-            return;
-        }
-    }
-
+/// serial / TCP — one code path for all transports, including the welcome
+/// SNAPSHOT push.
+async fn handle_ws(socket: WebSocket, state: AppState) {
     // UI has no "deactivation" concept — this channel is effectively unused.
     let (_active_tx, active_rx) = watch::channel(true);
 

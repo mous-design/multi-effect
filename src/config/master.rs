@@ -28,7 +28,7 @@ pub type OptionRespEmpty = Option<Resp<()>>;
 pub enum ConfigRequest {
     // -- Reads (need response) --
     GetConfig       { resp: Resp<ConfigPatch> },
-    GetSnapshot     { resp: Resp<ConfigSnapshot> },
+    GetSnapshot     { resp: Resp<crate::config::snapshot::SnapshotView> },
     GetDevices      { resp: Resp<HashMap<String, DeviceDef>> },
     // -- Config mutations (need response for HTTP) --
     UpdateConfig      { config: ConfigPatch, source: String, resp: OptionRespEmpty },
@@ -44,6 +44,15 @@ pub enum ConfigRequest {
                         source: String, resp: OptionResp<SnapshotState> },
     ApplyAction       { path: String, action: String, source: String, resp: OptionRespEmpty },
     ApplyReset        { source: String, resp: OptionRespEmpty },
+    /// Apply an Instance bound override (the runtime "edit a param's
+    /// min/max/default" path). `path` is the node key, `target` is param +
+    /// aspect, `value` is the new bound value. Master computes the
+    /// Type-resolved view and forwards to the audio thread.
+    ApplyInfoOverride { path:   String,
+                        target: crate::engine::device::MetaTarget,
+                        value:  crate::engine::device::ParamValue,
+                        source: String,
+                        resp:   OptionResp<SnapshotState> },
     /// Reverse-map a parameter to (channel_id, raw_value) without rounding.
     /// Use for binary protocols (MIDI) that do their own integer rounding.
     ReverseMap        { path: String, value: f32, alias: String,
@@ -161,7 +170,7 @@ impl ConfigMaster {
                 let _ = resp.send(Ok(ConfigPatch::from_config(&self.cfg)));
             },
             ConfigRequest::GetSnapshot { resp } => {
-                let _ = resp.send(Ok(self.snapshot.clone()));
+                let _ = resp.send(Ok(self.build_snapshot_view()));
             },
             ConfigRequest::GetDevices { resp } => {
                 let _ = resp.send(Ok(self.cfg.control_devices.clone()));
@@ -205,6 +214,9 @@ impl ConfigMaster {
             },
             ConfigRequest::ApplyReset { source, resp } => {
                 Self::respond(resp, self.handle_apply_reset(&source));
+            },
+            ConfigRequest::ApplyInfoOverride { path, target, value, source, resp } => {
+                Self::respond(resp, self.handle_apply_info_override(&path, target, value, &source));
             },
             ConfigRequest::ReverseMap { path, value, alias, resp } => {
                 let result = self.lookup_reverse(&path, &alias)
@@ -433,6 +445,59 @@ impl ConfigMaster {
         Ok(())
     }
 
+    fn handle_apply_info_override(
+        &mut self,
+        node_key: &str,
+        target:   crate::engine::device::MetaTarget,
+        value:    crate::engine::device::ParamValue,
+        source:   &str,
+    ) -> Result<SnapshotState> {
+        use crate::engine::{device::{build_info, OverrideMap}, patch::canonical_for};
+        debug!("SET_PARAM_META {node_key}.{}.{:?} = {:?} [source={source}]",
+               target.param, target.aspect, value);
+
+        // Look up effect type for this node from the active preset.
+        let device_type = self.snapshot.preset.chains.iter()
+            .flat_map(|c| c.nodes.iter())
+            .find(|n| n.key == node_key)
+            .map(|n| n.device_type.clone())
+            .ok_or_else(|| anyhow::anyhow!("no node with key '{node_key}'"))?;
+
+        // Resolve canonical → Type-resolved bounds (audio thread will use this
+        // as clamp_ref). Unknown effect types are rejected here so we don't
+        // forward a bogus message.
+        let canonical = canonical_for(&device_type)
+            .ok_or_else(|| anyhow::anyhow!("unknown effect type '{device_type}'"))?;
+        let empty = OverrideMap::new();
+        let type_overrides = self.cfg.type_overrides.get(&device_type).unwrap_or(&empty);
+        let type_resolved = build_info(canonical, type_overrides);
+
+        let cm = ControlMessage::SetInfoOverride {
+            path:      node_key.to_string(),
+            target:    target.clone(),
+            value,
+            clamp_ref: type_resolved,
+            source:    source.to_string(),
+        };
+        self.audio.push_control(cm.clone())?;
+        self.bus.send(cm).ok();
+
+        // Persist into the active preset's snapshot so the override survives
+        // autosave + restart and is included when the preset is saved.
+        if let Some(node) = self.snapshot.preset.chains.iter_mut()
+            .flat_map(|c| c.nodes.iter_mut())
+            .find(|n| n.key == node_key)
+        {
+            node.overrides.insert(target, value);
+        }
+
+        // Instance bound edits are part of preset state; mark dirty.
+        if self.snapshot.set_state(SnapshotState::Dirty) {
+            self.notify_state_changed(source);
+        }
+        Ok(self.snapshot.state)
+    }
+
     /// Find the reverse mapping for `path` on device `alias`: the channel_id
     /// the target maps to (if any) and the `ControlDef` that does the math.
     /// Callers decide whether to use `to_ctrl` alone or with `smart_round_ctrl`.
@@ -492,9 +557,67 @@ impl ConfigMaster {
     /// is filtered out by the outbound dispatcher, so they don't echo to themselves.
     fn notify_preset_loaded(&self, source: &str) {
         self.bus.send(ControlMessage::PresetLoaded {
-            preset: self.snapshot.preset.clone(),
+            preset: self.build_preset_view(&self.snapshot.preset),
             source: source.to_string(),
         }).ok();
+    }
+
+    /// Build the wire view of the entire snapshot: state + active preset with
+    /// per-node resolved `params_info` + the list of occupied preset slots.
+    /// Used by `GetSnapshot` handlers (initial WS connect, PRESET / COMPARE
+    /// responses). `params_info` is recomputed each call — control-rate, fine.
+    fn build_snapshot_view(&self) -> crate::config::snapshot::SnapshotView {
+        crate::config::snapshot::SnapshotView {
+            state:          self.snapshot.state,
+            preset:         self.build_preset_view(&self.snapshot.preset),
+            preset_indices: self.snapshot.preset_indices.clone(),
+        }
+    }
+
+    /// Build a wire view of one preset. Each node gets its resolved
+    /// `params_info` (canonical → Type overrides → Instance overrides).
+    fn build_preset_view(&self, preset: &PresetDef) -> crate::config::snapshot::PresetView {
+        use crate::config::snapshot::{ChainView, NodeView, PresetView};
+        use crate::engine::{device::{build_info, OverrideMap, apply_override}, patch::canonical_for};
+
+        let empty = OverrideMap::new();
+        let chains = preset.chains.iter().map(|chain| {
+            let nodes = chain.nodes.iter().map(|node| {
+                // Resolve the per-node ParamInfo array. If the effect type is
+                // unknown (firmware mismatch), we still emit a NodeView so the
+                // UI can render *something* and surface the bad node.
+                let params_info = match canonical_for(&node.device_type) {
+                    Some(canonical) => {
+                        let t = self.cfg.type_overrides.get(&node.device_type).unwrap_or(&empty);
+                        let type_resolved = build_info(canonical, t);
+                        // Apply Instance overrides on top, clamped to Type-resolved.
+                        let mut resolved = type_resolved.clone();
+                        for (target, value) in &node.overrides {
+                            apply_override(&mut resolved, &type_resolved, target, value);
+                        }
+                        resolved
+                    },
+                    None => {
+                        warn!("build_preset_view: unknown effect type '{}'; params_info empty",
+                              node.device_type);
+                        Vec::new()
+                    }
+                };
+                NodeView {
+                    key:         node.key.clone(),
+                    device_type: node.device_type.clone(),
+                    overrides:   node.overrides.clone(),
+                    params_info,
+                    params:      node.params.clone(),
+                }
+            }).collect();
+            ChainView { input: chain.input, output: chain.output, nodes }
+        }).collect();
+        PresetView {
+            index:       preset.index,
+            chains,
+            controllers: preset.controllers.clone(),
+        }
     }
 
     /// Push a StateChanged event on the bus (Clean / Dirty / Comparing).

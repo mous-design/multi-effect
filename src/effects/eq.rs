@@ -1,8 +1,7 @@
 use std::f32::consts::PI;
-use std::collections::HashMap;
 
-use crate::engine::device::{override_float, find_param_info, check_bounds,
-    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+    ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EqType {
@@ -14,6 +13,7 @@ pub enum EqType {
     HighShelf,
 }
 
+pub const NAME: &str = "eq";
 pub const NAME_MID: &str = "eq_mid";
 pub const NAME_LOW: &str = "eq_low";
 pub const NAME_HIGH: &str = "eq_high";
@@ -52,44 +52,35 @@ pub struct Eq {
     sample_rate: f32,
 }
 
-fn build_params_info(param_type_props: &HashMap<String, OverrideValue>, eq_type: EqType) -> [ParamInfo; 4] {
-    let (def_freq, def_q, def_gain, def_key_freq, def_key_q, def_key_gain) = match eq_type {
-        EqType::LowShelf =>  (100.0, 0.707, 0.0, "eq_low.freq.default", "eq_low.q.default", "eq_low.gain_db.default"),
-        EqType::Peak     => (1000.0, 1.0, 0.0, "eq_mid.freq.default", "eq_mid.q.default", "eq_mid.gain_db.default"),
-        EqType::HighShelf => (10000.0, 0.707, 0.0, "eq_high.freq.default", "eq_high.q.default","eq_high.gain_db.default"),
-    };
-    [
-        ParamInfo::new_discrete_bool("active", true, None),
-        ParamInfo::new_continuous_float(
-            "freq",
-            override_float(param_type_props, "eq.freq.min", 20.0),
-            override_float(param_type_props, "eq.freq.max", 20000.0),
-            override_float(param_type_props, def_key_freq, def_freq),
-            true,
-            Some("Hz")
-        ),
-        ParamInfo::new_continuous_float(
-            "q",
-            override_float(param_type_props, "eq.q.min", 0.1),
-            override_float(param_type_props, "eq.q.max", 10.0),
-            override_float(param_type_props, def_key_q, def_q),
-            true,
-            None
-        ),
-        ParamInfo::new_continuous_float(
-            "gain_db",
-            override_float(param_type_props, "eq.gain_db.min", -15.0),
-            override_float(param_type_props, "eq.gain_db.max", 15.0),
-            override_float(param_type_props, def_key_gain, def_gain),
-            false,
-            Some("dB")
-        ),
-    ]
-}
+// One canonical per EQ type — only the per-band defaults differ.
+// `freq`/`q`/`gain_db` ranges are shared (overridable globally via `eq.<param>.<aspect>`).
+pub static CANONICAL_LOW: [ParamInfo; 4] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_float("freq",       20.0, 20000.0,   100.0, true,  Some("Hz")),
+    ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None),
+    ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
+];
+pub static CANONICAL_MID: [ParamInfo; 4] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_float("freq",       20.0, 20000.0,  1000.0, true,  Some("Hz")),
+    ParamInfo::new_continuous_float("q",           0.1,    10.0,     1.0, true,  None),
+    ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
+];
+pub static CANONICAL_HIGH: [ParamInfo; 4] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_float("freq",       20.0, 20000.0, 10000.0, true,  Some("Hz")),
+    ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None),
+    ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
+];
+
 impl Eq {
-    pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32,
-        param_type_props: &HashMap<String, OverrideValue>) -> Self {
-        let params_info = build_params_info(param_type_props, eq_type);
+    pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
+        let fallback = match eq_type {
+            EqType::LowShelf  => CANONICAL_LOW,
+            EqType::Peak      => CANONICAL_MID,
+            EqType::HighShelf => CANONICAL_HIGH,
+        };
+        let params_info = into_param_array(params_info, fallback, NAME);
         let active = find_param_info(&params_info,"active").bool_default();
         let freq_hz = find_param_info(&params_info,"freq").continuous_float_default();
         let q = find_param_info(&params_info,"q").continuous_float_default();
@@ -158,6 +149,9 @@ impl Eq {
 impl Parameterized for Eq {
      fn get_params_info(&self) -> &[ParamInfo] {
         &self.params_info
+    }
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
+        &mut self.params_info
     }
 
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {

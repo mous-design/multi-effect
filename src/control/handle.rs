@@ -34,6 +34,17 @@ where
     let mut bus_rx = bus.subscribe();
     let (ack_tx, mut ack_rx) = mpsc::channel::<String>(8);
 
+    // Initial snapshot: push the current state as the client's first frame, so
+    // it can render / mirror without waiting for the next mutation. Applies to
+    // every transport — telnet shells, UI over WS, hardware controllers that
+    // want LED feedback. Clients that don't care just ignore the line.
+    if let Ok(snap) = snd_request(&master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await {
+        let initial = format!("SNAPSHOT {}\n", serde_json::to_string(&snap).unwrap_or_default());
+        if writer.write_all(initial.as_bytes()).await.is_err() {
+            return Ok(()); // peer disconnected before initial snapshot
+        }
+    }
+
     // Outbound: sole owner of the writer.
     // Selects over bus events and ack responses from inbound.
     let outbound = async {
@@ -58,6 +69,23 @@ where
                                 // smart-round-targeted via the param's `ParamInfo.round_multiplier`.
                                 _ => format!("SET {path} {value}\n"),
                             }
+                        },
+                        ControlMessage::SetInfoOverride { path, target, value, .. } => {
+                            // Format value depending on its variant for clean wire output.
+                            let v = match value {
+                                crate::engine::device::ParamValue::Float(f) => format!("{f}"),
+                                crate::engine::device::ParamValue::Int(i)   => format!("{i}"),
+                                crate::engine::device::ParamValue::Bool(b)  => format!("{b}"),
+                            };
+                            let aspect = match target.aspect {
+                                crate::engine::device::MetaAspect::Min     => "min",
+                                crate::engine::device::MetaAspect::Max     => "max",
+                                crate::engine::device::MetaAspect::Default => "default",
+                                crate::engine::device::MetaAspect::Step    => "step",
+                                crate::engine::device::MetaAspect::Log     => "log",
+                                crate::engine::device::MetaAspect::Visible => "visible",
+                            };
+                            format!("PARAM_META {path}.{}.{aspect} {v}\n", target.param)
                         },
                         ControlMessage::Reset { .. } => "RESET\n".to_string(),
                         ControlMessage::PresetLoaded { ref preset, .. } =>
@@ -179,6 +207,34 @@ async fn handle_command(
                 "OK\n".into()
             }
         },
+        "SET_PARAM_META" => {
+            // usage: SET_PARAM_META <node-key>.<param>.<aspect> <value>
+            // e.g.   SET_PARAM_META 04-chorus.depth_ms.max 20
+            let (path, val_str) = rest
+                .split_once(' ')
+                .context("usage: SET_PARAM_META <key.param.aspect> <value>")?;
+            let (node_key, meta_str) = path
+                .split_once('.')
+                .context("path must be <key>.<param>.<aspect>")?;
+            let target = crate::engine::device::MetaTarget::parse_str(meta_str)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let val_str = val_str.trim();
+            // Prefer int when the literal is integral so DiscreteInt aspects
+            // (and the future merged Value enum) keep their type.
+            let value = if let Ok(i) = val_str.parse::<i32>() {
+                crate::engine::device::ParamValue::Int(i)
+            } else if let Ok(f) = val_str.parse::<f32>() {
+                crate::engine::device::ParamValue::Float(f)
+            } else if let Ok(b) = val_str.parse::<bool>() {
+                crate::engine::device::ParamValue::Bool(b)
+            } else {
+                anyhow::bail!("expected int / float / bool, got '{val_str}'");
+            };
+            let state = snd_request(master_tx, |tx| ConfigRequest::ApplyInfoOverride {
+                path: node_key.to_string(), target, value, source, resp: Some(tx),
+            }).await?;
+            format!("STATE {}\n", state.label().to_string())
+        },
         "CHAINS" => {
             let chains: Vec<ChainDef> = serde_json::from_str(rest)?;
             snd_request(master_tx, |tx| ConfigRequest::SetChains {
@@ -196,7 +252,7 @@ async fn handle_command(
             // Return the new snapshot inline — originator is filtered out of the
             // PresetLoaded broadcast, so this is how they get the new content.
             let snap = snd_request(master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await?;
-            format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_view())?)
+            format!("SNAPSHOT {}\n", serde_json::to_string(&snap)?)
         },
         "SAVE_PRESET" => {
             let slot: u8 = rest.trim()
@@ -223,7 +279,7 @@ async fn handle_command(
             // Return the new snapshot inline — originator is filtered out of the
             // PresetLoaded broadcast.
             let snap = snd_request(master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await?;
-            format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_view())?)
+            format!("SNAPSHOT {}\n", serde_json::to_string(&snap)?)
         },
         "PUT_CONTROLLERS" => {
             let controllers: Vec<ControllerDef> = serde_json::from_str(rest)?;

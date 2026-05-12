@@ -1,6 +1,5 @@
 use serde::{Serialize, Deserialize};
-use tracing::{warn};
-use anyhow::{Result, anyhow};
+use tracing::warn;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -118,8 +117,14 @@ pub enum EventAction {
 }
 
 /// Which aspect of a targeted live `ParamMeta` a meta-entry edits.
+///
+/// `Min`/`Max`/`Default`/`Step`/`Log` describe numeric bounds; `Visible`
+/// is the presentation flag (knob shown / hidden on the tile). Putting them
+/// in one enum keeps the override pipeline uniform — every per-param attribute
+/// flows through `apply_override` and `SET_PARAM_META` regardless of whether
+/// it's a bound or a presentation hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub enum MetaAspect { Min, Max, Default, Step, Log }
+pub enum MetaAspect { Min, Max, Default, Step, Log, Visible }
 
 /// Role of a `ParamInfo` entry within a canonical list.
 ///
@@ -164,6 +169,11 @@ pub struct ParamInfo {
     /// construction; override-form entries are tagged via
     /// `with_kind_type_meta(aspect)` / `with_kind_instance_meta(aspect)`.
     pub kind: ParamKind,
+    /// Whether the UI should render this param's knob on the tile.
+    /// Defaults to `true` at construction; canonical entries can flip it
+    /// via `with_hidden()`, and per-instance overrides toggle it at runtime
+    /// via `SET_PARAM_META <key>.<param>.visible <bool>`.
+    pub visible: bool,
 }
 impl ParamInfo {
     pub const fn new_continuous_float(name: &'static str, min: f32, max: f32, default: f32,
@@ -174,6 +184,7 @@ impl ParamInfo {
             name,
             data_kind: ParamType::ContinuousFloat { min, max, default, log, unit, round_multiplier: 0.0 },
             kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
+            visible: true,
         }
     }
     pub const fn new_continuous_int(name: &'static str, min: i32, max: i32, default: i32,
@@ -182,6 +193,7 @@ impl ParamInfo {
             name,
             data_kind: ParamType::ContinuousInt { min, max, default, unit },
             kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
+            visible: true,
         }
     }
     pub const fn new_discrete_bool(name: &'static str, default: bool,
@@ -190,6 +202,7 @@ impl ParamInfo {
             name,
             data_kind: ParamType::DiscreteBool { default, labels },
             kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
+            visible: true,
         }
     }
 
@@ -208,6 +221,12 @@ impl ParamInfo {
             },
             _ => panic!("with_non_growable: only valid for ParamMeta entries"),
         }
+    }
+
+    /// Mark this param hidden by default in the UI. Per-preset overrides
+    /// can still flip it back on via `SET_PARAM_META <key>.<param>.visible true`.
+    pub const fn with_hidden(self) -> Self {
+        Self { visible: false, ..self }
     }
 
     /// Tag this entry as a per-effect-type bound editor for the targeted live
@@ -272,130 +291,195 @@ impl ParamInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(untagged)]
-pub enum OverrideValue { Float(f32), Int(i32), Bool(bool) }
-impl OverrideValue {
-    pub fn try_float(&self) -> Result<f32> {
-        match self {
-            OverrideValue::Float(v) => Ok(*v),
-            _ => Err(anyhow!("expected a float value")),
-        }
-    }
-    pub fn try_int(&self) -> Result<i32> {
-        match self {
-            OverrideValue::Int(v) => Ok(*v),
-            _ => Err(anyhow!("expected a int value")),
-        }
-    }
-    pub fn try_bool(&self) -> Result<bool> {
-        match self {
-            OverrideValue::Bool(v) => Ok(*v),
-            _ => Err(anyhow!("expected a bool value")),
-        }
-    }
-}
-
 /// A stereo audio frame: [left, right]
 pub type Frame = [f32; 2];
 
-/// A parameter value: either a scalar float or a per-channel stereo pair.
+/// A parameter value — the unified type for every channel that carries values:
+/// runtime knob updates (`set_param`), bound overrides (`Config.type_overrides`,
+/// `apply_override`), and the wire protocol's `SET` / `SET_PARAM_META`
+/// payloads. Variants are kept open so integers keep their type across the
+/// JSON round-trip (no `i32 → f32 → i32` coercion).
 ///
-/// Effects that have a `wet` parameter accept both variants —
-/// `Float(x)` is treated as `Stereo([x, x])` via [`ParamValue::try_stereo`].
-/// Scalar-only parameters (e.g. `feedback`, `time`) call [`ParamValue::try_float`]
-/// and return an error if a stereo pair is passed.
-#[derive(Debug, Clone, Copy)]
+/// `#[serde(untagged)]` with variant order Int → Float → Bool means JSON `5`
+/// deserialises as `Int(5)`, `5.5` as `Float(5.5)`, `true` as `Bool(true)`.
+///
+/// `try_int` ↔ `try_float` coerce between numeric variants because serde's
+/// untagged round-trip is non-deterministic — `1.0` may deserialise as
+/// `Int(1)` and `5` as `Int(5)`, so callers can't rely on which variant
+/// arrived. `try_int` warns when a fractional `Float` is truncated.
+///
+/// The `Bool` boundary is strict — bools and numbers don't bridge.
+/// A JSON bool always deserialises as `Bool`, never as a number, so there's
+/// no determinism reason to be lenient and silent coercion would hide typos.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ParamValue {
+    Int(i32),
     Float(f32),
-    Stereo([f32; 2]),
     Bool(bool),
 }
 
 impl std::fmt::Display for ParamValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParamValue::Float(v)      => write!(f, "{v}"),
-            ParamValue::Stereo([l,r]) => write!(f, "[{l},{r}]"),
-            ParamValue::Bool(b)       => write!(f, "{b}"),
+            ParamValue::Int(v)   => write!(f, "{v}"),
+            ParamValue::Float(v) => write!(f, "{v}"),
+            ParamValue::Bool(b)  => write!(f, "{b}"),
         }
     }
 }
 
 impl ParamValue {
-    /// Convert to `[left, right]`, or an error if the variant cannot be represented as stereo.
-    ///
-    /// `Float(x)` is promoted to `[x, x]`.
-    pub fn try_stereo(self) -> Result<[f32; 2], String> {
-        match self {
-            ParamValue::Float(v)    => Ok([v, v]),
-            ParamValue::Stereo(arr) => Ok(arr),
-            ParamValue::Bool(b)     => { let v = if b { 1.0 } else { 0.0 }; Ok([v, v]) }
-        }
-    }
-
-    /// Return the scalar value, or an error if the variant cannot be represented as a single float.
+    /// Coerce to `f32`. `Int` widens cleanly. `Bool` is rejected.
     pub fn try_float(self) -> Result<f32, String> {
         match self {
-            ParamValue::Float(v)   => Ok(v),
-            ParamValue::Stereo(_)  => Err("expected a scalar value, got a stereo pair".into()),
-            ParamValue::Bool(b)    => Ok(if b { 1.0 } else { 0.0 }),
+            ParamValue::Float(v) => Ok(v),
+            ParamValue::Int(v)   => Ok(v as f32),
+            ParamValue::Bool(_)  => Err("expected float, got bool".into()),
         }
     }
 
-    /// Return a bool. `Float` is accepted: 0.0 = false, anything else = true (for TCP compat).
+    /// Coerce to `i32`. Lossless for `Int` and integral `Float`; warns and
+    /// truncates when a `Float` has a fractional part. `Bool` is rejected.
+    pub fn try_int(self) -> Result<i32, String> {
+        match self {
+            ParamValue::Int(v)   => Ok(v),
+            ParamValue::Float(v) => {
+                if v.fract() != 0.0 {
+                    tracing::warn!("ParamValue::try_int: expected integer, got {v} with fractional part — truncating to {}", v as i32);
+                }
+                Ok(v as i32)
+            },
+            ParamValue::Bool(_)  => Err("expected int, got bool".into()),
+        }
+    }
+
+    /// Strict — only accepts `Bool`. Numbers never silently become bools.
     pub fn try_bool(self) -> Result<bool, String> {
         match self {
-            ParamValue::Bool(b)   => Ok(b),
-            ParamValue::Float(v)  => Ok(v > 0.5),
-            ParamValue::Stereo(_) => Err("expected a bool, got a stereo pair".into()),
+            ParamValue::Bool(b)  => Ok(b),
+            ParamValue::Float(_) => Err("expected bool, got float".into()),
+            ParamValue::Int(_)   => Err("expected bool, got int".into()),
         }
     }
 }
 
-impl From<f32> for ParamValue {
-    fn from(v: f32) -> Self { ParamValue::Float(v) }
-}
-
-impl From<[f32; 2]> for ParamValue {
-    fn from(arr: [f32; 2]) -> Self { ParamValue::Stereo(arr) }
-}
+impl From<f32>  for ParamValue { fn from(v: f32)  -> Self { ParamValue::Float(v) } }
+impl From<i32>  for ParamValue { fn from(v: i32)  -> Self { ParamValue::Int(v)   } }
+impl From<bool> for ParamValue { fn from(v: bool) -> Self { ParamValue::Bool(v)  } }
 
 // ---------------------------------------------------------------------------
 // Override helpers
 // ---------------------------------------------------------------------------
 
-/// Structured override key — replaces the legacy stringly-keyed
-/// `"effect.param.aspect"` composite. The targeted live `ParamMeta`'s
-/// `name` is `param`; `aspect` selects which bound (Min/Max/Default/...).
+/// Structured override key. The targeted live `ParamMeta`'s `name` is `param`;
+/// `aspect` selects which bound (Min/Max/Default/...). On the wire / in JSON
+/// it serialises as a single string `"param.aspect"`, so the override map
+/// reads as a flat object: `{"depth_ms.max": 20, "rate_hz.min": 0.5}`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MetaTarget {
     pub param:  String,
     pub aspect: MetaAspect,
 }
 
-/// Per-effect override map. Master pre-filters the global config map to the
-/// entries for a given effect type before passing in to `Effect::new`.
-pub type OverrideMap = HashMap<MetaTarget, OverrideValue>;
+impl MetaTarget {
+    fn aspect_str(&self) -> &'static str {
+        match self.aspect {
+            MetaAspect::Min     => "min",
+            MetaAspect::Max     => "max",
+            MetaAspect::Default => "default",
+            MetaAspect::Step    => "step",
+            MetaAspect::Log     => "log",
+            MetaAspect::Visible => "visible",
+        }
+    }
 
-/// Resolve a per-instance `params_info` array from the canonical metadata
-/// + type-3 + type-2 overrides. Each layer narrows; canonical is the
+    /// Parse from the wire form `"param.aspect"`, e.g. `"depth_ms.max"`.
+    pub fn parse_str(s: &str) -> Result<Self, String> {
+        let (param, aspect_str) = s.rsplit_once('.')
+            .ok_or_else(|| format!("expected 'param.aspect', got '{s}'"))?;
+        let aspect = match aspect_str {
+            "min"     => MetaAspect::Min,
+            "max"     => MetaAspect::Max,
+            "default" => MetaAspect::Default,
+            "step"    => MetaAspect::Step,
+            "log"     => MetaAspect::Log,
+            "visible" => MetaAspect::Visible,
+            other     => return Err(format!("unknown aspect '{other}' in '{s}'")),
+        };
+        Ok(MetaTarget { param: param.to_string(), aspect })
+    }
+}
+
+impl serde::Serialize for MetaTarget {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{}.{}", self.param, self.aspect_str()))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MetaTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let s = String::deserialize(d)?;
+        let (param, aspect_str) = s.rsplit_once('.')
+            .ok_or_else(|| D::Error::custom(format!("expected 'param.aspect', got '{s}'")))?;
+        let aspect = match aspect_str {
+            "min"     => MetaAspect::Min,
+            "max"     => MetaAspect::Max,
+            "default" => MetaAspect::Default,
+            "step"    => MetaAspect::Step,
+            "log"     => MetaAspect::Log,
+            "visible" => MetaAspect::Visible,
+            other     => return Err(D::Error::custom(format!("unknown aspect '{other}' in '{s}'"))),
+        };
+        Ok(MetaTarget { param: param.to_string(), aspect })
+    }
+}
+
+/// Per-effect override map. Master pre-filters the global config map to the
+/// entries for a given effect type before passing in to `build_info`.
+pub type OverrideMap = HashMap<MetaTarget, ParamValue>;
+
+/// Resolve a per-instance `params_info` array from the canonical metadata +
+/// Type overrides. Type overrides narrow but cannot widen; canonical is the
 /// absolute envelope.
 ///
-/// Resolution order (each step clamps to the previous step's result):
-/// 1. Start with each `ParamMeta` entry from canonical (cloned).
-/// 2. **TODO**: apply each `TypeMeta` override, clamped to canonical bounds.
-/// 3. **TODO**: apply each `InstanceMeta` override, clamped to type-3-resolved.
-/// 4. **TODO**: if an applied max would exceed construction-time max AND
-///    `max_growable_at_runtime == false`, reject and signal reload-required.
-/// 5. Compute `round_multiplier` on every `ContinuousFloat` from the final
-///    (post-override) min/max range.
-pub fn build_info<const N: usize>(
-    canonical: &[ParamInfo; N],
-    _type_overrides: &OverrideMap,
-    _instance_overrides: &OverrideMap,
+/// Instance overrides (per-tile bound edits) are applied later by direct
+/// mutation of the resolved `params_info` on the live instance — they don't
+/// flow through `build_info`. Snapshot serialisation captures them via the
+/// instance's `params_info` field.
+///
+/// Resolution order:
+/// 1. Start from canonical.
+/// 2. Apply each Type override, clamping to canonical bounds.
+/// 3. Compute `round_multiplier` from the final (post-override) min/max.
+/// Convert a `&[ParamInfo]` slice into a fixed-size array, falling back to
+/// `fallback` (typically the effect's own `CANONICAL`) and logging an error
+/// if the slice length doesn't match. Used by each effect's `new()` to safely
+/// receive the resolved view from `build_info` without panicking on a
+/// firmware-bug-induced length mismatch.
+pub fn into_param_array<const N: usize>(
+    slice:    &[ParamInfo],
+    fallback: [ParamInfo; N],
+    name:     &str,
 ) -> [ParamInfo; N] {
-    let mut resolved = canonical.clone();
+    slice.try_into().unwrap_or_else(|_| {
+        tracing::error!("{name}: params_info length mismatch (expected {N}, got {}); falling back to canonical",
+                        slice.len());
+        fallback
+    })
+}
+
+pub fn build_info(
+    canonical: &[ParamInfo],
+    type_overrides: &OverrideMap,
+) -> Vec<ParamInfo> {
+    let mut resolved: Vec<ParamInfo> = canonical.to_vec();
+
+    for (target, value) in type_overrides {
+        apply_override(&mut resolved, canonical, target, value);
+    }
+
     // Final pass: compute round_multiplier from settled live bounds.
     for info in resolved.iter_mut() {
         if let ParamType::ContinuousFloat { min, max, round_multiplier, .. } = &mut info.data_kind {
@@ -405,36 +489,152 @@ pub fn build_info<const N: usize>(
     resolved
 }
 
-pub fn override_float(map: &HashMap<String, OverrideValue>, key: &str, default: f32) -> f32 {
-    let Some(v) = map.get(key) else { return default; };
-    match v.try_float() {
-        Ok(x)  => x,
-        Err(e) => {
-            warn!("invalid override {key}: {e}; using default {default}");
-            default
+/// Apply a single override to the targeted `ParamMeta` entry in `resolved`,
+/// clamping the value to the matching entry's bounds in `clamp_ref`.
+///
+/// **The kernel for both build paths**: `build_info` calls this for fresh
+/// construction (clamp_ref = canonical); the runtime instance-edit path will
+/// call this when the user submits a bound change (clamp_ref = master-computed
+/// Type-resolved view).
+///
+/// On return the touched entry is internally consistent — if `min` or `max`
+/// shifted on a `ContinuousFloat`, `round_multiplier` is recomputed so callers
+/// don't need a separate finalize step.
+///
+/// Warnings are emitted whenever something happens that an upstream validator
+/// should have prevented (clamp fired, unknown param, type mismatch,
+/// unsupported variant/aspect combination). UI and save-time validation are
+/// expected to catch these before the value reaches here.
+///
+/// Returns `true` if any field on the touched entry was modified.
+/// `resolved` and `clamp_ref` must have the same length.
+pub fn apply_override(
+    resolved:  &mut [ParamInfo],
+    clamp_ref: &[ParamInfo],
+    target:    &MetaTarget,
+    value:     &ParamValue,
+) -> bool {
+    if resolved.len() != clamp_ref.len() {
+        warn!("apply_override: resolved/clamp_ref length mismatch ({} vs {})",
+              resolved.len(), clamp_ref.len());
+        return false;
+    }
+    let Some(idx) = resolved.iter().position(|i| {
+        i.name == target.param && matches!(i.kind, ParamKind::ParamMeta { .. })
+    }) else {
+        warn!("override targets unknown param '{}'", target.param);
+        return false;
+    };
+
+    // Visible lives at the top of `ParamInfo`, independent of `data_kind`.
+    // No clamping (it's a bool flag); strict bool input — numbers don't
+    // silently flip visibility on or off.
+    if matches!(target.aspect, MetaAspect::Visible) {
+        let Ok(v) = value.try_bool() else {
+            warn!("override {}.visible: expected bool", target.param);
+            return false;
+        };
+        let changed = resolved[idx].visible != v;
+        resolved[idx].visible = v;
+        return changed;
+    }
+
+    let mut bound_changed = false;
+    let changed = match (&mut resolved[idx].data_kind, &clamp_ref[idx].data_kind) {
+        (
+            ParamType::ContinuousFloat { min, max, default, log, .. },
+            ParamType::ContinuousFloat { min: cmin, max: cmax, .. },
+        ) => match target.aspect {
+            MetaAspect::Min | MetaAspect::Max | MetaAspect::Default => {
+                let Ok(v_in) = value.try_float() else {
+                    warn!("override {}.{:?}: expected float", target.param, target.aspect);
+                    return false;
+                };
+                let v = v_in.clamp(*cmin, *cmax);
+                if v != v_in {
+                    warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
+                          target.param, target.aspect);
+                }
+                match target.aspect {
+                    MetaAspect::Min     => { *min = v;     bound_changed = true; },
+                    MetaAspect::Max     => { *max = v;     bound_changed = true; },
+                    MetaAspect::Default => { *default = v; },
+                    _ => unreachable!(),
+                }
+                true
+            },
+            MetaAspect::Log => {
+                let Ok(v) = value.try_bool() else {
+                    warn!("override {}.{:?}: expected bool", target.param, target.aspect);
+                    return false;
+                };
+                *log = v;
+                true
+            },
+            MetaAspect::Step => {
+                warn!("override {}.{:?}: Step aspect not supported by ContinuousFloat",
+                      target.param, target.aspect);
+                false
+            },
+            MetaAspect::Visible => unreachable!("Visible aspect handled at top level"),
+        },
+        (
+            ParamType::ContinuousInt { min, max, default, .. },
+            ParamType::ContinuousInt { min: cmin, max: cmax, .. },
+        ) => {
+            let Ok(v_in) = value.try_int() else {
+                warn!("override {}.{:?}: expected int", target.param, target.aspect);
+                return false;
+            };
+            let v = v_in.clamp(*cmin, *cmax);
+            if v != v_in {
+                warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
+                      target.param, target.aspect);
+            }
+            match target.aspect {
+                MetaAspect::Min     => { *min = v;     true },
+                MetaAspect::Max     => { *max = v;     true },
+                MetaAspect::Default => { *default = v; true },
+                _ => {
+                    warn!("override {}.{:?}: aspect not applicable to ContinuousInt",
+                          target.param, target.aspect);
+                    false
+                },
+            }
+        },
+        (ParamType::DiscreteBool { default, .. }, _) => {
+            if !matches!(target.aspect, MetaAspect::Default) {
+                warn!("override {}.{:?}: only Default aspect supported for DiscreteBool",
+                      target.param, target.aspect);
+                return false;
+            }
+            let Ok(v) = value.try_bool() else {
+                warn!("override {}.{:?}: expected bool", target.param, target.aspect);
+                return false;
+            };
+            *default = v;
+            true
+        },
+        _ => {
+            warn!("override {}.{:?}: unsupported variant/aspect combination",
+                  target.param, target.aspect);
+            false
+        },
+    };
+
+    // Recompute round_multiplier if min/max shifted on a ContinuousFloat,
+    // so the touched entry stays internally consistent for callers that
+    // don't run a separate finalize pass (i.e. runtime instance-edits).
+    if bound_changed {
+        if let ParamType::ContinuousFloat { min, max, round_multiplier, .. } = &mut resolved[idx].data_kind {
+            *round_multiplier = auto_multiplier(*min, *max);
         }
     }
+
+    changed
 }
-pub fn override_int(map: &HashMap<String, OverrideValue>, key: &str, default: i32) -> i32 {
-    let Some(v) = map.get(key) else { return default; };
-    match v.try_int() {
-        Ok(x)  => x,
-        Err(e) => {
-            warn!("invalid override {key}: {e}; using default {default}");
-            default
-        }
-    }
-}
-pub fn override_bool(map: &HashMap<String, OverrideValue>, key: &str, default: bool) -> bool {
-    let Some(v) = map.get(key) else { return default; };
-    match v.try_bool() {
-        Ok(x)  => x,
-        Err(e) => {
-            warn!("invalid override {key}: {e}; using default {default}");
-            default
-        }
-    }
-}
+
+
 
 // ---------------------------------------------------------------------------
 // Parameterized trait
@@ -450,13 +650,30 @@ pub trait Parameterized {
     /// Get all parameters of the effect.
     fn get_params_info(&self) -> &[ParamInfo];
 
-    /// Set a named parameter.
-    ///
-    /// Parameters that accept stereo values (e.g. `wet`) take either a
-    /// `Float` (applied to both channels) or a `Stereo` pair.
-    /// Scalar-only parameters return an error when given a `Stereo` value.
+    /// Mutable access to the resolved `params_info` for runtime instance-bound
+    /// edits. Implementors return `&mut self.params_info`.
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo];
+
+    /// Set a named parameter. All audio params are scalar; `Float` and `Bool`
+    /// are the only `ParamValue` variants.
     fn set_param(&mut self, param: &str, _value: ParamValue) -> Result<(), String> {
         Err(format!("unknown param '{param}'"))
+    }
+
+    /// Apply an Instance bound override to the live `params_info` on this
+    /// instance. `clamp_ref` is the master-computed Type-resolved view
+    /// (canonical narrowed by `Config.type_overrides` for this effect type) —
+    /// the upper limit on what an Instance edit can set. Returns `true` if
+    /// any field was modified.
+    ///
+    /// Default impl forwards to the kernel; effects don't need to override it.
+    fn set_info_override(
+        &mut self,
+        target:    &MetaTarget,
+        value:     &ParamValue,
+        clamp_ref: &[ParamInfo],
+    ) -> bool {
+        apply_override(self.get_params_info_mut(), clamp_ref, target, value)
     }
 }
 
@@ -464,6 +681,9 @@ pub trait Parameterized {
 impl Parameterized for Box<dyn Device> {
     fn get_params_info(&self) -> &[ParamInfo] {
         (**self).get_params_info()
+    }
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
+        (**self).get_params_info_mut()
     }
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         (**self).set_param(param, value)

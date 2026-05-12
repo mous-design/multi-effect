@@ -48,7 +48,7 @@ export function BottomBar({ hasChains, inChannels, outChannels, onNewChain, onDe
             {confirmDelete ? (
                 <ConfirmDelete
                     message={t('ui.confirm_delete_preset')}
-                    onConfirm={onDeletePreset}
+                    onConfirm={() => { setConfirmDelete(false); onDeletePreset(); }}
                     onCancel={() => setConfirmDelete(false)}
                 />
             ) : (

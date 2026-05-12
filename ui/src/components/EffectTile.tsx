@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { NodeDef } from '../types';
-import { sendAction } from '../api';
+import { sendAction, sendParamMeta } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { t } from '../i18n';
@@ -24,7 +24,7 @@ export const PARAM_META: Record<string, { min: number; max: number; unit?: strin
   loop_gain: { min: 0,    max: 4              },
 };
 
-const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 'max_buffers', 'loop_secs', 'pos_secs', '_wrap_ts']);
+const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 'max_buffers', 'loop_secs', 'pos_secs', '_wrap_ts', 'overrides', 'params_info']);
 
 const PARAM_ORDER: Record<string, string[]> = {
   mix:      ['gain', 'pan', 'dry', 'wet'],
@@ -179,11 +179,16 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
   const transportHidden = hidden.has('transport');
   const hiddenCount = allParams.filter(([k]) => hidden.has(k)).length + (isLooper && transportHidden ? 1 : 0);
 
+  // `transport` is a UI-only composite knob (looper play/rec/stop), not a real
+  // backend param — its visibility lives only in localStorage. All real params
+  // also push `SET_PARAM_META <key>.<param>.visible <bool>` to the backend so
+  // visibility eventually persists via the snapshot (and syncs across clients).
   function hide(param: string) {
     const next = new Set(hidden);
     next.add(param);
     setHidden(next);
     saveHidden(presetName, node.key, next);
+    if (param !== 'transport') sendParamMeta(node.key, param, 'visible', false);
   }
 
   function show(param: string) {
@@ -191,6 +196,7 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
     next.delete(param);
     setHidden(next);
     saveHidden(presetName, node.key, next);
+    if (param !== 'transport') sendParamMeta(node.key, param, 'visible', true);
   }
 
   function renderControl(param: string, val: unknown): React.ReactNode {

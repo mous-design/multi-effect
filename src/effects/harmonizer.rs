@@ -1,9 +1,8 @@
 use std::f32::consts::TAU;
-use std::collections::HashMap;
 use tracing::debug;
 
-use crate::engine::device::{override_float, override_int, find_param_info, check_bounds,
-    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+    ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -89,7 +88,7 @@ pub struct Harmonizer {
     root:      u8,
     /// Velocity sensitivity: 0.0 = ignore velocity (fixed volume), 1.0 = full sensitivity.
     vel_sense: f32,
-    wet:     [f32; 2],
+    wet:     f32,
 
     input_buf:   Vec<Frame>,
     write_pos:   usize,
@@ -103,39 +102,16 @@ pub struct Harmonizer {
     debug_tick:  u32, // rate-limiter for in-process debug logging
 }
 
-fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
-    [
-        ParamInfo::new_discrete_bool("active", true, None),
-        ParamInfo::new_continuous_int(
-            "root",
-            override_int(param_type_props, "harmonizer.root.min", 0),
-            override_int(param_type_props, "harmonizer.root.max", 127),
-            override_int(param_type_props, "harmonizer.root.default", 57),
-            None
-        ),
-        ParamInfo::new_continuous_float(
-            "vel_sense",
-            override_float(param_type_props, "harmonizer.vel_sense.min", 0.0),
-            override_float(param_type_props, "harmonizer.vel_sense.max", 1.0),
-            override_float(param_type_props, "harmonizer.vel_sense.default", 0.0),
-            false,
-            None,
-        ),
-        ParamInfo::new_continuous_float(
-            "wet",
-            override_float(param_type_props, "harmonizer.wet.min", 0.0),
-            override_float(param_type_props, "harmonizer.wet.max", 1.0),
-            override_float(param_type_props, "harmonizer.wet.default", 0.5),
-            false,
-            None,
-        ),
-    ]
-}
-impl Harmonizer {
-    pub fn new(key: impl Into<String>, sample_rate: f32,
-        param_type_props: &HashMap<String, OverrideValue>) -> Self {
+pub static CANONICAL: [ParamInfo; 4] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_int("root", 0, 127, 57, None),
+    ParamInfo::new_continuous_float("vel_sense", 0.0, 1.0, 0.0, false, None),
+    ParamInfo::new_continuous_float("wet",       0.0, 1.0, 0.5, false, None),
+];
 
-        let params_info = build_params_info(param_type_props);
+impl Harmonizer {
+    pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
+        let params_info = into_param_array(params_info, CANONICAL, NAME);
         let active = find_param_info(&params_info,"active").bool_default();
         let root = find_param_info(&params_info,"root").continuous_int_default() as u8;
         let vel_sense = find_param_info(&params_info,"vel_sense").continuous_float_default();
@@ -151,7 +127,7 @@ impl Harmonizer {
 
         Self {
             params_info, key: key.into(),
-            active, wet: [wet; 2], root, vel_sense,
+            active, wet, root, vel_sense,
             input_buf:   vec![[0.0; 2]; buf_size],
             write_pos:   0,
             buf_size,
@@ -209,6 +185,9 @@ impl Parameterized for Harmonizer {
      fn get_params_info(&self) -> &[ParamInfo] {
         &self.params_info
     }
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
+        &mut self.params_info
+    }
 
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         match param {
@@ -230,11 +209,9 @@ impl Parameterized for Harmonizer {
             },
             "wet" => {
                 let info = find_param_info(self.get_params_info(), "wet");
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds(info, l, NAME);
-                let (vr, rr) = check_bounds(info, r, NAME);
-                self.wet = [vl, vr];
-                rl.and(rr)
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.wet = v;
+                r
             },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
@@ -327,8 +304,8 @@ impl Device for Harmonizer {
 
             // Additive blend: wet controls how much harmony is added on top of inp
             eff[i] = [
-                inp[0] + mix[0] * self.wet[0],
-                inp[1] + mix[1] * self.wet[1],
+                inp[0] + mix[0] * self.wet,
+                inp[1] + mix[1] * self.wet,
             ];
 
             // Rate-limited debug: log once per second when voices are active
@@ -337,7 +314,7 @@ impl Device for Harmonizer {
                 if self.debug_tick >= self.sample_rate as u32 {
                     self.debug_tick = 0;
                     debug!("Harmonizer '{}': {} voice(s) | inp=[{:.4},{:.4}] mix=[{:.4},{:.4}] wet={:.2}",
-                        self.key, self.voices.len(), inp[0], inp[1], mix[0], mix[1], self.wet[0]);
+                        self.key, self.voices.len(), inp[0], inp[1], mix[0], mix[1], self.wet);
                 }
             } else {
                 self.debug_tick = 0;

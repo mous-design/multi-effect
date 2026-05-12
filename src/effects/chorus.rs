@@ -1,28 +1,29 @@
 use std::f32::consts::TAU;
-use std::collections::HashMap;
 
-use crate::engine::device::{override_float, find_param_info, check_bounds,
-    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+    ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
 pub const NAME: &str = "chorus";
 
 /// LFO-driven modulation delay (chorus / flanger).
 ///
-/// Each channel has its own ring buffer and LFO phase.  L and R are
+/// Each channel has its own ring buffer and LFO phase. L and R are
 /// initialised 90° apart so the effect widens the stereo image naturally.
 ///
 /// Signal model per sample per channel:
 /// ```text
 /// buf.write(input)
-/// center     = depth_ms * sample_rate / 1000          // delay-line midpoint, in samples
-/// offset     = center * (1.0 + sin(lfo_phase))        // 0 .. 2*center
+/// center     = depth_ms * sample_rate / 1000      // delay-line midpoint, in samples
+/// offset     = center * (1.0 + sin(lfo_phase))    // 0 .. 2*center
 /// wet_sample = lerp(buf, offset)
-/// output     = wet_sample * wet[ch]
+/// output     = inp + wet_sample * wet             // input passes through; wet tap is added
 /// lfo_phase += 2π * rate_hz / sample_rate
 /// ```
 ///
-/// Output is **effect-only** — dry is handled by the `Chain`.
+/// Per the chain convention, `inp` already carries `dry + prior_effects`;
+/// the `Mix` node at the chain tail subtracts the dry component so the engine
+/// output is wet-only — dry is re-added in analog downstream.
 pub struct Chorus {
     params_info: [ParamInfo; 4],
     key: String,
@@ -30,43 +31,21 @@ pub struct Chorus {
     active: bool,
     rate_hz: f32,
     depth_ms: f32,
-    /// Per-channel output level: `[left, right]`. 0.0 = silent, 1.0 = full.
-    wet: [f32; 2],
+    /// Output level applied equally to both channels. 0.0 = silent, 1.0 = full.
+    wet: f32,
     sample_rate: f32,
     lfo_phase: [f32; 2],
 }
-fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
-    [
-        ParamInfo::new_discrete_bool("active", true, None),
-        ParamInfo::new_continuous_float(
-            "rate_hz",
-            override_float(param_type_props, "chorus.rate_hz.min", 0.1),
-            override_float(param_type_props, "chorus.rate_hz.max", 10.0),
-            override_float(param_type_props, "chorus.rate_hz.default", 1.0),
-            true,
-            Some("Hz")
-        ),
-        ParamInfo::new_continuous_float(
-            "depth_ms",
-            override_float(param_type_props, "chorus.depth_ms.min", 0.0),
-            override_float(param_type_props, "chorus.depth_ms.max", 30.0),
-            override_float(param_type_props, "chorus.depth_ms.default", 8.0),
-            true,
-            Some("ms")
-        ),
-        ParamInfo::new_continuous_float(
-            "wet",
-            override_float(param_type_props, "chorus.wet.min", 0.0),
-            override_float(param_type_props, "chorus.wet.max", 1.0),
-            override_float(param_type_props, "chorus.wet.default", 0.5),
-            false,
-            None,
-        ),
-    ]
-}
+pub static CANONICAL: [ParamInfo; 4] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_float("rate_hz",  0.1,  10.0, 1.0, true,  Some("Hz")),
+    ParamInfo::new_continuous_float("depth_ms", 0.0,  30.0, 8.0, true,  Some("ms")).with_non_growable(),
+    ParamInfo::new_continuous_float("wet",      0.0,  1.0,  0.5, false, None),
+];
+
 impl Chorus {
-    pub fn new(key: impl Into<String>, sample_rate: f32, param_type_props: &HashMap<String, OverrideValue>) -> Self {
-        let params_info = build_params_info(param_type_props);
+    pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
+        let params_info = into_param_array(params_info, CANONICAL, NAME);
         let active = find_param_info(&params_info,"active").bool_default();
         let rate_hz = find_param_info(&params_info,"rate_hz").continuous_float_default();
         let wet = find_param_info(&params_info,"wet").continuous_float_default();
@@ -77,7 +56,7 @@ impl Chorus {
         Self {
             params_info, key: key.into(),
             bufs: [RingBuffer::new(max_samples), RingBuffer::new(max_samples)],
-            active, rate_hz, depth_ms, wet: [wet; 2], sample_rate,
+            active, rate_hz, depth_ms, wet, sample_rate,
             lfo_phase: [0.0, TAU / 4.0], // 90° spread between L and R   
         }
     }
@@ -86,6 +65,9 @@ impl Chorus {
 impl Parameterized for Chorus {
     fn get_params_info(&self) -> &[ParamInfo] {
         &self.params_info
+    }
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
+        &mut self.params_info
     }
 
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
@@ -108,11 +90,9 @@ impl Parameterized for Chorus {
             },
             "wet" => {
                 let info = find_param_info(self.get_params_info(), "wet");
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds(info, l, NAME);
-                let (vr, rr) = check_bounds(info, r, NAME);
-                self.wet = [vl, vr];
-                rl.and(rr)
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.wet = v;
+                r
             },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
@@ -141,7 +121,7 @@ impl Device for Chorus {
                 let offset = center * (1.0 + lfo);
 
                 // Read the float offset with linear interpolation
-                e[ch] = inp + self.bufs[ch].read_lerp(offset) * self.wet[ch];
+                e[ch] = inp + self.bufs[ch].read_lerp(offset) * self.wet;
 
                 self.lfo_phase[ch] += phase_inc;
                 if self.lfo_phase[ch] >= TAU {

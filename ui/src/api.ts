@@ -123,6 +123,13 @@ export async function sendAction(target: string, action: string): Promise<boolea
     return (await sendWs(`SET ${target} ${action}`))[0];
 }
 
+// SET_PARAM_META <node-key>.<param>.<aspect> <value>
+// e.g. sendParamMeta('04-chorus', 'depth_ms', 'visible', false)
+export async function sendParamMeta(nodeKey: string, param: string, aspect: string, value: number | boolean): Promise<boolean> {
+    const v = typeof value === 'boolean' ? (value ? 'true' : 'false') : value;
+    return (await sendWs(`SET_PARAM_META ${nodeKey}.${param}.${aspect} ${v}`, 'STATE'))[0];
+}
+
 export async function savePreset(n: number):Promise<boolean> {
     return (await sendWs(`SAVE_PRESET ${n}`))[0];
 }

@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-use crate::engine::device::{override_float, find_param_info, check_bounds,
-    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+    ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
 pub const NAME: &str = "delay";
@@ -12,9 +11,9 @@ pub const NAME: &str = "delay";
 ///
 /// Signal model per sample per channel:
 /// ```text
-/// delayed = buf.read_at(delay_samples)         // tap from `time` seconds ago
-/// buf.write(inp + delayed * feedback)          // recurrence — feedback drives repeats
-/// output  = inp + delayed * wet[ch]            // input passes through; wet tap is added
+/// delayed = buf.read_at(delay_samples)        // tap from `time` seconds ago
+/// buf.write(inp + delayed * feedback)         // recurrence — feedback drives repeats
+/// output  = inp + delayed * wet               // input passes through; wet tap is added
 /// ```
 ///
 /// Per the chain convention, `inp` already carries `dry + prior_effects`
@@ -28,42 +27,21 @@ pub struct Delay {
     active: bool,
     delay_samples: usize,
     feedback: f32,
-    /// Per-channel output level: `[left, right]`. 0.0 = silent, 1.0 = full.
-    wet: [f32; 2],
+    /// Output level applied equally to both channels. 0.0 = silent, 1.0 = full.
+    wet: f32,
     sample_rate: f32,
 }
-fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 4] {
-    [
-        ParamInfo::new_discrete_bool("active", true, None),
-        ParamInfo::new_continuous_float(
-            "time",
-            override_float(param_type_props, "delay.time.min", 0.1),
-            override_float(param_type_props, "delay.time.max", 2.0),
-            override_float(param_type_props, "delay.time.default", 1.0),
-            true, // @todo see how this works.
-            Some("s"),
-        ),
-        ParamInfo::new_continuous_float(
-            "feedback",
-            override_float(param_type_props, "delay.feedback.min", 0.0),
-            override_float(param_type_props, "delay.feedback.max", 1.0),
-            override_float(param_type_props, "delay.feedback.default", 0.4),
-            false,
-            None,
-        ),
-        ParamInfo::new_continuous_float(
-            "wet",
-            override_float(param_type_props, "delay.wet.min", 0.0),
-            override_float(param_type_props, "delay.wet.max", 1.0),
-            override_float(param_type_props, "delay.wet.default", 0.5),
-            false,
-            None,
-        ),
-    ]
-}
+
+pub static CANONICAL: [ParamInfo; 4] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_float("time",     0.1, 2.0, 1.0, true,  Some("s")).with_non_growable(),
+    ParamInfo::new_continuous_float("feedback", 0.0, 1.0, 0.4, false, None),
+    ParamInfo::new_continuous_float("wet",      0.0, 1.0, 0.5, false, None),
+];
+
 impl Delay {
-    pub fn new(key: impl Into<String>, sample_rate: f32, param_type_props: &HashMap<String, OverrideValue>) -> Self {
-        let params_info = build_params_info(param_type_props);
+    pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
+        let params_info = into_param_array(params_info, CANONICAL, NAME);
         let feedback = find_param_info(&params_info,"feedback").continuous_float_default();
         let wet = find_param_info(&params_info,"wet").continuous_float_default();
         let active = find_param_info(&params_info,"active").bool_default();
@@ -74,7 +52,7 @@ impl Delay {
             params_info, key: key.into(),
             bufs: [RingBuffer::new(max_samples), RingBuffer::new(max_samples)],
             delay_samples,
-            feedback, wet: [wet; 2], active, sample_rate,
+            feedback, wet, active, sample_rate,
         }
     }
 }
@@ -82,6 +60,9 @@ impl Delay {
 impl Parameterized for Delay {
      fn get_params_info(&self) -> &[ParamInfo] {
         &self.params_info
+    }
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
+        &mut self.params_info
     }
 
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
@@ -106,11 +87,9 @@ impl Parameterized for Delay {
             },
             "wet" => {
                 let info = find_param_info(self.get_params_info(), "wet");
-                let [l, r] = value.try_stereo()?;
-                let (vl, rl) = check_bounds(info, l, NAME);
-                let (vr, rr) = check_bounds(info, r, NAME);
-                self.wet = [vl, vr];
-                rl.and(rr)
+                let (v, r) = check_bounds(info, value.try_float()?, NAME);
+                self.wet = v;
+                r
             },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
@@ -130,7 +109,7 @@ impl Device for Delay {
                 let inp = e[ch];
                 let delayed = self.bufs[ch].read_at(self.delay_samples);
                 self.bufs[ch].write(inp + delayed * self.feedback);
-                e[ch] = inp + delayed * self.wet[ch];
+                e[ch] = inp + delayed * self.wet;
             }
         }
     }

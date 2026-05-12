@@ -100,7 +100,7 @@ Globally unique stable IDs. Recommended format: `{index:02}-{type}` (e.g. `04-de
 
 ## Effect parameters
 
-All numeric params accept integers or floats. Out-of-range values are clamped and logged. `wet` and `dry` accept either a single float (applied to both channels) or `[L, R]`.
+All numeric params accept integers or floats. Out-of-range values are clamped and logged. All audio params are scalar — `wet` and `dry` apply equally to both channels; per-channel balance, when needed, is a separate `pan` parameter.
 
 ### delay
 
@@ -216,6 +216,30 @@ MIDI Program Change (`0xC0`) maps to preset switching automatically.
 
 ---
 
+## Flow of parameter-settings
+                 CONFIG (in master + in JSON)
+                 ──────────────────────────────
+                 type_overrides[effect_type] ──┐
+                                               │
+  canonical                                    ▼       
+ (pub static) ────────► build_info ────► type_resolved view
+                                                 │
+ used as clamp_ref for runtime instance edits ◄──│
+                                                 │
+ used to seed Effect::new at construction     ◄──┘
+              │
+              ▼
+  instance.params_info  ◄── set_info_override (runtime edit)
+              │
+              ▼
+        set_param ◄── live value knob
+              │
+              ▼
+  instance fields (wet, rate_hz, ...)
+              │
+              ▼
+        audio loop
+
 ## Line protocol — net / serial / WebSocket
 
 All transports speak the same line-based text protocol. One command per line (UTF-8). One response per command.
@@ -289,8 +313,8 @@ for each node in chain.nodes:
         # Each Device reads dry_buf[f] + eff_buf[f] as its input
         # and writes wet output to eff_buf[f].
         #
-        # Mix node:
-        #   out[ch] = dry_buf[ch] * dry[ch] + eff_buf[ch] * wet[ch]
+        # Mix node (dry/wet/gain/pan are scalar params):
+        #   out[ch] = ((eff_buf[ch] - dry_buf[ch]) * wet + dry_buf[ch] * dry) * gain * pan_factor[ch]
 
 output_channels += eff_buf              # routed by chain.output
 ```

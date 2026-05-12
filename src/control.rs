@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::debug;
 
-use crate::config::preset::PresetDef;
+use crate::config::snapshot::PresetView;
 
 // ---------------------------------------------------------------------------
 // Connection ID generator
@@ -41,6 +41,17 @@ pub fn connection_id(alias: &str) -> String {
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
     SetParam { path: String, value: f32, source: String },
+    /// Instance bound override (the runtime "edit a param's min/max/default").
+    /// `path` is the node key (e.g. `"04-chorus"`); `target` selects param + aspect.
+    /// `clamp_ref` is the master-computed Type-resolved view, used by the audio
+    /// thread's `apply_override` for clamping. Routed bus-side without `clamp_ref`.
+    SetInfoOverride {
+        path:       String,
+        target:     crate::engine::device::MetaTarget,
+        value:      crate::engine::device::ParamValue,
+        clamp_ref:  Vec<crate::engine::device::ParamInfo>,
+        source:     String,
+    },
     Reset { source: String },
     Action { path: String, action: String, source: String },
 
@@ -49,8 +60,10 @@ pub enum ControlMessage {
     NoteOff { note: u8 },
     NodeEvent { key: String, event: String, data: serde_json::Value },
     /// The current preset's structural content has changed (load / save / compare).
-    /// UI reads `preset.index` from the JSON to know which slot is active.
-    PresetLoaded { preset: PresetDef, source: String },
+    /// Carries a wire-ready `PresetView` (with per-node resolved `params_info`)
+    /// so subscribers can serialise it directly. UI reads `preset.index` to
+    /// know which slot is active.
+    PresetLoaded { preset: PresetView, source: String },
     /// State transition only (Clean / Dirty / Comparing).
     StateChanged { state: String, source: String },
     /// The list of occupied preset slots has changed (save to empty slot, delete).
@@ -61,12 +74,13 @@ impl ControlMessage {
     /// Returns the source identifier for messages that carry one, empty string otherwise.
     pub fn source(&self) -> &str {
         match self {
-            Self::SetParam      { source, .. }
-            | Self::Reset       { source, .. }
-            | Self::Action      { source, .. }
-            | Self::PresetLoaded  { source, .. }
-            | Self::StateChanged  { source, .. }
-            | Self::PresetIndices { source, .. } => source,
+            Self::SetParam          { source, .. }
+            | Self::SetInfoOverride { source, .. }
+            | Self::Reset           { source, .. }
+            | Self::Action          { source, .. }
+            | Self::PresetLoaded    { source, .. }
+            | Self::StateChanged    { source, .. }
+            | Self::PresetIndices   { source, .. } => source,
             _ => "",
         }
     }

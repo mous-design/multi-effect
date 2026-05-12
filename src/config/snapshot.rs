@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -6,6 +7,8 @@ use super::preset::PresetDefs;
 use super::persist_fs::{persist, load};
 use super::preset::PresetDef;
 use super::Config;
+use crate::control::mapping::ControllerDef;
+use crate::engine::device::{MetaTarget, ParamInfo, ParamValue};
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,28 +49,57 @@ pub struct ConfigSnapshot {
     pub preset_indices:  Vec<u8>,
 }
 
-/// Wire-format projection of [`ConfigSnapshot`]: everything a client needs to render,
-/// without the internal `stash` field (which is only meaningful for persistence).
-///
-/// Borrows from the underlying snapshot — zero allocation. Produced by
-/// [`ConfigSnapshot::to_view`].
-#[derive(Serialize)]
-pub struct SnapshotView<'a> {
-    pub state:          &'a SnapshotState,
-    pub preset:         &'a PresetDef,
-    pub preset_indices: &'a [u8],
+/// Wire projection of a `NodeDef`. Same JSON shape as on-disk `NodeDef`
+/// (live values flatten to the top, `overrides` stays a sibling), but adds
+/// the master-computed resolved `params_info` array. The UI uses this to
+/// render whatever knobs the effect declares — without hardcoded knowledge
+/// of effect types.
+#[derive(Clone, Debug, Serialize)]
+pub struct NodeView {
+    pub key: String,
+    #[serde(rename = "type")]
+    pub device_type: String,
+    /// Per-instance metadata overrides currently applied (already baked into
+    /// `params_info`; kept here so the UI can show "this knob has an Instance
+    /// edit" affordances).
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub overrides: HashMap<MetaTarget, ParamValue>,
+    /// Resolved per-instance ParamInfo array: canonical → Type overrides →
+    /// Instance overrides applied.
+    pub params_info: Vec<ParamInfo>,
+    /// Live param values (the flattened scalars: `wet`, `room_size`, …).
+    #[serde(flatten)]
+    pub params: serde_json::Map<String, Value>,
+}
+
+/// Wire projection of a `ChainDef`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChainView {
+    pub input:  [u8; 2],
+    pub output: [u8; 2],
+    pub nodes:  Vec<NodeView>,
+}
+
+/// Wire projection of a `PresetDef`.
+#[derive(Clone, Debug, Serialize)]
+pub struct PresetView {
+    pub index:       u8,
+    pub chains:      Vec<ChainView>,
+    pub controllers: Vec<ControllerDef>,
+}
+
+/// Wire projection of [`ConfigSnapshot`]: everything a client needs to render,
+/// without the internal `stash` field. Owned (so it can cross task boundaries
+/// via oneshot / broadcast channels). Master builds it via
+/// [`crate::config::master::ConfigMaster::build_snapshot_view`].
+#[derive(Clone, Debug, Serialize)]
+pub struct SnapshotView {
+    pub state:          SnapshotState,
+    pub preset:         PresetView,
+    pub preset_indices: Vec<u8>,
 }
 
 impl ConfigSnapshot {
-    /// Borrowed projection for wire output — excludes the internal `stash` field.
-    pub fn to_view(&self) -> SnapshotView<'_> {
-        SnapshotView {
-            state:          &self.state,
-            preset:         &self.preset,
-            preset_indices: &self.preset_indices,
-        }
-    }
-
     pub fn restore_or_build(cfg: &Config) -> Result<Self> {
         Ok(Self::restore_state(&cfg.state_save_path)?.unwrap_or_else(|| Self::build(cfg)))
     }

@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use crate::control::{ControlMessage, EventBus};
-use crate::engine::device::{override_float, override_int, find_param_info, check_bounds,
-    ParamInfo, OverrideValue, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+    ParamInfo, Device, Frame, Parameterized, ParamValue};
 use tracing::warn;
 
 const LOOP_FADE_SAMPLES: usize = 8;
@@ -119,46 +118,17 @@ pub struct Looper {
     event_bus: Option<EventBus>,
 }
 
-fn build_params_info(param_type_props: &HashMap<String, OverrideValue>) -> [ParamInfo; 5] {
-    [
-        ParamInfo::new_discrete_bool("active", true, None),
-        ParamInfo::new_continuous_float(
-            "decay",
-            override_float(param_type_props, "looper.decay.min", 0.0),
-            override_float(param_type_props, "looper.decay.max", 1.0),
-            override_float(param_type_props, "looper.decay.default", 1.0),
-            false,
-            None,
-        ),
-        ParamInfo::new_continuous_float(
-            "max_seconds",
-            override_float(param_type_props, "looper.max_seconds.min", 1.0),
-            override_float(param_type_props, "looper.max_seconds.max", 300.0),
-            override_float(param_type_props, "looper.max_seconds.default", 30.0),
-            false,
-            None,
-        ),
-        ParamInfo::new_continuous_int(
-            "max_buffers",
-            override_int(param_type_props, "looper.max_buffers.min", 0),
-            override_int(param_type_props, "looper.max_buffers.max", 16),
-            override_int(param_type_props, "looper.max_buffers.default",4),
-            None,
-        ),
-        ParamInfo::new_continuous_float(
-            "wet",
-            override_float(param_type_props, "looper.wet.min", 0.0),
-            override_float(param_type_props, "looper.wet.max", 1.0),
-            override_float(param_type_props, "looper.wet.default", 0.5),
-            false,
-            None,
-        ),
-    ]
-}
+pub static CANONICAL: [ParamInfo; 5] = [
+    ParamInfo::new_discrete_bool("active", true, None),
+    ParamInfo::new_continuous_float("decay",       0.0,   1.0,  1.0, false, None),
+    ParamInfo::new_continuous_float("max_seconds", 1.0, 300.0, 30.0, false, Some("s")).with_non_growable(),
+    ParamInfo::new_continuous_int(  "max_buffers", 0,    16,    4,    None),
+    ParamInfo::new_continuous_float("wet",         0.0,   1.0,  0.5, false, None),
+];
+
 impl Looper {
-    pub fn new(key: impl Into<String>, sample_rate: f32, 
-        param_type_props: &HashMap<String, OverrideValue>) -> Self {
-        let params_info = build_params_info(param_type_props);
+    pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
+        let params_info = into_param_array(params_info, CANONICAL, NAME);
         let active = find_param_info(&params_info,"active").bool_default();
         let decay = find_param_info(&params_info,"decay").continuous_float_default();
         let max_seconds = find_param_info(&params_info,"max_seconds").continuous_float_default();
@@ -820,6 +790,9 @@ impl Device for Looper {
 impl Parameterized for Looper {
     fn get_params_info(&self) -> &[ParamInfo] {
         &self.params_info
+    }
+    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
+        &mut self.params_info
     }
 
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {

@@ -48,14 +48,27 @@ pub struct ChainDef {
 ///
 /// ```json
 /// { "key": "04-reverb", "type": "reverb", "room_size": 0.7, "wet": 0.3 }
-/// { "key": "09-mix",    "type": "mix",    "dry": 1.0, "wet": [0.8, 0.6] }
+/// { "key": "09-mix",    "type": "mix",    "dry": 1.0, "wet": 0.8,
+///   "overrides": { "wet.max": 0.5, "dry.visible": false } }
 /// ```
+///
+/// `params` carries the live values (the flattened scalar fields). Replayed
+/// via `set_param` at construction.
+///
+/// `overrides` carries per-instance metadata edits (bound narrowing,
+/// visibility toggles). Keys are `"param.aspect"` strings (see `MetaTarget`).
+/// Replayed via `set_info_override` after construction. Absent / empty for
+/// nodes that haven't been edited.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeDef {
     pub key: String,
 
     #[serde(rename = "type")]
     pub device_type: String,
+
+    /// Per-instance metadata overrides (bounds, visibility, …). Empty by default.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub overrides: std::collections::HashMap<crate::engine::device::MetaTarget, crate::engine::device::ParamValue>,
 
     #[serde(flatten)]
     pub params: serde_json::Map<String, Value>,
@@ -170,6 +183,24 @@ impl Chain {
         Err(format!("no node handles '{param}'"))
     }
 
+    /// Apply an Instance bound override to the node identified by `key`.
+    /// Returns `Ok(true)` if a field changed, `Ok(false)` if the override
+    /// was a no-op, `Err` if no node with that key exists.
+    pub fn set_info_override(
+        &mut self,
+        key:       &str,
+        target:    &crate::engine::device::MetaTarget,
+        value:     &crate::engine::device::ParamValue,
+        clamp_ref: &[crate::engine::device::ParamInfo],
+    ) -> Result<bool, String> {
+        for node in &mut self.nodes {
+            if node.key() == key {
+                return Ok(node.set_info_override(target, value, clamp_ref));
+            }
+        }
+        Err(format!("no node with key '{key}'"))
+    }
+
     pub fn dispatch_action(&mut self, path: &str, action: &str) -> Result<(), String> {
         // Key-prefix routing: "01-looper.action" → node "01-looper", param "action"
         if let Some((key, param)) = path.split_once('.') {
@@ -261,18 +292,42 @@ fn apply_params<P: Parameterized>(
 
 fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
     let sr = cfg.sample_rate as f32;
-    let mut device: Box<dyn Device> = match def.device_type.as_str() {
-        mix::NAME        => Box::new(mix::Mix::new(&def.key, &cfg.param_type_props)),
-        looper::NAME     => Box::new(looper::Looper::new(&def.key, sr, &cfg.param_type_props)),
-        delay::NAME      => Box::new(delay::Delay::new(&def.key, sr, &cfg.param_type_props)),
-        reverb::NAME     => Box::new(reverb::Reverb::new(&def.key, sr, &cfg.param_type_props)),
-        chorus::NAME     => Box::new(chorus::Chorus::new(&def.key, sr, &cfg.param_type_props)),
-        harmonizer::NAME => Box::new(harmonizer::Harmonizer::new(&def.key, sr, &cfg.param_type_props)),
-        eq::NAME_MID     => Box::new(eq::Eq::new(&def.key, EqType::Peak,      sr, &cfg.param_type_props)),
-        eq::NAME_LOW     => Box::new(eq::Eq::new(&def.key, EqType::LowShelf,  sr, &cfg.param_type_props)),
-        eq::NAME_HIGH    => Box::new(eq::Eq::new(&def.key, EqType::HighShelf, sr, &cfg.param_type_props)),
-        other      => bail!("unknown device type: '{other}'"),
+    use crate::engine::device::{build_info as bi, OverrideMap};
+    // Type overrides for this effect type — empty if none configured.
+    let empty = OverrideMap::new();
+    let t = cfg.type_overrides.get(def.device_type.as_str()).unwrap_or(&empty);
+    // Compute Type-resolved view once: used both for construction and as the
+    // clamp_ref when replaying saved overrides below.
+    let type_resolved = match def.device_type.as_str() {
+        mix::NAME        => bi(&mix::CANONICAL, t),
+        looper::NAME     => bi(&looper::CANONICAL, t),
+        delay::NAME      => bi(&delay::CANONICAL, t),
+        reverb::NAME     => bi(&reverb::CANONICAL, t),
+        chorus::NAME     => bi(&chorus::CANONICAL, t),
+        harmonizer::NAME => bi(&harmonizer::CANONICAL, t),
+        eq::NAME_MID     => bi(&eq::CANONICAL_MID,  t),
+        eq::NAME_LOW     => bi(&eq::CANONICAL_LOW,  t),
+        eq::NAME_HIGH    => bi(&eq::CANONICAL_HIGH, t),
+        other            => bail!("unknown device type: '{other}'"),
     };
+    let mut device: Box<dyn Device> = match def.device_type.as_str() {
+        mix::NAME        => Box::new(mix::Mix::new(&def.key, &type_resolved)),
+        looper::NAME     => Box::new(looper::Looper::new(&def.key, sr, &type_resolved)),
+        delay::NAME      => Box::new(delay::Delay::new(&def.key, sr, &type_resolved)),
+        reverb::NAME     => Box::new(reverb::Reverb::new(&def.key, sr, &type_resolved)),
+        chorus::NAME     => Box::new(chorus::Chorus::new(&def.key, sr, &type_resolved)),
+        harmonizer::NAME => Box::new(harmonizer::Harmonizer::new(&def.key, sr, &type_resolved)),
+        eq::NAME_MID     => Box::new(eq::Eq::new(&def.key, EqType::Peak,      sr, &type_resolved)),
+        eq::NAME_LOW     => Box::new(eq::Eq::new(&def.key, EqType::LowShelf,  sr, &type_resolved)),
+        eq::NAME_HIGH    => Box::new(eq::Eq::new(&def.key, EqType::HighShelf, sr, &type_resolved)),
+        other            => bail!("unknown device type: '{other}'"),
+    };
+    // Replay any saved per-instance metadata overrides (bounds, visibility, …).
+    // Each goes through the same `apply_override` kernel master uses at runtime;
+    // `type_resolved` is the clamp_ref, matching the master-side runtime path.
+    for (target, value) in &def.overrides {
+        device.set_info_override(target, value, &type_resolved);
+    }
     apply_params(&mut device, &def.params, &def.key)?;
     debug!("  Node '{}' ({})", def.key, def.device_type);
     Ok(device)
@@ -281,6 +336,24 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Look up the canonical `ParamInfo` array for an effect type, by string name.
+/// Used by master to compute Type-resolved bounds on the fly when the user
+/// submits an Instance bound edit (`SET_PARAM_META`).
+pub fn canonical_for(effect_type: &str) -> Option<&'static [crate::engine::device::ParamInfo]> {
+    match effect_type {
+        mix::NAME        => Some(&mix::CANONICAL),
+        looper::NAME     => Some(&looper::CANONICAL),
+        delay::NAME      => Some(&delay::CANONICAL),
+        reverb::NAME     => Some(&reverb::CANONICAL),
+        chorus::NAME     => Some(&chorus::CANONICAL),
+        harmonizer::NAME => Some(&harmonizer::CANONICAL),
+        eq::NAME_MID     => Some(&eq::CANONICAL_MID),
+        eq::NAME_LOW     => Some(&eq::CANONICAL_LOW),
+        eq::NAME_HIGH    => Some(&eq::CANONICAL_HIGH),
+        _                => None,
+    }
+}
 
 fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
     const EQ_TYPES: &[&str] = &["eq_mid", "eq_low", "eq_high"];
@@ -307,21 +380,16 @@ pub fn load_patch_def(defs: &Vec<ChainDef>, cfg: &Config) -> Result<Vec<Chain>> 
 
 /// Parse a JSON value into a `ParamValue`.
 ///
-/// - `number` or `bool`  → `ParamValue::Float`
-/// - `[number, number]`  → `ParamValue::Stereo`
-/// - anything else       → `Err`
+/// - `number` → `ParamValue::Float`
+/// - `bool`   → `ParamValue::Bool`
+/// - anything else → `Err`
 fn parse_param_value(v: &Value) -> Result<ParamValue> {
     match v {
         Value::Number(n) => Ok(ParamValue::Float(
             n.as_f64().ok_or_else(|| anyhow::anyhow!("invalid number: {v}"))? as f32,
         )),
         Value::Bool(b) => Ok(ParamValue::Bool(*b)),
-        Value::Array(arr) if arr.len() == 2 => Ok(ParamValue::Stereo([
-            arr[0].as_f64().ok_or_else(|| anyhow::anyhow!("array element 0 is not a number"))? as f32,
-            arr[1].as_f64().ok_or_else(|| anyhow::anyhow!("array element 1 is not a number"))? as f32,
-        ])),
-        Value::Array(arr) => bail!("expected [number, number], got array with {} elements", arr.len()),
-        _ => bail!("expected number or [number, number], got: {v}"),
+        _ => bail!("expected number or bool, got: {v}"),
     }
 }
 

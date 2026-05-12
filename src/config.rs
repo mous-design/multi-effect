@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use persist_fs::{persist,load};
 use crate::{control::mapping::DeviceDef, engine::patch::ChainDef};
 use preset::PresetDefs;
-use crate::engine::device::OverrideValue;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -76,10 +75,12 @@ pub struct Config {
     #[serde(default)]
     pub presets: PresetDefs,
 
-    /// Override values for indiviual properties of params_info. Each key is 
-    /// `<effect-name>.<param-name>.<property>`.
-    /// The effect decides which properties are actually overwritable.
-    pub param_type_props: HashMap<String, OverrideValue>,
+    /// Per-effect-type bound overrides, keyed by effect type
+    /// (`"chorus"`, `"delay"`, ...). Each value is a flat
+    /// `{"param.aspect": value}` map; see `engine::device::MetaTarget`.
+    /// Empty / absent = no Type overrides; effects use canonical defaults.
+    #[serde(default)]
+    pub type_overrides: HashMap<String, crate::engine::device::OverrideMap>,
 
     /// Log target: "stderr" (default) or "syslog"
     #[serde(default = "Config::default_log_target")]
@@ -170,7 +171,7 @@ impl Default for Config {
             control_devices:      HashMap::new(),
             chains:               Vec::new(),
             presets:              PresetDefs::default(),
-            param_type_props:          HashMap::new(),
+            type_overrides:       HashMap::new(),
             state_save_path:      Self::default_state_save_path(),
             log_target:           Self::default_log_target(),
             state_save_interval:  Self::default_state_save_interval(),
