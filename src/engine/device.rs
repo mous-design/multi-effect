@@ -225,12 +225,14 @@ impl ParamInfo {
 
     /// Mark this param hidden by default in the UI. Per-preset overrides
     /// can still flip it back on via `SET_PARAM_META <key>.<param>.visible true`.
+    #[allow(dead_code)]
     pub const fn with_hidden(self) -> Self {
         Self { visible: false, ..self }
     }
 
     /// Tag this entry as a per-effect-type bound editor for the targeted live
     /// param (matched by `name`). `aspect` selects which bound is edited.
+    #[allow(dead_code)]
     pub const fn with_kind_type_meta(self, aspect: MetaAspect) -> Self {
         Self {
             kind: ParamKind::TypeMeta { aspect },
@@ -240,6 +242,7 @@ impl ParamInfo {
 
     /// Tag this entry as a per-instance bound editor for the targeted live
     /// param. Same shape as `with_kind_type_meta` but applied per-tile.
+    #[allow(dead_code)]
     pub const fn with_kind_instance_meta(self, aspect: MetaAspect) -> Self {
         Self {
             kind: ParamKind::InstanceMeta { aspect },
@@ -271,12 +274,14 @@ impl ParamInfo {
             _ => panic!("{}: expected ContinuousInt", self.name),
         }
     }
+    #[allow(dead_code)]
     pub fn continuous_int_min(&self) -> i32 {
         match &self.data_kind {
             ParamType::ContinuousInt { min, .. } => *min,
             _ => panic!("{}: expected ContinuousInt", self.name),
         }
     }
+    #[allow(dead_code)]
     pub fn continuous_int_max(&self) -> i32 {
         match &self.data_kind {
             ParamType::ContinuousInt { max, .. } => *max,
