@@ -31,13 +31,14 @@ pub struct Mix {
     active: bool,
 }
  
-// Hardcoded ranges, these are structural.
+// Hardcoded ranges, these are structural. `dry`/`wet` hidden by default —
+// they only matter when reconfiguring an effect's analogue-bypass behaviour.
 pub static CANONICAL: [ParamInfo; 5] = [
     ParamInfo::new_discrete_bool("active", true, None),
     ParamInfo::new_continuous_float("dry",   0.0, 1.0, 1.0, false, None),
     ParamInfo::new_continuous_float("wet",   0.0, 1.0, 1.0, false, None),
-    ParamInfo::new_continuous_float("gain",  0.0, 1.0, 1.0, false, None),
-    ParamInfo::new_continuous_float("pan", -1.0, 1.0, 0.0, false, None),
+    ParamInfo::new_continuous_float("gain",  0.0, 1.0, 1.0, false, None).with_hidden(),
+    ParamInfo::new_continuous_float("pan", -1.0, 1.0, 0.0, false, None).with_hidden(),
 ];
 
 impl Mix {

@@ -58,6 +58,7 @@ interface Props {
   devices: DeviceMap;
   allNodes: NodeDef[];
   onSet: (path: string, value: number | boolean) => void;
+  onMetaSet: (nodeKey: string, param: string, aspect: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
   onReorder: (chainIdx: number, newNodes: NodeDef[]) => void;
   onAddNode: (chainIdx: number, node: NodeDef) => void;
@@ -66,7 +67,7 @@ interface Props {
   onSaveControllers: (controllers: ControllerDef[]) => void;
 }
 
-export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, onSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
+export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, onSet, onMetaSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
   const items = groupNodes(chain.nodes);
 
   const [mappingsOpen, setMappingsOpen] = useState(false);
@@ -218,12 +219,12 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
                 <div className="eq-group-wrapper">
                   {item.map((node) => (
                     <div key={node.key} className="eq-band-wrapper">
-                      <EffectTile node={node} presetName={presetName} onSet={onSet} onDelete={onDelete} />
+                      <EffectTile node={node} presetName={presetName} onSet={onSet} onMetaSet={onMetaSet} onDelete={onDelete} />
                     </div>
                   ))}
                 </div>
               ) : (
-                <EffectTile node={item} presetName={presetName} onSet={onSet} onDelete={onDelete} />
+                <EffectTile node={item} presetName={presetName} onSet={onSet} onMetaSet={onMetaSet} onDelete={onDelete} />
               )}
             </div>
           );

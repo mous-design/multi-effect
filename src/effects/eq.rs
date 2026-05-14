@@ -52,22 +52,24 @@ pub struct Eq {
 
 // One canonical per EQ type — only the per-band defaults differ.
 // `freq`/`q`/`gain_db` ranges are shared (overridable globally via `eq.<param>.<aspect>`).
+// Low/high shelves hide `freq` by default (shelf frequencies are usually set once);
+// mid-band hides `q` (most uses are gentle wide-Q boosts/cuts).
 pub static CANONICAL_LOW: [ParamInfo; 4] = [
     ParamInfo::new_discrete_bool("active", true, None),
-    ParamInfo::new_continuous_float("freq",       20.0, 20000.0,   100.0, true,  Some("Hz")),
-    ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None),
+    ParamInfo::new_continuous_float("freq",       20.0, 20000.0,   100.0, true,  Some("Hz")).with_hidden(),
+    ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None).with_hidden(),
     ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
 ];
 pub static CANONICAL_MID: [ParamInfo; 4] = [
     ParamInfo::new_discrete_bool("active", true, None),
     ParamInfo::new_continuous_float("freq",       20.0, 20000.0,  1000.0, true,  Some("Hz")),
-    ParamInfo::new_continuous_float("q",           0.1,    10.0,     1.0, true,  None),
+    ParamInfo::new_continuous_float("q",           0.1,    10.0,     1.0, true,  None).with_hidden(),
     ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
 ];
 pub static CANONICAL_HIGH: [ParamInfo; 4] = [
     ParamInfo::new_discrete_bool("active", true, None),
-    ParamInfo::new_continuous_float("freq",       20.0, 20000.0, 10000.0, true,  Some("Hz")),
-    ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None),
+    ParamInfo::new_continuous_float("freq",       20.0, 20000.0, 10000.0, true,  Some("Hz")).with_hidden(),
+    ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None).with_hidden(),
     ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
 ];
 

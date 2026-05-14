@@ -1,22 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import type { NodeDef, ParamInfo } from '../types';
-import { sendAction, sendParamMeta } from '../api';
+import { sendAction } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { t } from '../i18n';
 
-// Default-hidden params per effect type. Initialises the local visibility set
-// on first sight; user toggles override and persist via localStorage +
-// `SET <key>.<param>.visible <bool>` (meta form). Will move to canonical
-// `with_hidden()` flags on the backend (info.visible) once every effect declares
-// them.
-const DEFAULT_HIDDEN: Record<string, string[]> = {
-  mix:      ['dry', 'wet'],
-  eq_mid:   ['q'],
-  eq_low:   ['freq'],
-  eq_high:  ['freq'],
-  looper:   ['transport'],
-};
+// Looper `transport` is a UI-only composite widget (rec/play/stop + timer +
+// seek), not a real backend param — its visibility lives only in localStorage.
+// All real params get their visibility from `info.visible` (canonical
+// `with_hidden()` or runtime `SET <key>.<param>.visible <bool>` overrides).
+const TRANSPORT_KEY = 'transport';
+const LOOPER_TRANSPORT_HIDDEN_DEFAULT = true;
 
 function EyeIcon() {
   return (
@@ -74,24 +68,25 @@ function getRenderableParams(node: NodeDef): { info: ParamInfo; value: unknown }
     .map(info => ({ info, value: effectiveValue(node, info) }));
 }
 
-function lsKey(preset: string, nodeKey: string) {
-  return `hidden:${preset}:${nodeKey}`;
+// Transport-only localStorage. Real-param visibility comes from `info.visible`
+// on the wire; only the looper's UI-only `transport` widget caches its hidden
+// state here.
+function transportLsKey(preset: string, nodeKey: string) {
+  return `transport-hidden:${preset}:${nodeKey}`;
 }
-
-function loadHidden(preset: string, nodeKey: string, nodeType: string): Set<string> {
-  const stored = localStorage.getItem(lsKey(preset, nodeKey));
-  if (stored !== null) return new Set(JSON.parse(stored) as string[]);
-  return new Set(DEFAULT_HIDDEN[nodeType] ?? []);
+function loadTransportHidden(preset: string, nodeKey: string): boolean {
+  const stored = localStorage.getItem(transportLsKey(preset, nodeKey));
+  return stored === null ? LOOPER_TRANSPORT_HIDDEN_DEFAULT : stored === 'true';
 }
-
-function saveHidden(preset: string, nodeKey: string, hidden: Set<string>) {
-  localStorage.setItem(lsKey(preset, nodeKey), JSON.stringify([...hidden]));
+function saveTransportHidden(preset: string, nodeKey: string, hidden: boolean) {
+  localStorage.setItem(transportLsKey(preset, nodeKey), hidden ? 'true' : 'false');
 }
 
 interface Props {
   node: NodeDef;
   presetName: string;
   onSet: (path: string, value: number | boolean) => void;
+  onMetaSet: (nodeKey: string, param: string, aspect: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
 }
 
@@ -138,13 +133,13 @@ function useLooperTimer(node: NodeDef): string {
   return `${sInt}.${sTenth}`;
 }
 
-export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
-  const [hidden, setHidden] = useState(() => loadHidden(presetName, node.key, node.type));
+export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [transportHidden, setTransportHidden] = useState(() => loadTransportHidden(presetName, node.key));
   const looperTime = useLooperTimer(node);
 
   useEffect(() => {
-    setHidden(loadHidden(presetName, node.key, node.type));
+    setTransportHidden(loadTransportHidden(presetName, node.key));
     setExpanded(false);
   }, [presetName, node.key]);
 
@@ -166,27 +161,20 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
   useEffect(() => {
     if (isLooper && looperStateVal !== 'Stop') setSeekEditing(false);
   }, [isLooper, looperStateVal]);
-  const transportHidden = hidden.has('transport');
-  const hiddenCount = bodyParams.filter(({ info }) => hidden.has(info.name)).length + (isLooper && transportHidden ? 1 : 0);
 
-  // `transport` is a UI-only composite knob (looper play/rec/stop), not a real
-  // backend param — its visibility lives only in localStorage. All real params
-  // also push `SET <key>.<param>.visible <bool>` (meta form) to the backend so
-  // visibility eventually persists via the snapshot (and syncs across clients).
-  function hide(param: string) {
-    const next = new Set(hidden);
-    next.add(param);
-    setHidden(next);
-    saveHidden(presetName, node.key, next);
-    if (param !== 'transport') sendParamMeta(node.key, param, 'visible', false);
-  }
+  const hiddenCount = bodyParams.filter(({ info }) => !info.visible).length
+                    + (isLooper && transportHidden ? 1 : 0);
 
-  function show(param: string) {
-    const next = new Set(hidden);
-    next.delete(param);
-    setHidden(next);
-    saveHidden(presetName, node.key, next);
-    if (param !== 'transport') sendParamMeta(node.key, param, 'visible', true);
+  // Eye toggle. Real params: round-trip via `onMetaSet` (optimistic
+  // `info.visible` update in App state, wire `SET <key>.<param>.visible`).
+  // Transport: UI-only widget, localStorage cache.
+  function setVisible(param: string, visible: boolean) {
+    if (param === TRANSPORT_KEY) {
+      setTransportHidden(!visible);
+      saveTransportHidden(presetName, node.key, !visible);
+    } else {
+      onMetaSet(node.key, param, 'visible', visible);
+    }
   }
 
   function renderControl(info: ParamInfo, val: unknown): React.ReactNode {
@@ -211,7 +199,7 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
     }
   }
 
-  const visibleParams = bodyParams.filter(({ info }) => !hidden.has(info.name));
+  const visibleParams = bodyParams.filter(({ info }) => info.visible);
 
   return (
     <div className={`tile${active ? '' : ' inactive'}${expanded ? ' expanded' : ''}`}>
@@ -347,14 +335,14 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
                 <button className="param-vis-btn"
                   title={transportHidden ? t('ui.show_param') : t('ui.hide_param')}
                   onMouseDown={e => e.stopPropagation()}
-                  onClick={() => transportHidden ? show('transport') : hide('transport')}>
+                  onClick={() => setVisible(TRANSPORT_KEY, transportHidden)}>
                   {transportHidden ? <EyeIcon /> : <EyeOffIcon />}
                 </button>
               </div>
             );
           })()}
           {(expanded ? bodyParams : visibleParams).map(({ info, value }) => {
-            const isHidden = hidden.has(info.name);
+            const isHidden = !info.visible;
             const ctrl = renderControl(info, value);
             if (!ctrl) return null;
             return (
@@ -364,7 +352,7 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
                   className="param-vis-btn"
                   title={isHidden ? t('ui.show_param') : t('ui.hide_param')}
                   onMouseDown={e => e.stopPropagation()}
-                  onClick={() => isHidden ? show(info.name) : hide(info.name)}
+                  onClick={() => setVisible(info.name, isHidden)}
                 >
                   {isHidden ? <EyeIcon /> : <EyeOffIcon />}
                 </button>

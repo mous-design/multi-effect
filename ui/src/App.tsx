@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AppState, ChainDef, ControllerDef, NodeDef } from './types';
-import { sendSet, sendChains, savePreset, saveConfig, sendProgram, deletePreset, sendCompare } from './api';
+import { sendSet, sendChains, savePreset, saveConfig, sendProgram, deletePreset, sendCompare, sendParamMeta } from './api';
 import { t } from './i18n';
 import { useToasts } from './hooks/useToasts';
 import { useTheme } from './hooks/useTheme';
@@ -69,8 +69,7 @@ export default function App() {
         switch(msg) {
             case 'PARAM': {
                 const [path, valueStr] = splitN(params, ' ', 2);
-                const [nodeKey, param] = splitN(path, '.', 2);
-                if (!nodeKey || !param) return;
+                const segs = path.split('.');
                 // Typed wire — match the server's Bool → Int → Float → Action
                 // order. Bools arrive as `true`/`false` (not 0/1).
                 let value: number | string | boolean;
@@ -81,17 +80,34 @@ export default function App() {
                     value = isFinite(num) ? num : valueStr;
                 }
                 setIsDirty(true);
-                setState(prev => {
-                    if (!prev) return prev;
-                    return {
+                if (segs.length === 2) {
+                    // 2-segment path = param value change.
+                    const [nodeKey, param] = segs;
+                    setState(prev => prev && {
                         ...prev, chains: prev.chains.map(chain => ({
                             ...chain,
                             nodes: chain.nodes.map(node =>
                                 node.key === nodeKey ? {...node, [param]: value} : node
                             ),
                         }))
-                    };
-                });
+                    });
+                } else if (segs.length === 3) {
+                    // 3-segment path = meta override (min/max/default/log/visible/…).
+                    const [nodeKey, param, aspect] = segs;
+                    setState(prev => prev && {
+                        ...prev, chains: prev.chains.map(chain => ({
+                            ...chain,
+                            nodes: chain.nodes.map(node => node.key === nodeKey
+                                ? { ...node, params_info: node.params_info?.map(info =>
+                                    info.name === param && info.kind?.tag === 'ParamMeta'
+                                        ? { ...info, [aspect]: value }
+                                        : info
+                                  ) }
+                                : node
+                            ),
+                        }))
+                    });
+                }
                 break;
             }
             case 'SNAPSHOT':
@@ -232,6 +248,26 @@ export default function App() {
         sendSet(path, value);
     };
 
+    // Meta-override (3-segment SET) — bound / visibility edit on a single
+    // param. Optimistic update of `params_info[i].<aspect>` on the addressed
+    // node; the server's PARAM broadcast goes to other clients only.
+    const handleMetaSet = (nodeKey: string, param: string, aspect: string, value: number | boolean) => {
+        setState(prev => prev && {
+            ...prev, chains: prev.chains.map(chain => ({
+                ...chain,
+                nodes: chain.nodes.map(node => node.key === nodeKey
+                    ? { ...node, params_info: node.params_info?.map(info =>
+                        info.name === param && info.kind?.tag === 'ParamMeta'
+                            ? { ...info, [aspect]: value }
+                            : info
+                      ) }
+                    : node
+                ),
+            }))
+        });
+        sendParamMeta(nodeKey, param, aspect, value);
+    };
+
     const handleDelete = (nodeKey: string) => {
         const prev = stateRef.current;
         if (!prev) return;
@@ -364,6 +400,7 @@ export default function App() {
                         devices={devices}
                         allNodes={state.chains.flatMap(c => c.nodes)}
                         onSet={handleSet}
+                        onMetaSet={handleMetaSet}
                         onDelete={handleDelete}
                         onReorder={handleReorder}
                         onAddNode={handleAddNode}
