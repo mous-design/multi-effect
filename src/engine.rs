@@ -9,9 +9,8 @@ use cpal::{BufferSize, SampleRate, StreamConfig};
 use tracing::{info, warn};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::control::ControlMessage;
-use crate::engine::device::ParamValue;
-use crate::engine::patch::Chain;
+use super::control::ControlMessage;
+use super::engine::patch::Chain;
 
 // ---------------------------------------------------------------------------
 // AudioHandle — the "remote control" for the audio engine.
@@ -233,7 +232,7 @@ impl AudioEngine {
         while let Ok(msg) = self.control_rx.pop() {
             match msg {
                 ControlMessage::SetParam { path, value, ref source } => {
-                    let handled = self.chains.iter_mut().any(|c| c.set_param(&path, ParamValue::Float(value)).is_ok());
+                    let handled = self.chains.iter_mut().any(|c| c.set_param(&path, value).is_ok());
                     if !handled {
                         warn!("SET '{path}' {value} [source={source}]: unknown parameter");
                     }
@@ -241,7 +240,7 @@ impl AudioEngine {
                 ControlMessage::SetInfoOverride { path, target, value, clamp_ref, ref source } => {
                     let handled = self.chains.iter_mut().any(|c| c.set_info_override(&path, &target, &value, &clamp_ref).is_ok());
                     if !handled {
-                        warn!("SET_PARAM_META '{path}.{}.{:?}' [source={source}]: unknown node", target.param, target.aspect);
+                        warn!("SET '{path}.{}.{:?}' [source={source}]: unknown node", target.param, target.aspect);
                     }
                 },
                 ControlMessage::Reset { .. } => {

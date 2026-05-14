@@ -1,8 +1,17 @@
 import { useEffect, useState } from 'react';
-import { ControllerDef, DeviceMap, NodeDef } from '../types';
-import { PARAM_META } from './EffectTile';
+import type { ControllerDef, DeviceMap, NodeDef, ParamInfo } from '../types';
 import { putControllers } from '../api';
 import { t } from '../i18n';
+
+/// Default mapping range for a target param. Continuous types map to their
+/// declared `[min, max]`; bool / event / discrete fall back to `[0, 1]`
+/// (the mapping rounds at the target).
+function paramRange(info: ParamInfo | undefined): { min: number; max: number } {
+    if (info && (info.type === 'ContinuousFloat' || info.type === 'ContinuousInt')) {
+        return { min: info.min, max: info.max };
+    }
+    return { min: 0, max: 1 };
+}
 
 interface MappingRow {
     id: string;
@@ -53,14 +62,12 @@ function toApi(rows: MappingRow[]): ControllerDef[] {
     return Array.from(map.values());
 }
 
-const SKIP_PARAMS = new Set(['key', 'type', 'active']);
-
 // --- Sub-components ---
 
 function MappingGridRow({ row, nodeKeys, paramsFor, onUpdate, onDelete }: {
     row: MappingRow;
     nodeKeys: string[];
-    paramsFor: (nodeKey: string) => string[];
+    paramsFor: (nodeKey: string) => ParamInfo[];
     onUpdate: (id: string, patch: Partial<MappingRow>) => void;
     onDelete: (id: string) => void;
 }) {
@@ -70,16 +77,24 @@ function MappingGridRow({ row, nodeKeys, paramsFor, onUpdate, onDelete }: {
             placeholder="70" />
         <select value={row.targetNode} onChange={e => {
             const node = e.target.value;
-            onUpdate(row.id, { targetNode: node, targetParam: paramsFor(node)[0] ?? '' });
+            const first = paramsFor(node)[0];
+            const range = paramRange(first);
+            onUpdate(row.id, {
+                targetNode: node,
+                targetParam: first?.name ?? '',
+                paramMin: range.min, paramMax: range.max,
+            });
         }}>
             {nodeKeys.map(k => <option key={k} value={k}>{k}</option>)}
         </select>
         <select value={row.targetParam} onChange={e => {
             const p = e.target.value;
-            const meta = PARAM_META[p];
-            onUpdate(row.id, { targetParam: p, paramMin: meta?.min ?? 0, paramMax: meta?.max ?? 1 });
+            const info = paramsFor(row.targetNode).find(i => i.name === p);
+            const range = paramRange(info);
+            onUpdate(row.id, { targetParam: p, paramMin: range.min, paramMax: range.max });
         }}>
-            {paramsFor(row.targetNode).map(p => <option key={p} value={p}>{p}</option>)}
+            {paramsFor(row.targetNode).map(info =>
+                <option key={info.name} value={info.name}>{info.name}</option>)}
         </select>
         <div className="range-pair">
             <input type="number" value={row.ctrlMin}
@@ -101,7 +116,7 @@ function DeviceGroup({ alias, rows, nodeKeys, paramsFor, onUpdate, onDelete, onA
     alias: string;
     rows: MappingRow[];
     nodeKeys: string[];
-    paramsFor: (nodeKey: string) => string[];
+    paramsFor: (nodeKey: string) => ParamInfo[];
     onUpdate: (id: string, patch: Partial<MappingRow>) => void;
     onDelete: (id: string) => void;
     onAddRow: (device: string) => void;
@@ -149,10 +164,12 @@ export function MappingsPanel({ controllers, devices, allNodes, onSave, onClose 
     const deviceAliases = Object.keys(devices);
     const nodeKeys = [...new Set(allNodes.map(n => n.key))];
 
-    function paramsFor(nodeKey: string): string[] {
-        return allNodes
-            .filter(n => n.key === nodeKey)
-            .flatMap(n => Object.keys(n).filter(p => !SKIP_PARAMS.has(p)));
+    /// Renderable live-params for a node — same filter as the tile uses, so the
+    /// mapping picker stays in sync with what the user sees on the effect.
+    function paramsFor(nodeKey: string): ParamInfo[] {
+        const node = allNodes.find(n => n.key === nodeKey);
+        if (!node?.params_info) return [];
+        return node.params_info.filter(info => info.kind?.tag === 'ParamMeta');
     }
 
     function defaultCtrlMax(alias: string): number {
@@ -169,18 +186,18 @@ export function MappingsPanel({ controllers, devices, allNodes, onSave, onClose 
 
     function addRowForDevice(device: string) {
         const targetNode = nodeKeys[0] ?? '';
-        const targetParam = paramsFor(targetNode)[0] ?? '';
-        const meta = PARAM_META[targetParam];
+        const first = paramsFor(targetNode)[0];
+        const range = paramRange(first);
         setRows(prev => [...prev, {
             id: Math.random().toString(36).slice(2),
             device,
             ctrlKey: defaultCtrlKey(device),
             targetNode,
-            targetParam,
+            targetParam: first?.name ?? '',
             ctrlMin: 0,
             ctrlMax: defaultCtrlMax(device),
-            paramMin: meta?.min ?? 0,
-            paramMax: meta?.max ?? 1,
+            paramMin: range.min,
+            paramMax: range.max,
         }]);
     }
 

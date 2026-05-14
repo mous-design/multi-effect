@@ -38,7 +38,10 @@ export function Knob({ nodeKey, param, value, min, max, label, unit, log, onSet 
   const dragRef = useRef<{ startY: number; startVal: number } | null>(null);
   const cx = 40, cy = 40, r = 28;
   const START = -135, END = 135, RANGE = 270;
-  const norm = log ? valToLog(value, min, max) : Math.max(0, Math.min(1, (value - min) / (max - min)));
+  // Log mapping needs strictly-positive bounds (log(0) = -∞); silently fall
+  // back to linear if the declared min is ≤ 0.
+  const useLog = !!log && min > 0;
+  const norm = useLog ? valToLog(value, min, max) : Math.max(0, Math.min(1, (value - min) / (max - min)));
   const valueAngle = START + norm * RANGE;
 
   const trackPath = arcPath(cx, cy, r, START, END);
@@ -60,7 +63,7 @@ export function Knob({ nodeKey, param, value, min, max, label, unit, log, onSet 
     if (!dragRef.current) return;
     const dy = dragRef.current.startY - e.clientY;
     let newVal: number;
-    if (log) {
+    if (useLog) {
       const startNorm = valToLog(dragRef.current.startVal, min, max);
       newVal = logToVal(startNorm + dy / 150, min, max);
     } else {

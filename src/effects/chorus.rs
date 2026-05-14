@@ -39,7 +39,7 @@ pub struct Chorus {
 pub static CANONICAL: [ParamInfo; 4] = [
     ParamInfo::new_discrete_bool("active", true, None),
     ParamInfo::new_continuous_float("rate_hz",  0.1,  10.0, 1.0, true,  Some("Hz")),
-    ParamInfo::new_continuous_float("depth_ms", 0.0,  30.0, 8.0, true,  Some("ms")).with_non_growable(),
+    ParamInfo::new_continuous_float("depth_ms", 0.1,  30.0, 8.0, true, Some("ms")).with_non_growable(),
     ParamInfo::new_continuous_float("wet",      0.0,  1.0,  0.5, false, None),
 ];
 

@@ -1,5 +1,7 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use crate::{control::mapping::{ControllerDef}, engine::patch::ChainDef};
+use crate::{control::mapping::ControllerDef, engine::patch::ChainDef};
+use super::ToWire;
 
 // ---------------------------------------------------------------------------
 // PresetDef / PresetDefs
@@ -36,6 +38,14 @@ pub struct PresetDefs {
     /// Preset definitions, sorted by index.
     #[serde(default)]
     pub items: Vec<PresetDef>,
+}
+
+impl ToWire for PresetDef {
+    /// Wire shape: full preset. Nothing to filter today — every field is
+    /// meaningful to clients (live values, overrides, controllers, params_info).
+    fn to_wire(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::to_value(self)?)
+    }
 }
 
 impl Default for PresetDefs {

@@ -207,10 +207,15 @@ impl MidiOutControl {
 
                 match msg {
                     ControlMessage::SetParam { ref path, value, .. } => {
+                        // MIDI CC is numeric; Bool params don't map to a CC.
+                        let f = match value.try_float() {
+                            Ok(f) => f,
+                            Err(_) => continue,
+                        };
                         // Ask master for reverse mapping (blocking round-trip).
                         let (tx, rx) = oneshot::channel();
                         if master_tx.blocking_send(ConfigRequest::ReverseMap {
-                            path: path.clone(), value, alias: alias.clone(), resp: tx,
+                            path: path.clone(), value: f, alias: alias.clone(), resp: tx,
                         }).is_ok() {
                             if let Ok(Ok(Some((cc_str, raw)))) = rx.blocking_recv() {
                                 if let Ok(cc) = cc_str.parse::<u8>() {
@@ -244,7 +249,7 @@ impl MidiOutControl {
                             }
                         }
                     },
-                    ControlMessage::PresetLoaded { preset, .. } => {
+                    ControlMessage::PresetLoaded { ref preset, .. } => {
                         if preset.index != 0 {
                             let _ = conn.send(&[0xC0 | ch_byte, preset.index]);
                         }

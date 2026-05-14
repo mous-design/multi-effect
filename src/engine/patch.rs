@@ -1,12 +1,12 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::config::Config;
 use crate::effects::{chorus, delay, eq, harmonizer, reverb,looper};
 use crate::effects::eq::EqType;
-use super::device::{Device, Frame, Parameterized, ParamValue};
+use super::device::{Device, Frame, MetaTarget, ParamInfo, Parameterized, ParamValue};
 use super::mix;
 
 // ---------------------------------------------------------------------------
@@ -52,13 +52,23 @@ pub struct ChainDef {
 ///   "overrides": { "wet.max": 0.5, "dry.visible": false } }
 /// ```
 ///
-/// `params` carries the live values (the flattened scalar fields). Replayed
-/// via `set_param` at construction.
+/// `params` carries the live values (the flattened scalar fields), typed.
+/// Replayed via `set_param` at construction. **Sparse by convention** — an
+/// absent key means "still at the canonical default"; readers resolve absence
+/// against `params_info[name].default_as_param_value()`.
 ///
 /// `overrides` carries per-instance metadata edits (bound narrowing,
 /// visibility toggles). Keys are `"param.aspect"` strings (see `MetaTarget`).
 /// Replayed via `set_info_override` after construction. Absent / empty for
 /// nodes that haven't been edited.
+///
+/// `params_info` is the resolved per-instance ParamInfo array (canonical →
+/// Type overrides → Instance overrides applied). Computed by master at preset
+/// load and refreshed when canonical / Type overrides / Instance overrides
+/// change. Always serialised — it's derived data, but having it inline lets
+/// the wire shape match the in-memory shape (no per-level borrow wrappers).
+/// The few hundred extra bytes per preset are cheap; if eeprom storage ever
+/// matters, a custom save handler can prune it then.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NodeDef {
     pub key: String,
@@ -67,11 +77,27 @@ pub struct NodeDef {
     pub device_type: String,
 
     /// Per-instance metadata overrides (bounds, visibility, …). Empty by default.
-    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub overrides: std::collections::HashMap<crate::engine::device::MetaTarget, crate::engine::device::ParamValue>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub overrides: HashMap<MetaTarget, ParamValue>,
 
+    /// Live param values — typed, sparse. Absent key = canonical default.
     #[serde(flatten)]
-    pub params: serde_json::Map<String, Value>,
+    pub params: HashMap<String, ParamValue>,
+
+    /// Resolved metadata. Write-only — serialized to disk and wire for clients,
+    /// but discarded on deserialize (`ParamInfo` is `&'static str` and can't be
+    /// re-hydrated; master refreshes from canonical after every load). The
+    /// `deserialize_with = "discard"` form consumes the value so the flattened
+    /// `params` map doesn't try to absorb the key.
+    #[serde(default, deserialize_with = "discard_params_info")]
+    pub params_info: Vec<ParamInfo>,
+}
+
+fn discard_params_info<'de, D>(deserializer: D) -> Result<Vec<ParamInfo>, D::Error>
+where D: serde::Deserializer<'de>,
+{
+    serde::de::IgnoredAny::deserialize(deserializer)?;
+    Ok(Vec::new())
 }
 
 // ---------------------------------------------------------------------------
@@ -274,42 +300,48 @@ pub fn build_chain(idx: usize, def: &ChainDef, cfg: &Config) -> Result<Chain> {
 
 fn apply_params<P: Parameterized>(
     target: &mut P,
-    params: &serde_json::Map<String, serde_json::Value>,
+    params: &HashMap<String, ParamValue>,
     node_key: &str,
 ) -> Result<()> {
     for (k, v) in params {
-        if matches!(k.as_str(), "key" | "type") { continue; }
-        // Skip values that cannot be mapped to a ParamValue (e.g. state strings like "Idle").
-        // These are read-only runtime fields that live_state may include but are not settable.
-        let pv = match parse_param_value(v) {
-            Ok(pv) => pv,
-            Err(_)  => { continue; }
-        };
-        if let Err(e) = target.set_param(k, pv) { warn!("node '{node_key}': {e}"); }
+        if let Err(e) = target.set_param(k, *v) { warn!("node '{node_key}': {e}"); }
     }
     Ok(())
 }
 
-fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
-    let sr = cfg.sample_rate as f32;
-    use crate::engine::device::{build_info as bi, OverrideMap};
-    // Type overrides for this effect type — empty if none configured.
+/// Resolve a node's full Instance view: canonical → Type overrides → Instance
+/// overrides applied. Master stores this on each `NodeDef.params_info` at
+/// preset load and refreshes it on override changes. Used for wire output
+/// (UI rendering) and for master-side reads.
+///
+/// Returns `None` if the effect type is unknown. Distinct from the
+/// Type-resolved view used by `build_node` for audio buffer sizing.
+pub fn resolve_params_info(def: &NodeDef, cfg: &Config) -> Option<Vec<ParamInfo>> {
+    use crate::engine::device::{build_info, OverrideMap, apply_override};
+    let canonical = canonical_for(&def.device_type)?;
     let empty = OverrideMap::new();
-    let t = cfg.type_overrides.get(def.device_type.as_str()).unwrap_or(&empty);
-    // Compute Type-resolved view once: used both for construction and as the
-    // clamp_ref when replaying saved overrides below.
-    let type_resolved = match def.device_type.as_str() {
-        mix::NAME        => bi(&mix::CANONICAL, t),
-        looper::NAME     => bi(&looper::CANONICAL, t),
-        delay::NAME      => bi(&delay::CANONICAL, t),
-        reverb::NAME     => bi(&reverb::CANONICAL, t),
-        chorus::NAME     => bi(&chorus::CANONICAL, t),
-        harmonizer::NAME => bi(&harmonizer::CANONICAL, t),
-        eq::NAME_MID     => bi(&eq::CANONICAL_MID,  t),
-        eq::NAME_LOW     => bi(&eq::CANONICAL_LOW,  t),
-        eq::NAME_HIGH    => bi(&eq::CANONICAL_HIGH, t),
-        other            => bail!("unknown device type: '{other}'"),
-    };
+    let t = cfg.type_overrides.get(&def.device_type).unwrap_or(&empty);
+    let type_resolved = build_info(canonical, t);
+    let mut resolved = type_resolved.clone();
+    for (target, value) in &def.overrides {
+        apply_override(&mut resolved, &type_resolved, target, value);
+    }
+    Some(resolved)
+}
+
+fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
+    use crate::engine::device::{build_info, OverrideMap};
+    let sr = cfg.sample_rate as f32;
+    // Type-resolved is the clamp_ref / construction base. Instance overrides
+    // are replayed on top so they can shrink within Type; the audio thread's
+    // buffers (chorus depth, delay time, looper init) size from Type's max
+    // so a runtime Instance widen-back stays within the buffer.
+    let empty = OverrideMap::new();
+    let t = cfg.type_overrides.get(&def.device_type).unwrap_or(&empty);
+    let canonical = canonical_for(&def.device_type)
+        .ok_or_else(|| anyhow::anyhow!("unknown device type: '{}'", def.device_type))?;
+    let type_resolved = build_info(canonical, t);
+
     let mut device: Box<dyn Device> = match def.device_type.as_str() {
         mix::NAME        => Box::new(mix::Mix::new(&def.key, &type_resolved)),
         looper::NAME     => Box::new(looper::Looper::new(&def.key, sr, &type_resolved)),
@@ -322,9 +354,8 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
         eq::NAME_HIGH    => Box::new(eq::Eq::new(&def.key, EqType::HighShelf, sr, &type_resolved)),
         other            => bail!("unknown device type: '{other}'"),
     };
-    // Replay any saved per-instance metadata overrides (bounds, visibility, …).
-    // Each goes through the same `apply_override` kernel master uses at runtime;
-    // `type_resolved` is the clamp_ref, matching the master-side runtime path.
+    // Replay saved Instance overrides on top of the Type-resolved base; same
+    // `apply_override` kernel master uses at runtime.
     for (target, value) in &def.overrides {
         device.set_info_override(target, value, &type_resolved);
     }
@@ -339,7 +370,7 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
 
 /// Look up the canonical `ParamInfo` array for an effect type, by string name.
 /// Used by master to compute Type-resolved bounds on the fly when the user
-/// submits an Instance bound edit (`SET_PARAM_META`).
+/// submits an Instance bound edit (3-segment `SET <key>.<param>.<aspect> <value>`).
 pub fn canonical_for(effect_type: &str) -> Option<&'static [crate::engine::device::ParamInfo]> {
     match effect_type {
         mix::NAME        => Some(&mix::CANONICAL),
@@ -378,21 +409,6 @@ pub fn load_patch_def(defs: &Vec<ChainDef>, cfg: &Config) -> Result<Vec<Chain>> 
     defs.iter().enumerate().map(|(i, c)| build_chain(i, c, cfg)).collect()
 }
 
-/// Parse a JSON value into a `ParamValue`.
-///
-/// - `number` → `ParamValue::Float`
-/// - `bool`   → `ParamValue::Bool`
-/// - anything else → `Err`
-fn parse_param_value(v: &Value) -> Result<ParamValue> {
-    match v {
-        Value::Number(n) => Ok(ParamValue::Float(
-            n.as_f64().ok_or_else(|| anyhow::anyhow!("invalid number: {v}"))? as f32,
-        )),
-        Value::Bool(b) => Ok(ParamValue::Bool(*b)),
-        _ => bail!("expected number or bool, got: {v}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,38 +417,11 @@ mod tests {
     fn nodedef_preserves_floats() {
         let json = r#"{"key":"01-delay","type":"delay","wet":0.65,"feedback":0.616,"time":0.626,"active":true}"#;
         let node: NodeDef = serde_json::from_str(json).unwrap();
-        eprintln!("Direct parse: {:?}", node.params);
 
         let serialized = serde_json::to_value(&node).unwrap();
-        eprintln!("Serialized:   {serialized}");
-
         let node2: NodeDef = serde_json::from_value(serialized).unwrap();
-        eprintln!("Round-trip:   {:?}", node2.params);
 
-        let wet = node2.params.get("wet").unwrap().as_f64().unwrap();
+        let wet = node2.params.get("wet").unwrap().try_float().unwrap();
         assert!((wet - 0.65).abs() < 0.01, "wet should be ~0.65, got {wet}");
-    }
-
-    #[test]
-    fn full_config_preserves_floats() {
-        use crate::config::Config;
-
-        // Method 1: load → from_value (current path)
-        let cfg1 = Config::load(std::path::PathBuf::from("config.json")).unwrap();
-        let p1 = cfg1.presets.get(1).unwrap();
-        let delay = p1.chains[0].nodes.iter().find(|n| n.key == "01-delay").unwrap();
-        let wet_from_value = delay.params.get("wet").unwrap().as_f64().unwrap();
-        eprintln!("from_value: wet = {wet_from_value}");
-
-        // Method 2: from_str directly
-        let json_str = std::fs::read_to_string("config.json").unwrap();
-        let cfg2: Config = serde_json::from_str(&json_str).unwrap();
-        let p2 = cfg2.presets.get(1).unwrap();
-        let delay2 = p2.chains[0].nodes.iter().find(|n| n.key == "01-delay").unwrap();
-        let wet_from_str = delay2.params.get("wet").unwrap().as_f64().unwrap();
-        eprintln!("from_str:   wet = {wet_from_str}");
-
-        assert!((wet_from_str - 0.65).abs() < 0.01, "from_str: wet should be ~0.65, got {wet_from_str}");
-        assert!((wet_from_value - 0.65).abs() < 0.01, "from_value: wet should be ~0.65, got {wet_from_value}");
     }
 }

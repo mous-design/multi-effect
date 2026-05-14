@@ -121,7 +121,7 @@ pub enum EventAction {
 /// `Min`/`Max`/`Default`/`Step`/`Log` describe numeric bounds; `Visible`
 /// is the presentation flag (knob shown / hidden on the tile). Putting them
 /// in one enum keeps the override pipeline uniform — every per-param attribute
-/// flows through `apply_override` and `SET_PARAM_META` regardless of whether
+/// flows through `apply_override` and the meta-form `SET` regardless of whether
 /// it's a bound or a presentation hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum MetaAspect { Min, Max, Default, Step, Log, Visible }
@@ -172,12 +172,13 @@ pub struct ParamInfo {
     /// Whether the UI should render this param's knob on the tile.
     /// Defaults to `true` at construction; canonical entries can flip it
     /// via `with_hidden()`, and per-instance overrides toggle it at runtime
-    /// via `SET_PARAM_META <key>.<param>.visible <bool>`.
+    /// via `SET <key>.<param>.visible <bool>` (meta form).
     pub visible: bool,
 }
 impl ParamInfo {
     pub const fn new_continuous_float(name: &'static str, min: f32, max: f32, default: f32,
         log: bool, unit: Option<&'static str>) -> Self {
+        assert!(!log || (min > 0.0 && max > 0.0), "Can only have log with param always > 0");
         // round_multiplier left at 0.0 — `build_info` computes it from the
         // settled (post-override) min/max range.
         ParamInfo {
@@ -224,7 +225,7 @@ impl ParamInfo {
     }
 
     /// Mark this param hidden by default in the UI. Per-preset overrides
-    /// can still flip it back on via `SET_PARAM_META <key>.<param>.visible true`.
+    /// can still flip it back on via `SET <key>.<param>.visible true` (meta form).
     #[allow(dead_code)]
     pub const fn with_hidden(self) -> Self {
         Self { visible: false, ..self }
@@ -294,6 +295,20 @@ impl ParamInfo {
             _ => panic!("{}: expected DiscreteBool", self.name),
         }
     }
+
+    /// The canonical default as a `ParamValue`. Used to fill in sparse param
+    /// maps at the get-or-default boundary (UI, master inspection). `Event`
+    /// has no value semantics — panics; callers should never look up an
+    /// Event's "value."
+    pub fn default_as_param_value(&self) -> ParamValue {
+        match &self.data_kind {
+            ParamType::ContinuousFloat { default, .. } => ParamValue::Float(*default),
+            ParamType::ContinuousInt   { default, .. } => ParamValue::Int(*default),
+            ParamType::DiscreteFloat   { default, .. } => ParamValue::Float(*default),
+            ParamType::DiscreteBool    { default, .. } => ParamValue::Bool(*default),
+            ParamType::Event { .. } => panic!("{}: Event has no value", self.name),
+        }
+    }
 }
 
 /// A stereo audio frame: [left, right]
@@ -301,8 +316,9 @@ pub type Frame = [f32; 2];
 
 /// A parameter value — the unified type for every channel that carries values:
 /// runtime knob updates (`set_param`), bound overrides (`Config.type_overrides`,
-/// `apply_override`), and the wire protocol's `SET` / `SET_PARAM_META`
-/// payloads. Variants are kept open so integers keep their type across the
+/// `apply_override`), and the wire protocol's `SET <path> <value>` payloads
+/// (both 2-segment values and 3-segment meta overrides).
+/// Variants are kept open so integers keep their type across the
 /// JSON round-trip (no `i32 → f32 → i32` coercion).
 ///
 /// `#[serde(untagged)]` with variant order Int → Float → Bool means JSON `5`
@@ -316,7 +332,7 @@ pub type Frame = [f32; 2];
 /// The `Bool` boundary is strict — bools and numbers don't bridge.
 /// A JSON bool always deserialises as `Bool`, never as a number, so there's
 /// no determinism reason to be lenient and silent coercion would hide typos.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ParamValue {
     Int(i32),

@@ -7,9 +7,31 @@ use anyhow::{bail, anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use persist_fs::{persist,load};
-use crate::{control::mapping::DeviceDef, engine::patch::ChainDef};
+use persist_fs::{persist, load, strip_derived};
+use super::control::mapping::DeviceDef;
+use super::engine::patch::ChainDef;
 use preset::PresetDefs;
+
+// ---------------------------------------------------------------------------
+// Boundary traits
+//
+// Two boundaries, two filters, one shape each. Implementations decide what's
+// relevant for *their* boundary on a per-type basis. Callers don't reason
+// about what's filtered — they just serialize the returned `Value`.
+// ---------------------------------------------------------------------------
+
+/// "This type can be written to disk." Returns the filtered JSON Value that
+/// goes through `persist()`. Implementations strip derived data the type
+/// can recompute.
+pub trait ToPersistable {
+    fn to_persistable(&self) -> Result<serde_json::Value>;
+}
+
+/// "This type can be sent over the wire." Returns the filtered JSON Value a
+/// client receives. Implementations strip internal state clients don't need.
+pub trait ToWire {
+    fn to_wire(&self) -> Result<serde_json::Value>;
+}
 
 // ---------------------------------------------------------------------------
 // Config
@@ -35,6 +57,15 @@ impl ConfigPatch {
             in_channels:        Some(cfg.in_channels),
             out_channels:       Some(cfg.out_channels),
         }
+    }
+}
+
+impl ToWire for ConfigPatch {
+    /// Wire shape: full patch. Every field is wire-meaningful; nothing to
+    /// filter today. Trait impl exists so a future filter (e.g. hide
+    /// `audio_device` from read-only clients) is a one-impl change.
+    fn to_wire(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::to_value(self)?)
     }
 }
 
@@ -130,7 +161,7 @@ impl Config {
 
     /// Atomically write the full config to `config_path`.
     pub fn persist(&self) -> Result<()> {
-        persist(&serde_json::to_value(self)?, &self.config_path)
+        persist(&self.to_persistable()?, &self.config_path)
     }
 
     pub fn load(config_path: PathBuf) -> Result<Self> {
@@ -158,6 +189,14 @@ impl Config {
     //         .map(|p| p.controllers.clone())
     //         .unwrap_or_default()
     // }
+}
+
+impl ToPersistable for Config {
+    fn to_persistable(&self) -> Result<serde_json::Value> {
+        let mut v = serde_json::to_value(self)?;
+        strip_derived(&mut v);
+        Ok(v)
+    }
 }
 
 impl Default for Config {

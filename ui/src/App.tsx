@@ -67,13 +67,19 @@ export default function App() {
     // --- Connection (WS + config + devices) ---
     const { connected, audioConfig, setAudioConfig, devices } = useConnection((msg, params) => {
         switch(msg) {
-            case 'SET': {
+            case 'PARAM': {
                 const [path, valueStr] = splitN(params, ' ', 2);
                 const [nodeKey, param] = splitN(path, '.', 2);
                 if (!nodeKey || !param) return;
-                // Parse numeric values; keep non-numeric (action strings) as-is.
-                const num = Number(valueStr);
-                const value: number | string = isFinite(num) ? num : valueStr;
+                // Typed wire — match the server's Bool → Int → Float → Action
+                // order. Bools arrive as `true`/`false` (not 0/1).
+                let value: number | string | boolean;
+                if      (valueStr === 'true')  value = true;
+                else if (valueStr === 'false') value = false;
+                else {
+                    const num = Number(valueStr);
+                    value = isFinite(num) ? num : valueStr;
+                }
                 setIsDirty(true);
                 setState(prev => {
                     if (!prev) return prev;

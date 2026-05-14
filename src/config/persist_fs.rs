@@ -38,21 +38,21 @@ fn whole_floats_to_int(json: &Value) -> Value {
     }
 }
 
-/// Strip looper-specific transient fields (state, loop_secs, play_count, pos_secs)
-/// from all looper nodes before saving.  These fields reflect runtime recording state
-/// that cannot be restored from JSON (the audio buffer is not persisted).
-// pub fn strip_looper_transient(chains: &mut Value) {
-//     const TRANSIENT: &[&str] = &["state", "loop_secs", "play_count", "pos_secs"];
-//     let Some(arr) = chains.as_array_mut() else { return };
-//     for chain in arr {
-//         let Some(nodes) = chain["nodes"].as_array_mut() else { continue };
-//         for node in nodes {
-//             if node["type"].as_str() != Some("looper") { continue }
-//             let Some(obj) = node.as_object_mut() else { continue };
-//             for &field in TRANSIENT { obj.remove(field); }
-//         }
-//     }
-// }
+/// Strip derived fields from a JSON tree before persisting. Recursively
+/// removes keys that hold data master can always recompute from canonical /
+/// overrides — namely `params_info`. Keeps disk minimal; the in-memory and
+/// wire shapes still carry the derived values.
+pub fn strip_derived(json: &mut Value) {
+    const DERIVED: &[&str] = &["params_info"];
+    match json {
+        Value::Object(map) => {
+            for &k in DERIVED { map.remove(k); }
+            for v in map.values_mut() { strip_derived(v); }
+        },
+        Value::Array(arr) => arr.iter_mut().for_each(strip_derived),
+        _ => {},
+    }
+}
 
 pub fn load(path: &Path) -> Result<Value> {
     let content = read_to_string(path)

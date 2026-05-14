@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::debug;
-
-use crate::config::snapshot::PresetView;
+use super::engine::device::{ParamValue, MetaTarget, ParamInfo};
+use super::config::preset::PresetDef;
 
 // ---------------------------------------------------------------------------
 // Connection ID generator
@@ -40,16 +40,16 @@ pub fn connection_id(alias: &str) -> String {
 /// so that outbound tasks can skip echoing messages back to the sender.
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
-    SetParam { path: String, value: f32, source: String },
+    SetParam { path: String, value: ParamValue, source: String },
     /// Instance bound override (the runtime "edit a param's min/max/default").
     /// `path` is the node key (e.g. `"04-chorus"`); `target` selects param + aspect.
     /// `clamp_ref` is the master-computed Type-resolved view, used by the audio
     /// thread's `apply_override` for clamping. Routed bus-side without `clamp_ref`.
     SetInfoOverride {
         path:       String,
-        target:     crate::engine::device::MetaTarget,
-        value:      crate::engine::device::ParamValue,
-        clamp_ref:  Vec<crate::engine::device::ParamInfo>,
+        target:     MetaTarget,
+        value:      ParamValue,
+        clamp_ref:  Vec<ParamInfo>,
         source:     String,
     },
     Reset { source: String },
@@ -59,11 +59,8 @@ pub enum ControlMessage {
     NoteOn  { note: u8, velocity: u8 },
     NoteOff { note: u8 },
     NodeEvent { key: String, event: String, data: serde_json::Value },
-    /// The current preset's structural content has changed (load / save / compare).
-    /// Carries a wire-ready `PresetView` (with per-node resolved `params_info`)
-    /// so subscribers can serialise it directly. UI reads `preset.index` to
-    /// know which slot is active.
-    PresetLoaded { preset: PresetView, source: String },
+    /// Current preset, sent after new preset is loaded
+    PresetLoaded { preset: PresetDef, source: String },
     /// State transition only (Clean / Dirty / Comparing).
     StateChanged { state: String, source: String },
     /// The list of occupied preset slots has changed (save to empty slot, delete).

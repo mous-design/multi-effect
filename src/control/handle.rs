@@ -4,8 +4,9 @@ use tokio::sync::{mpsc, watch};
 
 use super::mapping::{ControllerDef, DeviceDef};
 use crate::engine::patch::ChainDef;
+use crate::engine::device::{MetaAspect, MetaTarget, ParamValue};
 use crate::config::master::{ConfigRequest, snd_request};
-use crate::config::ConfigPatch;
+use crate::config::{ConfigPatch, ToWire};
 use super::{connection_id, ControlMessage, EventBus};
 
 /// Run a full-duplex control session on `stream` until one of:
@@ -39,7 +40,8 @@ where
     // every transport — telnet shells, UI over WS, hardware controllers that
     // want LED feedback. Clients that don't care just ignore the line.
     if let Ok(snap) = snd_request(&master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await {
-        let initial = format!("SNAPSHOT {}\n", serde_json::to_string(&snap).unwrap_or_default());
+        let json = snap.to_wire().and_then(|v| Ok(serde_json::to_string(&v)?)).unwrap_or_default();
+        let initial = format!("SNAPSHOT {json}\n");
         if writer.write_all(initial.as_bytes()).await.is_err() {
             return Ok(()); // peer disconnected before initial snapshot
         }
@@ -59,37 +61,47 @@ where
 
                     let line = match &msg {
                         ControlMessage::SetParam { path, value, .. } => {
-                            match snd_request(&master_tx, |tx| ConfigRequest::ReverseMapRounded {
-                                path: path.clone(), value: *value, alias: alias.to_string(), resp: tx,
-                            }).await {
-                                // `raw` is pre-smart-rounded by master. Default Display prints
-                                // the shortest round-trippable form (e.g. "63.5" not "63.5000").
-                                Ok(Some((ch, raw))) => format!("CTRL {ch} {raw}\n"),
-                                // No reverse mapping: emit the raw param value. Could be
-                                // smart-round-targeted via the param's `ParamInfo.round_multiplier`.
-                                _ => format!("SET {path} {value}\n"),
+                            // `PARAM` is the state-notification form (outbound only) —
+                            // mirrors `SET` (request, inbound only). Reverse mapping is
+                            // numeric (CTRL is intrinsically `f32`); bool params can't
+                            // ride a CTRL channel, emit straight `PARAM`. `ParamValue`
+                            // `Display` produces wire-form: numbers as numbers, bool as
+                            // `true`/`false`.
+                            if let Ok(f) = value.try_float() {
+                                match snd_request(&master_tx, |tx| ConfigRequest::ReverseMapRounded {
+                                    path: path.clone(), value: f, alias: alias.to_string(), resp: tx,
+                                }).await {
+                                    Ok(Some((ch, raw))) => format!("CTRL {ch} {raw}\n"),
+                                    _ => format!("PARAM {path} {value}\n"),
+                                }
+                            } else {
+                                format!("PARAM {path} {value}\n")
                             }
                         },
                         ControlMessage::SetInfoOverride { path, target, value, .. } => {
                             // Format value depending on its variant for clean wire output.
                             let v = match value {
-                                crate::engine::device::ParamValue::Float(f) => format!("{f}"),
-                                crate::engine::device::ParamValue::Int(i)   => format!("{i}"),
-                                crate::engine::device::ParamValue::Bool(b)  => format!("{b}"),
+                                ParamValue::Float(f) => format!("{f}"),
+                                ParamValue::Int(i)   => format!("{i}"),
+                                ParamValue::Bool(b)  => format!("{b}"),
                             };
                             let aspect = match target.aspect {
-                                crate::engine::device::MetaAspect::Min     => "min",
-                                crate::engine::device::MetaAspect::Max     => "max",
-                                crate::engine::device::MetaAspect::Default => "default",
-                                crate::engine::device::MetaAspect::Step    => "step",
-                                crate::engine::device::MetaAspect::Log     => "log",
-                                crate::engine::device::MetaAspect::Visible => "visible",
+                                MetaAspect::Min     => "min",
+                                MetaAspect::Max     => "max",
+                                MetaAspect::Default => "default",
+                                MetaAspect::Step    => "step",
+                                MetaAspect::Log     => "log",
+                                MetaAspect::Visible => "visible",
                             };
-                            format!("PARAM_META {path}.{}.{aspect} {v}\n", target.param)
+                            format!("PARAM {path}.{}.{aspect} {v}\n", target.param)
                         },
                         ControlMessage::Reset { .. } => "RESET\n".to_string(),
-                        ControlMessage::PresetLoaded { ref preset, .. } =>
-                            format!("PRESET {}\n", serde_json::to_string(preset).unwrap_or_default()),
+                        ControlMessage::PresetLoaded { ref preset, .. } => {
+                            let json = preset.to_wire()
+                                .and_then(|v| Ok(serde_json::to_string(&v)?))
+                                .unwrap_or_default();
+                            format!("PRESET {json}\n")
+                        },
                         ControlMessage::StateChanged { ref state, .. } =>
                             format!("STATE {state}\n"),
                         ControlMessage::PresetIndices { ref indices, .. } =>
@@ -180,7 +192,7 @@ async fn handle_command(
     let res = match cmd {
         "FETCH_CONFIG" => {
             let config = snd_request(master_tx, |tx| ConfigRequest::GetConfig {resp: tx}).await?;
-            format!("CONFIG {}\n", serde_json::to_string(&config)?)
+            format!("CONFIG {}\n", serde_json::to_string(&config.to_wire()?)?)
         },
         "SAVE_CONFIG" => {
             let config: ConfigPatch = serde_json::from_str(rest)?;
@@ -190,50 +202,59 @@ async fn handle_command(
             "OK\n".into()
         },
         "SET" => {
+            // One verb, three dispatches, discriminated by path arity:
+            //   1 dot  →  value or action  (`SET 04-chorus.wet 0.5`,
+            //                               `SET 01-looper.action rec`).
+            //   2 dots →  meta override    (`SET 04-chorus.depth_ms.max 20`).
+            // UI sends the right variant based on the param's declared type
+            // (from `params_info`); CTRL paths arrive pre-wrapped at master.
             let (path, val_str) = rest
                 .split_once(' ')
-                .context("usage: SET <key.param> <value>")?;
+                .context("usage: SET <key>.<param>[.<aspect>] <value>")?;
             let val_str = val_str.trim();
-            if let Ok(value) = val_str.parse::<f32>() {
-                let state = snd_request(master_tx, |tx| ConfigRequest::ApplySet {
-                     path: path.to_string(), value, source, resp: Some(tx)
-                }).await?;
-                format!("STATE {}\n", state.label().to_string())
-            } else {
-                // Non-numeric value → action dispatch (e.g. "SET 01-looper.action rec")
-                snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
-                    path: path.to_string(), action: val_str.to_string(), source, resp: Some(tx)
-                }).await?;
-                "OK\n".into()
+            match path.matches('.').count() {
+                2 => {
+                    // Meta override.
+                    let (node_key, meta_str) = path.split_once('.')
+                        .context("malformed meta path")?;
+                    let target = MetaTarget::parse_str(meta_str)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let value = if let Ok(b) = val_str.parse::<bool>() {
+                        ParamValue::Bool(b)
+                    } else if let Ok(i) = val_str.parse::<i32>() {
+                        ParamValue::Int(i)
+                    } else if let Ok(f) = val_str.parse::<f32>() {
+                        ParamValue::Float(f)
+                    } else {
+                        anyhow::bail!("expected bool / int / float, got '{val_str}'");
+                    };
+                    let state = snd_request(master_tx, |tx| ConfigRequest::ApplyInfoOverride {
+                        path: node_key.to_string(), target, value, source, resp: Some(tx),
+                    }).await?;
+                    format!("STATE {}\n", state.label())
+                },
+                1 => {
+                    // Value or action.
+                    let value =
+                        if let Ok(b) = val_str.parse::<bool>() { Some(ParamValue::Bool(b)) }
+                        else if let Ok(i) = val_str.parse::<i32>() { Some(ParamValue::Int(i)) }
+                        else if let Ok(f) = val_str.parse::<f32>() { Some(ParamValue::Float(f)) }
+                        else { None };
+                    if let Some(value) = value {
+                        let state = snd_request(master_tx, |tx| ConfigRequest::ApplySet {
+                             path: path.to_string(), value, source, resp: Some(tx)
+                        }).await?;
+                        format!("STATE {}\n", state.label())
+                    } else {
+                        // Non-parseable → action dispatch (e.g. "SET 01-looper.action rec").
+                        snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
+                            path: path.to_string(), action: val_str.to_string(), source, resp: Some(tx)
+                        }).await?;
+                        "OK\n".into()
+                    }
+                },
+                _ => bail!("usage: SET <key>.<param>[.<aspect>] <value>"),
             }
-        },
-        "SET_PARAM_META" => {
-            // usage: SET_PARAM_META <node-key>.<param>.<aspect> <value>
-            // e.g.   SET_PARAM_META 04-chorus.depth_ms.max 20
-            let (path, val_str) = rest
-                .split_once(' ')
-                .context("usage: SET_PARAM_META <key.param.aspect> <value>")?;
-            let (node_key, meta_str) = path
-                .split_once('.')
-                .context("path must be <key>.<param>.<aspect>")?;
-            let target = crate::engine::device::MetaTarget::parse_str(meta_str)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let val_str = val_str.trim();
-            // Prefer int when the literal is integral so DiscreteInt aspects
-            // (and the future merged Value enum) keep their type.
-            let value = if let Ok(i) = val_str.parse::<i32>() {
-                crate::engine::device::ParamValue::Int(i)
-            } else if let Ok(f) = val_str.parse::<f32>() {
-                crate::engine::device::ParamValue::Float(f)
-            } else if let Ok(b) = val_str.parse::<bool>() {
-                crate::engine::device::ParamValue::Bool(b)
-            } else {
-                anyhow::bail!("expected int / float / bool, got '{val_str}'");
-            };
-            let state = snd_request(master_tx, |tx| ConfigRequest::ApplyInfoOverride {
-                path: node_key.to_string(), target, value, source, resp: Some(tx),
-            }).await?;
-            format!("STATE {}\n", state.label().to_string())
         },
         "CHAINS" => {
             let chains: Vec<ChainDef> = serde_json::from_str(rest)?;
@@ -243,6 +264,7 @@ async fn handle_command(
             "OK\n".into()
         },
         "PRESET" => {
+            // @todo make a helper for the parse AND validate 0..127. 
             let slot: u8 = rest.trim()
                 .parse()
                 .context("program number must be 0-127")?;
@@ -252,9 +274,10 @@ async fn handle_command(
             // Return the new snapshot inline — originator is filtered out of the
             // PresetLoaded broadcast, so this is how they get the new content.
             let snap = snd_request(master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await?;
-            format!("SNAPSHOT {}\n", serde_json::to_string(&snap)?)
+            format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_wire()?)?)
         },
         "SAVE_PRESET" => {
+            // @todo make a helper for the parse AND validate 0..127. 
             let slot: u8 = rest.trim()
                 .parse()
                 .context("slot must be 0..127")?;
@@ -264,6 +287,7 @@ async fn handle_command(
             "OK\n".into()
         },
         "DELETE_PRESET" => {
+            // @todo make a helper for the parse AND validate 0..127. 
             let slot: u8 = rest.trim()
                 .parse()
                 .context("slot must be 0..127")?;
@@ -279,7 +303,7 @@ async fn handle_command(
             // Return the new snapshot inline — originator is filtered out of the
             // PresetLoaded broadcast.
             let snap = snd_request(master_tx, |tx| ConfigRequest::GetSnapshot { resp: tx }).await?;
-            format!("SNAPSHOT {}\n", serde_json::to_string(&snap)?)
+            format!("SNAPSHOT {}\n", serde_json::to_string(&snap.to_wire()?)?)
         },
         "PUT_CONTROLLERS" => {
             let controllers: Vec<ControllerDef> = serde_json::from_str(rest)?;

@@ -2,8 +2,36 @@ export interface NodeDef {
   key: string;
   type: string;
   active?: boolean;
+  params_info?: ParamInfo[];
   [key: string]: any;
 }
+
+export interface DiscreteFloatOption {
+  label: string;
+  value: number;
+}
+
+/// Mirrors `engine::device::ParamType` — flat wire shape via `#[serde(flatten)]`
+/// on the parent `ParamInfo`. The `type` field is the discriminator.
+export type ParamType =
+  | { type: 'ContinuousFloat'; min: number; max: number; default: number; unit?: string; log?: boolean }
+  | { type: 'ContinuousInt';   min: number; max: number; default: number; unit?: string }
+  | { type: 'DiscreteFloat';   options: DiscreteFloatOption[]; default: number }
+  | { type: 'DiscreteBool';    default: boolean; labels?: [string, string] }
+  | { type: 'Event';           actions: string[] };
+
+/// Mirrors `engine::device::ParamKind`.
+export type ParamKind =
+  | { tag: 'ParamMeta'; max_growable_at_runtime: boolean }
+  | { tag: 'TypeMeta';     aspect: string }
+  | { tag: 'InstanceMeta'; aspect: string };
+
+/// Mirrors `engine::device::ParamInfo` — `ParamType` fields are flattened in.
+export type ParamInfo = ParamType & {
+  name: string;
+  kind: ParamKind;
+  visible: boolean;
+};
 export interface ChainDef {
   input: [number, number];
   output: [number, number];

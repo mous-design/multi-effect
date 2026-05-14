@@ -1,41 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { NodeDef } from '../types';
+import type { NodeDef, ParamInfo } from '../types';
 import { sendAction, sendParamMeta } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { t } from '../i18n';
 
-export const PARAM_META: Record<string, { min: number; max: number; unit?: string; log?: boolean }> = {
-  wet:       { min: 0,    max: 1              },
-  dry:       { min: 0,    max: 1              },
-  gain:      { min: 0,    max: 4              },
-  feedback:  { min: 0,    max: 1              },
-  time:      { min: 0,    max: 2,   unit: 's' },
-  room_size: { min: 0,    max: 1              },
-  damping:   { min: 0,    max: 1              },
-  pan:       { min: -1,   max: 1              },
-  rate_hz:   { min: 0.1,  max: 10,  unit: 'Hz'},
-  depth_ms:  { min: 0,    max: 30,  unit: 'ms'},
-  root:      { min: 0,    max: 127            },
-  vel_sense: { min: 0,    max: 1              },
-  freq:      { min: 50,   max: 10000, unit: 'Hz', log: true },
-  gain_db:   { min: -15,  max: 15,  unit: 'dB'},
-  q:         { min: 0.1,  max: 5              },
-  loop_gain: { min: 0,    max: 4              },
-};
-
-const SKIP_PARAMS = new Set(['key', 'type', 'active', 'state', 'overdub_count', 'max_buffers', 'loop_secs', 'pos_secs', '_wrap_ts', 'overrides', 'params_info']);
-
-const PARAM_ORDER: Record<string, string[]> = {
-  mix:      ['gain', 'pan', 'dry', 'wet'],
-  eq_mid: ['freq', 'gain_db', 'q'],
-  eq_low:   ['gain_db', 'freq'],
-  eq_high:  ['gain_db', 'freq'],
-};
-
+// Default-hidden params per effect type. Initialises the local visibility set
+// on first sight; user toggles override and persist via localStorage +
+// `SET <key>.<param>.visible <bool>` (meta form). Will move to canonical
+// `with_hidden()` flags on the backend (info.visible) once every effect declares
+// them.
 const DEFAULT_HIDDEN: Record<string, string[]> = {
   mix:      ['dry', 'wet'],
-  eq_mid: ['q'],
+  eq_mid:   ['q'],
   eq_low:   ['freq'],
   eq_high:  ['freq'],
   looper:   ['transport'],
@@ -69,22 +46,32 @@ function PauseIcon() {
   );
 }
 
-function scalarOf(val: unknown): number | null {
-  if (typeof val === 'number') return val;
-  if (Array.isArray(val) && val.length > 0 && val.every(v => typeof v === 'number')) {
-    return (val as number[]).reduce((a, b) => a + b, 0) / val.length;
+/// Resolve a live param's effective value. Master only mirrors values into
+/// `node.params` once they're mutated past the canonical default, so a
+/// freshly-loaded effect has its defaults missing from the wire. Falling back
+/// to `info.default` is correct — that's the actual live value.
+function effectiveValue(node: NodeDef, info: ParamInfo): unknown {
+  const v = node[info.name];
+  if (v !== undefined) return v;
+  switch (info.type) {
+    case 'ContinuousFloat':
+    case 'ContinuousInt':
+    case 'DiscreteFloat':
+    case 'DiscreteBool': return info.default;
+    case 'Event':        return null;
   }
-  return null;
 }
 
-function getOrderedParams(node: NodeDef): [string, unknown][] {
-  const order = PARAM_ORDER[node.type];
-  if (order) {
-    return order
-      .map(k => [k, node[k]] as [string, unknown])
-      .filter(([, v]) => v !== undefined);
-  }
-  return Object.entries(node).filter(([k]) => !SKIP_PARAMS.has(k));
+/// Pair each live-param `ParamInfo` with its effective value.
+/// Order follows the canonical declaration order (effect-author intent).
+/// Only `ParamMeta` entries render as knobs/toggles — `TypeMeta` /
+/// `InstanceMeta` entries are override-form descriptors handled elsewhere.
+function getRenderableParams(node: NodeDef): { info: ParamInfo; value: unknown }[] {
+  const infos = node.params_info;
+  if (!infos) return [];
+  return infos
+    .filter(info => info.kind?.tag === 'ParamMeta')
+    .map(info => ({ info, value: effectiveValue(node, info) }));
 }
 
 function lsKey(preset: string, nodeKey: string) {
@@ -161,10 +148,13 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
     setExpanded(false);
   }, [presetName, node.key]);
 
-  const hasActive = node.active !== undefined;
-  const active = hasActive ? !!node.active : true;
+  const allParams = getRenderableParams(node);
+  // `active` is exclusively rendered as the header toggle — strip it from the
+  // body so it doesn't render twice.
+  const bodyParams = allParams.filter(({ info }) => info.name !== 'active');
+  const activeEntry = allParams.find(({ info }) => info.name === 'active' && info.type === 'DiscreteBool');
+  const active = activeEntry ? !!activeEntry.value : true;
 
-  const allParams = getOrderedParams(node);
   const isLooper = node.type === 'looper';
 
   // Seek scrubber: only active when looper is in Stop state
@@ -177,11 +167,11 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
     if (isLooper && looperStateVal !== 'Stop') setSeekEditing(false);
   }, [isLooper, looperStateVal]);
   const transportHidden = hidden.has('transport');
-  const hiddenCount = allParams.filter(([k]) => hidden.has(k)).length + (isLooper && transportHidden ? 1 : 0);
+  const hiddenCount = bodyParams.filter(({ info }) => hidden.has(info.name)).length + (isLooper && transportHidden ? 1 : 0);
 
   // `transport` is a UI-only composite knob (looper play/rec/stop), not a real
   // backend param — its visibility lives only in localStorage. All real params
-  // also push `SET_PARAM_META <key>.<param>.visible <bool>` to the backend so
+  // also push `SET <key>.<param>.visible <bool>` (meta form) to the backend so
   // visibility eventually persists via the snapshot (and syncs across clients).
   function hide(param: string) {
     const next = new Set(hidden);
@@ -199,31 +189,34 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
     if (param !== 'transport') sendParamMeta(node.key, param, 'visible', true);
   }
 
-  function renderControl(param: string, val: unknown): React.ReactNode {
-    if (typeof val === 'boolean') {
-      return <Toggle nodeKey={node.key} param={param}
-        value={val} label={t(`param.${param}`)} onSet={(p, v) => onSet(p, v)} />;
+  function renderControl(info: ParamInfo, val: unknown): React.ReactNode {
+    switch (info.type) {
+      case 'ContinuousFloat':
+      case 'ContinuousInt': {
+        if (typeof val !== 'number') return null;
+        const log = info.type === 'ContinuousFloat' ? !!info.log : false;
+        return <Knob nodeKey={node.key} param={info.name}
+          value={val} min={info.min} max={info.max}
+          label={t(`param.${info.name}`)} unit={info.unit} log={log}
+          onSet={(p, v) => onSet(p, v)} />;
+      }
+      case 'DiscreteBool': {
+        if (typeof val !== 'boolean') return null;
+        return <Toggle nodeKey={node.key} param={info.name}
+          value={val} label={t(`param.${info.name}`)} onSet={(p, v) => onSet(p, v)} />;
+      }
+      // DiscreteFloat (dropdown) and Event (action buttons) not wired yet.
+      default:
+        return null;
     }
-    const scalar = scalarOf(val);
-    if (scalar !== null) {
-      const meta = { ...(PARAM_META[param] ?? { min: 0, max: 1 }) };
-    //   if (param === 'time' && node.type === 'delay' && delayMaxSeconds !== undefined) {
-    //     meta.max = delayMaxSeconds;
-    //   }
-      return <Knob nodeKey={node.key} param={param}
-        value={scalar} min={meta.min} max={meta.max}
-        label={t(`param.${param}`)} unit={meta.unit} log={meta.log}
-        onSet={(p, v) => onSet(p, v)} />;
-    }
-    return null;
   }
 
-  const visibleParams = allParams.filter(([k]) => !hidden.has(k));
+  const visibleParams = bodyParams.filter(({ info }) => !hidden.has(info.name));
 
   return (
     <div className={`tile${active ? '' : ' inactive'}${expanded ? ' expanded' : ''}`}>
       <div className="tile-header">
-        {hasActive
+        {activeEntry
           ? <Toggle nodeKey={node.key} param="active" value={active} label="" onSet={(p, v) => onSet(p, v)} />
           : <div className="tile-header-spacer" />}
         <span className="tile-type">{t(`type.${node.type}`)}</span>
@@ -360,18 +353,18 @@ export function EffectTile({ node, presetName, onSet, onDelete }: Props) {
               </div>
             );
           })()}
-          {(expanded ? allParams : visibleParams).map(([param, val]) => {
-            const isHidden = hidden.has(param);
-            const ctrl = renderControl(param, val);
+          {(expanded ? bodyParams : visibleParams).map(({ info, value }) => {
+            const isHidden = hidden.has(info.name);
+            const ctrl = renderControl(info, value);
             if (!ctrl) return null;
             return (
-              <div key={param} className={`param-cell${isHidden ? ' param-hidden' : ''}`}>
+              <div key={info.name} className={`param-cell${isHidden ? ' param-hidden' : ''}`}>
                 {ctrl}
                 <button
                   className="param-vis-btn"
                   title={isHidden ? t('ui.show_param') : t('ui.hide_param')}
                   onMouseDown={e => e.stopPropagation()}
-                  onClick={() => isHidden ? show(param) : hide(param)}
+                  onClick={() => isHidden ? show(info.name) : hide(info.name)}
                 >
                   {isHidden ? <EyeIcon /> : <EyeOffIcon />}
                 </button>

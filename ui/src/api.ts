@@ -107,27 +107,28 @@ export async function sendChains(chains: object[]): Promise<boolean> {
     return (await sendWs(`CHAINS ${chainsStr}`))[0];
 }
 
-// Booleans go on the wire as 0/1 so they hit the numeric SET path on the
-// server (and broadcast as SetParam, not Action). `true`/`false` would parse
-// as a non-numeric action and be invisible to other clients.
+// Typed wire: send `true`/`false` for bool params, numbers for numeric ones —
+// matches the server's strict ParamValue parsing (Bool → Int → Float → Action).
+// UI knows the declared type from each node's `params_info`, so it sends the
+// right variant; the server doesn't coerce.
 //
 // Server replies with `STATE <state>` (not OK) — it knows authoritatively
 // whether the snapshot transitioned to Dirty, so the UI lets the response
 // drive isDirty/isComparing rather than guessing optimistically.
 export async function sendSet(path: string, value: number | boolean): Promise<boolean> {
-    const v = typeof value === 'boolean' ? (value ? 1 : 0) : value;
-    return (await sendWs(`SET ${path} ${v}`, 'STATE'))[0];
+    return (await sendWs(`SET ${path} ${value}`, 'STATE'))[0];
 }
 
 export async function sendAction(target: string, action: string): Promise<boolean> {
     return (await sendWs(`SET ${target} ${action}`))[0];
 }
 
-// SET_PARAM_META <node-key>.<param>.<aspect> <value>
+// Meta override — same `SET` verb as values; three-segment path discriminates
+// from value (2-segment) / action (2-segment, non-parseable value).
 // e.g. sendParamMeta('04-chorus', 'depth_ms', 'visible', false)
+//      → wire: `SET 04-chorus.depth_ms.visible false`
 export async function sendParamMeta(nodeKey: string, param: string, aspect: string, value: number | boolean): Promise<boolean> {
-    const v = typeof value === 'boolean' ? (value ? 'true' : 'false') : value;
-    return (await sendWs(`SET_PARAM_META ${nodeKey}.${param}.${aspect} ${v}`, 'STATE'))[0];
+    return (await sendWs(`SET ${nodeKey}.${param}.${aspect} ${value}`, 'STATE'))[0];
 }
 
 export async function savePreset(n: number):Promise<boolean> {

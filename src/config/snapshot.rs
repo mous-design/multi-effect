@@ -1,14 +1,11 @@
-use std::collections::HashMap;
 use std::path::Path;
 use anyhow::{Result, bail};
-use serde_json::Value;
 use serde::{Deserialize, Serialize};
 use super::preset::PresetDefs;
-use super::persist_fs::{persist, load};
+use super::persist_fs::{persist, load, strip_derived};
 use super::preset::PresetDef;
-use super::Config;
-use crate::control::mapping::ControllerDef;
-use crate::engine::device::{MetaTarget, ParamInfo, ParamValue};
+use super::{Config, ToPersistable, ToWire};
+use crate::engine::device::ParamValue;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,55 +46,6 @@ pub struct ConfigSnapshot {
     pub preset_indices:  Vec<u8>,
 }
 
-/// Wire projection of a `NodeDef`. Same JSON shape as on-disk `NodeDef`
-/// (live values flatten to the top, `overrides` stays a sibling), but adds
-/// the master-computed resolved `params_info` array. The UI uses this to
-/// render whatever knobs the effect declares — without hardcoded knowledge
-/// of effect types.
-#[derive(Clone, Debug, Serialize)]
-pub struct NodeView {
-    pub key: String,
-    #[serde(rename = "type")]
-    pub device_type: String,
-    /// Per-instance metadata overrides currently applied (already baked into
-    /// `params_info`; kept here so the UI can show "this knob has an Instance
-    /// edit" affordances).
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub overrides: HashMap<MetaTarget, ParamValue>,
-    /// Resolved per-instance ParamInfo array: canonical → Type overrides →
-    /// Instance overrides applied.
-    pub params_info: Vec<ParamInfo>,
-    /// Live param values (the flattened scalars: `wet`, `room_size`, …).
-    #[serde(flatten)]
-    pub params: serde_json::Map<String, Value>,
-}
-
-/// Wire projection of a `ChainDef`.
-#[derive(Clone, Debug, Serialize)]
-pub struct ChainView {
-    pub input:  [u8; 2],
-    pub output: [u8; 2],
-    pub nodes:  Vec<NodeView>,
-}
-
-/// Wire projection of a `PresetDef`.
-#[derive(Clone, Debug, Serialize)]
-pub struct PresetView {
-    pub index:       u8,
-    pub chains:      Vec<ChainView>,
-    pub controllers: Vec<ControllerDef>,
-}
-
-/// Wire projection of [`ConfigSnapshot`]: everything a client needs to render,
-/// without the internal `stash` field. Owned (so it can cross task boundaries
-/// via oneshot / broadcast channels). Master builds it via
-/// [`crate::config::master::ConfigMaster::build_snapshot_view`].
-#[derive(Clone, Debug, Serialize)]
-pub struct SnapshotView {
-    pub state:          SnapshotState,
-    pub preset:         PresetView,
-    pub preset_indices: Vec<u8>,
-}
 
 impl ConfigSnapshot {
     pub fn restore_or_build(cfg: &Config) -> Result<Self> {
@@ -119,17 +67,42 @@ impl ConfigSnapshot {
         self.state = state;
     }
 
-    /// Update a single node parameter.  `param_path` = "node-key.param". Return if changed
-    pub fn apply_set(&mut self, param_path: &str, value: f32) -> Result<bool> {
+    /// Update a single node parameter. `param_path` = "node-key.param".
+    /// Returns whether the value changed.
+    ///
+    /// **Strict typing**: rejects `Bool` for numeric params and numbers for
+    /// `Bool` params with a warning. Numeric↔numeric (`Int`↔`Float`) is
+    /// accepted to absorb untagged-serde round-trip non-determinism. CTRL
+    /// paths that target a `Bool` param will arrive here as `Float` and be
+    /// dropped — strict-policy boundary, hardware mappings to bools are not
+    /// yet supported.
+    pub fn apply_set(&mut self, param_path: &str, value: ParamValue) -> Result<bool> {
+        use crate::engine::device::ParamType;
         let Some((node_key, param)) = param_path.split_once('.') else {
             bail!("invalid param path '{param_path}': missing '.'");
         };
         for chain in self.preset.chains.iter_mut() {
             for node in chain.nodes.iter_mut() {
                 if node.key == node_key {
-                    let new = Value::from(value);
-                    if node.params.get(param) != Some(&new) {
-                        node.params[param] = new;
+                    if let Some(info) = node.params_info.iter().find(|i| i.name == param) {
+                        let compatible = matches!(
+                            (&info.data_kind, value),
+                            (ParamType::DiscreteBool { .. }, ParamValue::Bool(_))
+                            | (ParamType::ContinuousFloat { .. }
+                              | ParamType::ContinuousInt   { .. }
+                              | ParamType::DiscreteFloat   { .. },
+                               ParamValue::Float(_) | ParamValue::Int(_))
+                        );
+                        if !compatible {
+                            tracing::warn!(
+                                "SET {param_path}: type mismatch (declared {:?}, got {value:?}) — ignored",
+                                info.data_kind
+                            );
+                            return Ok(false);
+                        }
+                    }
+                    if node.params.get(param) != Some(&value) {
+                        node.params.insert(param.to_string(), value);
                         // If comparing, we can delete the stash
                         if matches!(self.state, Comparing | ComparingPersisted) {
                             self.stash = None;
@@ -188,17 +161,17 @@ impl ConfigSnapshot {
     /// Persist this state snapshot
     /// If Dirty or Comparing: persist to file. Change to DirtyPersisted or ComparingPersisted.
     /// If Clean: delete the state-file. Change to CleanPersisted.
-    /// If action was taken, return Ok(true), else Ok(false). 
+    /// If action was taken, return Ok(true), else Ok(false).
     pub fn persist_state(&mut self, path: &Path) -> Result<bool> {
         match self.state {
             Dirty => {
                 self.state = DirtyPersisted;
-                persist(&serde_json::to_value(&self)?, path)?;
+                persist(&self.to_persistable()?, path)?;
                 Ok(true)
             },
             Comparing => {
                 self.state = ComparingPersisted;
-                persist(&serde_json::to_value(&self)?, path)?;
+                persist(&self.to_persistable()?, path)?;
                 Ok(true)
             },
             Clean => {
@@ -207,7 +180,7 @@ impl ConfigSnapshot {
                 Ok(true)
             },
             _ => Ok(false)
-        }   
+        }
     }
 
     pub fn remove_state_file(path: &Path) -> Result<()> {
@@ -226,5 +199,28 @@ impl ConfigSnapshot {
         } else {
             Ok(None)
         }
+    }
+}
+
+impl ToPersistable for ConfigSnapshot {
+    /// Disk shape: full state (including `stash`, needed to resume compare
+    /// mode after restart) minus derived fields (`params_info`, recomputable
+    /// from canonical + overrides).
+    fn to_persistable(&self) -> Result<serde_json::Value> {
+        let mut v = serde_json::to_value(self)?;
+        strip_derived(&mut v);
+        Ok(v)
+    }
+}
+
+impl ToWire for ConfigSnapshot {
+    /// Wire shape: everything a client renders against. Strips `stash` —
+    /// it's master-internal scratchpad for compare mode; clients learn
+    /// "comparing now" from `state` alone. Re-add by removing one line if a
+    /// client ever needs the stashed preset.
+    fn to_wire(&self) -> Result<serde_json::Value> {
+        let mut v = serde_json::to_value(self)?;
+        if let Some(obj) = v.as_object_mut() { obj.remove("stash"); }
+        Ok(v)
     }
 }
