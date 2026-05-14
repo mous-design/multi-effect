@@ -93,10 +93,19 @@ impl ConfigSnapshot {
                 let Some(value) = validate_set(info, value, param_path) else {
                     return Ok(None); // type mismatch warned, no change
                 };
-                if node.params.get(param) == Some(&value) {
-                    return Ok(None);
-                }
-                node.params.insert(param.to_string(), value);
+                // Sparse storage: store only deltas from canonical default.
+                // A SET that lands back on the default removes the entry.
+                let prev = node.params.get(param).copied();
+                let is_default = info.default_as_param_value() == value;
+                let changed = if is_default {
+                    node.params.remove(param).is_some()
+                } else if prev == Some(value) {
+                    false
+                } else {
+                    node.params.insert(param.to_string(), value);
+                    true
+                };
+                if !changed { return Ok(None); }
                 if matches!(self.state, Comparing | ComparingPersisted) {
                     self.stash = None;
                 }
