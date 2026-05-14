@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,7 +13,6 @@ pub enum EqType {
     HighShelf,
 }
 
-pub const NAME: &str = "eq";
 pub const NAME_MID: &str = "eq_mid";
 pub const NAME_LOW: &str = "eq_low";
 pub const NAME_HIGH: &str = "eq_high";
@@ -34,7 +33,6 @@ pub const NAME_HIGH: &str = "eq_high";
 /// eq_low → eq_mid → eq_mid → eq_high
 /// ```
 pub struct Eq {
-    params_info: [ParamInfo; 4],
     key: String,
     eq_type:  EqType,
     active: bool,
@@ -75,18 +73,12 @@ pub static CANONICAL_HIGH: [ParamInfo; 4] = [
 
 impl Eq {
     pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let fallback = match eq_type {
-            EqType::LowShelf  => CANONICAL_LOW,
-            EqType::Peak      => CANONICAL_MID,
-            EqType::HighShelf => CANONICAL_HIGH,
-        };
-        let params_info = into_param_array(params_info, fallback, NAME);
-        let active = find_param_info(&params_info,"active").bool_default();
-        let freq_hz = find_param_info(&params_info,"freq").continuous_float_default();
-        let q = find_param_info(&params_info,"q").continuous_float_default();
-        let gain_db = find_param_info(&params_info,"gain_db").continuous_float_default();
+        let active  = find_param_info(params_info, "active" ).bool_default();
+        let freq_hz = find_param_info(params_info, "freq"   ).continuous_float_default();
+        let q       = find_param_info(params_info, "q"      ).continuous_float_default();
+        let gain_db = find_param_info(params_info, "gain_db").continuous_float_default();
         let mut eq = Self {
-            params_info, key: key.into(), eq_type,
+            key: key.into(), eq_type,
             active, freq_hz, q, gain_db,
             b0: 1.0, b1: 0.0, b2: 0.0,
             a1: 0.0, a2: 0.0,
@@ -147,41 +139,15 @@ impl Eq {
 }
 
 impl Parameterized for Eq {
-     fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         let name = self.type_name();
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores. See `ConfigMaster::clamp_to_bounds`.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "freq" => {
-                let info = find_param_info(self.get_params_info(), "freq");
-                let (v, r) = check_bounds(info, value.try_float()?, name);
-                self.freq_hz = v;
-                self.update_coefficients();
-                r
-            },
-            "q" => {
-                let info = find_param_info(self.get_params_info(), "q");
-                let (v, r) = check_bounds(info, value.try_float()?, name);
-                self.q = v;
-                self.update_coefficients();
-                r
-            },
-            "gain_db" => {
-                let info = find_param_info(self.get_params_info(), "gain_db");
-                let (v, r) = check_bounds(info, value.try_float()?, name);
-                self.gain_db = v;
-                self.update_coefficients();
-                r
-            },
+            "active"  => { self.active   = value.try_bool()?;  Ok(()) },
+            "freq"    => { self.freq_hz  = value.try_float()?; self.update_coefficients(); Ok(()) },
+            "q"       => { self.q        = value.try_float()?; self.update_coefficients(); Ok(()) },
+            "gain_db" => { self.gain_db  = value.try_float()?; self.update_coefficients(); Ok(()) },
             _ => Err(format!("{name}: unknown param '{param}'")),
         }
     }

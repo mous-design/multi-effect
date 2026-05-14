@@ -474,23 +474,6 @@ pub type OverrideMap = HashMap<MetaTarget, ParamValue>;
 /// 1. Start from canonical.
 /// 2. Apply each Type override, clamping to canonical bounds.
 /// 3. Compute `round_multiplier` from the final (post-override) min/max.
-/// Convert a `&[ParamInfo]` slice into a fixed-size array, falling back to
-/// `fallback` (typically the effect's own `CANONICAL`) and logging an error
-/// if the slice length doesn't match. Used by each effect's `new()` to safely
-/// receive the resolved view from `build_info` without panicking on a
-/// firmware-bug-induced length mismatch.
-pub fn into_param_array<const N: usize>(
-    slice:    &[ParamInfo],
-    fallback: [ParamInfo; N],
-    name:     &str,
-) -> [ParamInfo; N] {
-    slice.try_into().unwrap_or_else(|_| {
-        tracing::error!("{name}: params_info length mismatch (expected {N}, got {}); falling back to canonical",
-                        slice.len());
-        fallback
-    })
-}
-
 pub fn build_info(
     canonical: &[ParamInfo],
     type_overrides: &OverrideMap,
@@ -610,7 +593,6 @@ pub fn apply_override(
                 warn!("override {}.{:?}: log scale requires min > 0 && max > 0; rolled back",
                       target.param, target.aspect);
                 *min = prev_min; *max = prev_max; *default = prev_default; *log = prev_log;
-                bound_changed = false;
                 return false;
             }
             changed
@@ -684,44 +666,16 @@ pub fn apply_override(
 /// to participate in the same parameter system without implementing the full
 /// audio processing interface.
 pub trait Parameterized {
-    /// Get all parameters of the effect.
-    fn get_params_info(&self) -> &[ParamInfo];
-
-    /// Mutable access to the resolved `params_info` for runtime instance-bound
-    /// edits. Implementors return `&mut self.params_info`.
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo];
-
-    /// Set a named parameter. All audio params are scalar; `Float` and `Bool`
-    /// are the only `ParamValue` variants.
+    /// Set a named parameter. Master validates and clamps before push, so
+    /// audio implementations can store directly (use `try_float` / `try_bool`
+    /// / `try_int` to extract the right variant).
     fn set_param(&mut self, param: &str, _value: ParamValue) -> Result<(), String> {
         Err(format!("unknown param '{param}'"))
-    }
-
-    /// Apply an Instance bound override to the live `params_info` on this
-    /// instance. `clamp_ref` is the master-computed Type-resolved view
-    /// (canonical narrowed by `Config.type_overrides` for this effect type) —
-    /// the upper limit on what an Instance edit can set. Returns `true` if
-    /// any field was modified.
-    ///
-    /// Default impl forwards to the kernel; effects don't need to override it.
-    fn set_info_override(
-        &mut self,
-        target:    &MetaTarget,
-        value:     &ParamValue,
-        clamp_ref: &[ParamInfo],
-    ) -> bool {
-        apply_override(self.get_params_info_mut(), clamp_ref, target, value)
     }
 }
 
 /// Allow `Box<dyn Device>` to be used where `Parameterized` is expected.
 impl Parameterized for Box<dyn Device> {
-    fn get_params_info(&self) -> &[ParamInfo] {
-        (**self).get_params_info()
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        (**self).get_params_info_mut()
-    }
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         (**self).set_param(param, value)
     }
@@ -795,22 +749,6 @@ pub trait Device: Parameterized + Send + Sync {
 
 pub fn find_param_info<'a>(params_info: &'a [ParamInfo], name: &str) -> &'a ParamInfo {
     params_info.iter().find(|i| i.name == name).unwrap() // unwrap is cool here, since param_info is hard-coded.
-}
-
-/// Clamp `value` to `[min, max]` taken from ParamInfo.
-///
-/// Returns `(clamped, Ok(()))` when in range, or `(clamped, Err(message))` when
-/// the value was out of range.  Callers should always assign the returned value
-/// so the effect continues to work even when the input was invalid.
-pub fn check_bounds(info: &ParamInfo, value: f32, device_name: &str) -> (f32, Result<(), String>) {
-    let min = info.continuous_float_min();
-    let max = info.continuous_float_max();
-    let clamped = value.clamp(min, max);
-    if clamped != value {
-        (clamped, Err(format!("{device_name}.{}: value {value} out of range [{min}, {max}], clamped to {clamped}", info.name)))
-    } else {
-        (clamped, Ok(()))
-    }
 }
 
 /// System-wide target resolution for outbound rounding. Roughly equivalent to

@@ -59,8 +59,9 @@ pub struct ChainDef {
 ///
 /// `overrides` carries per-instance metadata edits (bound narrowing,
 /// visibility toggles). Keys are `"param.aspect"` strings (see `MetaTarget`).
-/// Replayed via `set_info_override` after construction. Absent / empty for
-/// nodes that haven't been edited.
+/// Master folds them into `params_info` at preset load via
+/// `resolve_params_info`; not replayed to audio (audio doesn't store bounds).
+/// Absent / empty for nodes that haven't been edited.
 ///
 /// `params_info` is the resolved per-instance ParamInfo array (canonical →
 /// Type overrides → Instance overrides applied). Computed by master at preset
@@ -209,23 +210,6 @@ impl Chain {
         Err(format!("no node handles '{param}'"))
     }
 
-    /// Apply an Instance bound override to the node identified by `key`.
-    /// Returns `Ok(true)` if a field changed, `Ok(false)` if the override
-    /// was a no-op, `Err` if no node with that key exists.
-    pub fn set_info_override(
-        &mut self,
-        key:       &str,
-        target:    &crate::engine::device::MetaTarget,
-        value:     &crate::engine::device::ParamValue,
-        clamp_ref: &[crate::engine::device::ParamInfo],
-    ) -> Result<bool, String> {
-        for node in &mut self.nodes {
-            if node.key() == key {
-                return Ok(node.set_info_override(target, value, clamp_ref));
-            }
-        }
-        Err(format!("no node with key '{key}'"))
-    }
 
     pub fn dispatch_action(&mut self, path: &str, action: &str) -> Result<(), String> {
         // Key-prefix routing: "01-looper.action" → node "01-looper", param "action"
@@ -354,11 +338,10 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
         eq::NAME_HIGH    => Box::new(eq::Eq::new(&def.key, EqType::HighShelf, sr, &type_resolved)),
         other            => bail!("unknown device type: '{other}'"),
     };
-    // Replay saved Instance overrides on top of the Type-resolved base; same
-    // `apply_override` kernel master uses at runtime.
-    for (target, value) in &def.overrides {
-        device.set_info_override(target, value, &type_resolved);
-    }
+    // Instance overrides aren't replayed to audio — audio doesn't store
+    // bounds. Master clamps SETs against the Instance-resolved view before
+    // pushing here, so audio only ever sees values within Type-resolved (the
+    // buffer-sizing envelope), regardless of any Instance narrowing.
     apply_params(&mut device, &def.params, &def.key)?;
     debug!("  Node '{}' ({})", def.key, def.device_type);
     Ok(device)

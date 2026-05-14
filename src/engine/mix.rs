@@ -1,4 +1,4 @@
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 pub const NAME: &str = "mix";
@@ -19,7 +19,6 @@ pub const NAME: &str = "mix";
 /// - `gain` (0–1):    overall output level (post-pan). Default: `1.0`.
 /// - `pan`  (-1..+1): -1.0 = full left, 0.0 = centre, +1.0 = full right. Default: `0.0`.
 pub struct Mix {
-    params_info: [ParamInfo; 5],
     key: String,
     /// Gain applied to the dry signal (both channels equally).
     dry: f32,
@@ -43,57 +42,28 @@ pub static CANONICAL: [ParamInfo; 5] = [
 
 impl Mix {
     pub fn new(key: impl Into<String>, params_info: &[ParamInfo]) -> Self {
-        let params_info = into_param_array(params_info, CANONICAL, NAME);
-        let active = find_param_info(&params_info,"active").bool_default();
-        let dry = find_param_info(&params_info,"dry").continuous_float_default();
-        let wet = find_param_info(&params_info,"wet").continuous_float_default();
-        let gain = find_param_info(&params_info,"gain").continuous_float_default();
-        let pan = find_param_info(&params_info,"pan").continuous_float_default();
+        let active = find_param_info(params_info, "active").bool_default();
+        let dry    = find_param_info(params_info, "dry"   ).continuous_float_default();
+        let wet    = find_param_info(params_info, "wet"   ).continuous_float_default();
+        let gain   = find_param_info(params_info, "gain"  ).continuous_float_default();
+        let pan    = find_param_info(params_info, "pan"   ).continuous_float_default();
         Self {
-            params_info, key: key.into(),
+            key: key.into(),
             active, dry, wet, gain, pan,
         }
     }
 }
 
 impl Parameterized for Mix {
-    fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores. See `ConfigMaster::clamp_to_bounds`.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "dry"  => {
-                let info = find_param_info(self.get_params_info(), "dry");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.dry = v;
-                r
-            },
-            "wet"  => {
-                let info = find_param_info(self.get_params_info(), "wet");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.wet = v;
-                r
-            },
-            "gain" => {
-                let info = find_param_info(self.get_params_info(), "gain");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.gain = v;
-                r
-            },
-            "pan"  => {
-                let info = find_param_info(self.get_params_info(), "pan");
-                let (v, r) = check_bounds(info,  value.try_float()?, NAME);
-                self.pan  = v;
-                r
-            },
+            "active" => { self.active = value.try_bool()?;  Ok(()) },
+            "dry"    => { self.dry    = value.try_float()?; Ok(()) },
+            "wet"    => { self.wet    = value.try_float()?; Ok(()) },
+            "gain"   => { self.gain   = value.try_float()?; Ok(()) },
+            "pan"    => { self.pan    = value.try_float()?; Ok(()) },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }

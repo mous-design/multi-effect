@@ -1,4 +1,4 @@
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
@@ -92,7 +92,6 @@ impl AllpassFilter {
 /// - `damping`   (0–1):  high-frequency absorption in feedback loop
 /// - `wet`       (0–1):  output level, same for both channels
 pub struct Reverb {
-    params_info: [ParamInfo; 4],
     key: String,
     combs: [Vec<CombFilter>; 2],
     allpasses: [Vec<AllpassFilter>; 2],
@@ -115,11 +114,10 @@ pub static CANONICAL: [ParamInfo; 4] = [
 
 impl Reverb {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let params_info = into_param_array(params_info, CANONICAL, NAME);
-        let active = find_param_info(&params_info,"active").bool_default();
-        let room_size = find_param_info(&params_info,"room_size").continuous_float_default();
-        let damping = find_param_info(&params_info,"damping").continuous_float_default();
-        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+        let active    = find_param_info(params_info, "active"   ).bool_default();
+        let room_size = find_param_info(params_info, "room_size").continuous_float_default();
+        let damping   = find_param_info(params_info, "damping"  ).continuous_float_default();
+        let wet       = find_param_info(params_info, "wet"      ).continuous_float_default();
 
         let build_combs = |tuning: &[usize]| {
             tuning.iter().map(|&s| CombFilter::new(scale_size(s, sample_rate))).collect()
@@ -129,7 +127,7 @@ impl Reverb {
         };
 
         let mut r = Self {
-            params_info, key: key.into(),
+            key: key.into(),
             combs: [build_combs(&COMB_TUNING_L), build_combs(&COMB_TUNING_R)],
             allpasses: [build_allpasses(&ALLPASS_TUNING_L), build_allpasses(&ALLPASS_TUNING_R)],
             active, room_size, damping, wet, wet_norm: 0.0,
@@ -153,40 +151,14 @@ impl Reverb {
 }
 
 impl Parameterized for Reverb {
-    fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores. See `ConfigMaster::clamp_to_bounds`.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "room_size" => {
-                let info = find_param_info(self.get_params_info(), "room_size");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.room_size = v;
-                self.update_params();
-                r
-            },
-            "damping" => {
-                let info = find_param_info(self.get_params_info(), "damping");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.damping = v;
-                self.update_params();
-                r
-            },
-            "wet" => {
-                let info = find_param_info(self.get_params_info(), "wet");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.wet = v;
-                self.update_params();
-                r
-            },
+            "active"    => { self.active    = value.try_bool()?;  Ok(()) },
+            "room_size" => { self.room_size = value.try_float()?; self.update_params(); Ok(()) },
+            "damping"   => { self.damping   = value.try_float()?; self.update_params(); Ok(()) },
+            "wet"       => { self.wet       = value.try_float()?; self.update_params(); Ok(()) },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }

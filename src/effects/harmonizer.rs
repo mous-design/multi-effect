@@ -1,7 +1,7 @@
 use std::f32::consts::TAU;
 use tracing::debug;
 
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 // ---------------------------------------------------------------------------
@@ -81,7 +81,6 @@ fn lerp_frame(buf: &[Frame], pos: f32, n: usize) -> Frame {
 /// # MIDI
 /// Note On → start voice.  Note Off → begin 50 ms fade-out.
 pub struct Harmonizer {
-    params_info: [ParamInfo; 4],
     key:     String,
     active:  bool,
     /// MIDI note that plays back at 1:1 speed (unshifted).
@@ -111,11 +110,10 @@ pub static CANONICAL: [ParamInfo; 4] = [
 
 impl Harmonizer {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let params_info = into_param_array(params_info, CANONICAL, NAME);
-        let active = find_param_info(&params_info,"active").bool_default();
-        let root = find_param_info(&params_info,"root").continuous_int_default() as u8;
-        let vel_sense = find_param_info(&params_info,"vel_sense").continuous_float_default();
-        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+        let active    = find_param_info(params_info, "active"   ).bool_default();
+        let root      = find_param_info(params_info, "root"     ).continuous_int_default() as u8;
+        let vel_sense = find_param_info(params_info, "vel_sense").continuous_float_default();
+        let wet       = find_param_info(params_info, "wet"      ).continuous_float_default();
 
         let buf_size   = (sample_rate * INPUT_BUF_MS / 1000.0) as usize;
         // Grain size in samples (no power-of-two rounding — must stay well below buf_size/2)
@@ -126,7 +124,7 @@ impl Harmonizer {
             .collect();
 
         Self {
-            params_info, key: key.into(),
+            key: key.into(),
             active, wet, root, vel_sense,
             input_buf:   vec![[0.0; 2]; buf_size],
             write_pos:   0,
@@ -182,37 +180,14 @@ impl Harmonizer {
 // ---------------------------------------------------------------------------
 
 impl Parameterized for Harmonizer {
-     fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores. See `ConfigMaster::clamp_to_bounds`.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "root" => {
-                let info = find_param_info(self.get_params_info(), "root");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.root = v as u8;
-                r
-            },
-            "vel_sense" => {
-                let info = find_param_info(self.get_params_info(), "vel_sense");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.vel_sense = v;
-                r
-            },
-            "wet" => {
-                let info = find_param_info(self.get_params_info(), "wet");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.wet = v;
-                r
-            },
+            "active"    => { self.active    = value.try_bool()?;       Ok(()) },
+            "root"      => { self.root      = value.try_int()? as u8;  Ok(()) },
+            "vel_sense" => { self.vel_sense = value.try_float()?;      Ok(()) },
+            "wet"       => { self.wet       = value.try_float()?;      Ok(()) },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }

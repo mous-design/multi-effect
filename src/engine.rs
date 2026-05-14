@@ -237,12 +237,6 @@ impl AudioEngine {
                         warn!("SET '{path}' {value} [source={source}]: unknown parameter");
                     }
                 },
-                ControlMessage::SetInfoOverride { path, target, value, clamp_ref, ref source } => {
-                    let handled = self.chains.iter_mut().any(|c| c.set_info_override(&path, &target, &value, &clamp_ref).is_ok());
-                    if !handled {
-                        warn!("SET '{path}.{}.{:?}' [source={source}]: unknown node", target.param, target.aspect);
-                    }
-                },
                 ControlMessage::Reset { .. } => {
                     for chain in &mut self.chains { chain.reset(); }
                 },

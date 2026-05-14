@@ -1,4 +1,4 @@
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
@@ -21,7 +21,6 @@ pub const NAME: &str = "delay";
 /// tail subtracts the dry component so the engine emits wet-only — dry is
 /// re-added in analog downstream.
 pub struct Delay {
-    params_info: [ParamInfo; 4],
     key: String,
     bufs: [RingBuffer; 2],
     active: bool,
@@ -41,15 +40,14 @@ pub static CANONICAL: [ParamInfo; 4] = [
 
 impl Delay {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let params_info = into_param_array(params_info, CANONICAL, NAME);
-        let feedback = find_param_info(&params_info,"feedback").continuous_float_default();
-        let wet = find_param_info(&params_info,"wet").continuous_float_default();
-        let active = find_param_info(&params_info,"active").bool_default();
-        let info_time = find_param_info(&params_info,"time");
-        let max_samples = (sample_rate * info_time.continuous_float_max()) as usize;
+        let active = find_param_info(params_info, "active").bool_default();
+        let feedback = find_param_info(params_info, "feedback").continuous_float_default();
+        let wet = find_param_info(params_info, "wet").continuous_float_default();
+        let info_time = find_param_info(params_info, "time");
+        let max_samples = (sample_rate * info_time.continuous_float_max()    ) as usize;
         let delay_samples = (sample_rate * info_time.continuous_float_default()) as usize;
         Self {
-            params_info, key: key.into(),
+            key: key.into(),
             bufs: [RingBuffer::new(max_samples), RingBuffer::new(max_samples)],
             delay_samples,
             feedback, wet, active, sample_rate,
@@ -58,39 +56,14 @@ impl Delay {
 }
 
 impl Parameterized for Delay {
-     fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores. See `ConfigMaster::clamp_to_bounds`.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "time" => {
-                let info = find_param_info(self.get_params_info(), "time");
-                let (v, r) =
-                    check_bounds(info, value.try_float()?, NAME);
-                self.delay_samples = (v * self.sample_rate) as usize;
-                r
-            },
-            "feedback" => {
-                let info = find_param_info(self.get_params_info(), "feedback");
-                let (v, r) =
-                    check_bounds(info, value.try_float()?, NAME);
-                self.feedback = v;
-                r
-            },
-            "wet" => {
-                let info = find_param_info(self.get_params_info(), "wet");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.wet = v;
-                r
-            },
+            "active"   => { self.active   = value.try_bool()?;  Ok(()) },
+            "time"     => { self.delay_samples = (value.try_float()? * self.sample_rate) as usize; Ok(()) },
+            "feedback" => { self.feedback = value.try_float()?; Ok(()) },
+            "wet"      => { self.wet      = value.try_float()?; Ok(()) },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }

@@ -413,7 +413,10 @@ impl ConfigMaster {
 
     fn handle_apply_set(&mut self, path: &String, value: ParamValue, source: &str) -> Result<SnapshotState> {
         debug!("SET {path} {value} [source={source}]");
-        if self.snapshot.apply_set(&path, value)? {
+        // Single validator: `apply_set` handles type check, clamp, variant
+        // normalisation, and storage in one pass. Returns the actually-stored
+        // value for downstream broadcast — never the raw input.
+        if let Some(value) = self.snapshot.apply_set(path, value)? {
             if self.snapshot.set_state(Dirty) {
                 self.notify_state_changed(source);
             }
@@ -462,34 +465,18 @@ impl ConfigMaster {
         value:    ParamValue,
         source:   &str,
     ) -> Result<SnapshotState> {
-        use crate::engine::{device::{build_info, OverrideMap}, patch::canonical_for};
         debug!("SET META {node_key}.{}.{:?} = {:?} [source={source}]",
                target.param, target.aspect, value);
 
-        // Look up effect type for this node from the active preset.
-        let device_type = self.snapshot.preset.chains.iter()
-            .flat_map(|c| c.nodes.iter())
-            .find(|n| n.key == node_key)
-            .map(|n| n.device_type.clone())
-            .ok_or_else(|| anyhow::anyhow!("no node with key '{node_key}'"))?;
-
-        // Resolve canonical → Type-resolved bounds (audio thread will use this
-        // as clamp_ref). Unknown effect types are rejected here so we don't
-        // forward a bogus message.
-        let canonical = canonical_for(&device_type)
-            .ok_or_else(|| anyhow::anyhow!("unknown effect type '{device_type}'"))?;
-        let empty = OverrideMap::new();
-        let type_overrides = self.cfg.type_overrides.get(&device_type).unwrap_or(&empty);
-        let type_resolved = build_info(canonical, type_overrides);
-
+        // Broadcast to other clients (handle.rs formats as `PARAM <key>.<param>.<aspect>`).
+        // Audio doesn't react — master clamps subsequent SETs against the new
+        // bounds before pushing to audio, so the audio thread sees only legal values.
         let cm = ControlMessage::SetInfoOverride {
-            path:      node_key.to_string(),
-            target:    target.clone(),
+            path:   node_key.to_string(),
+            target: target.clone(),
             value,
-            clamp_ref: type_resolved,
-            source:    source.to_string(),
+            source: source.to_string(),
         };
-        self.audio.push_control(cm.clone())?;
         self.bus.send(cm).ok();
 
         // Persist into the active preset's snapshot so the override survives

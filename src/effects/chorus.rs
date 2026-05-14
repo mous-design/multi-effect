@@ -1,6 +1,6 @@
 use std::f32::consts::TAU;
 
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
@@ -25,7 +25,6 @@ pub const NAME: &str = "chorus";
 /// the `Mix` node at the chain tail subtracts the dry component so the engine
 /// output is wet-only — dry is re-added in analog downstream.
 pub struct Chorus {
-    params_info: [ParamInfo; 4],
     key: String,
     bufs: [RingBuffer; 2],
     active: bool,
@@ -45,55 +44,33 @@ pub static CANONICAL: [ParamInfo; 4] = [
 
 impl Chorus {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let params_info = into_param_array(params_info, CANONICAL, NAME);
-        let active = find_param_info(&params_info,"active").bool_default();
-        let rate_hz = find_param_info(&params_info,"rate_hz").continuous_float_default();
-        let wet = find_param_info(&params_info,"wet").continuous_float_default();
-        let info_depth = find_param_info(&params_info,"depth_ms");
+        // Read defaults & buffer-sizing max from the Type-resolved view passed
+        // in. Slice borrowed for construction only — no field needed.
+        let active   = find_param_info(params_info, "active"  ).bool_default();
+        let rate_hz  = find_param_info(params_info, "rate_hz" ).continuous_float_default();
+        let wet      = find_param_info(params_info, "wet"     ).continuous_float_default();
+        let info_depth = find_param_info(params_info, "depth_ms");
         let depth_ms = info_depth.continuous_float_default();
-        // Add 2, because 1 for the sin() is going from -1.0 to 1.0 (not 0.99999), and 1 for the linear interpolation 
+        // Add 2: 1 for the sin() range (−1.0..1.0 ≠ 0.99999), 1 for linear interp.
         let max_samples = (2.0 * sample_rate * info_depth.continuous_float_max() / 1000.0) as usize + 2;
         Self {
-            params_info, key: key.into(),
+            key: key.into(),
             bufs: [RingBuffer::new(max_samples), RingBuffer::new(max_samples)],
             active, rate_hz, depth_ms, wet, sample_rate,
-            lfo_phase: [0.0, TAU / 4.0], // 90° spread between L and R   
+            lfo_phase: [0.0, TAU / 4.0], // 90° spread between L and R
         }
     }
 }
 
 impl Parameterized for Chorus {
-    fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "rate_hz"  => {
-                let info = find_param_info(self.get_params_info(), "rate_hz");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.rate_hz  = v;
-                r
-            },
-            "depth_ms" => {
-                let info = find_param_info(self.get_params_info(), "depth_ms");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.depth_ms = v;
-                r
-            },
-            "wet" => {
-                let info = find_param_info(self.get_params_info(), "wet");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.wet = v;
-                r
-            },
+            "active"   => { self.active   = value.try_bool()?;  Ok(()) },
+            "rate_hz"  => { self.rate_hz  = value.try_float()?; Ok(()) },
+            "depth_ms" => { self.depth_ms = value.try_float()?; Ok(()) },
+            "wet"      => { self.wet      = value.try_float()?; Ok(()) },
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }

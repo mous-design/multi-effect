@@ -1,5 +1,5 @@
 use crate::control::{ControlMessage, EventBus};
-use crate::engine::device::{find_param_info, check_bounds, into_param_array,
+use crate::engine::device::{find_param_info,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 use tracing::warn;
 
@@ -86,7 +86,6 @@ pub enum LooperState {
 /// | `decay` | 0.0–1.0 | 1.0     | Per-sample decay applied each loop pass      |
 /// | `action`| string  | —       | See actions — dispatched via set_action      |
 pub struct Looper {
-    params_info: [ParamInfo; 5],
     key:    String,
     active: bool,
 
@@ -128,18 +127,17 @@ pub static CANONICAL: [ParamInfo; 5] = [
 
 impl Looper {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let params_info = into_param_array(params_info, CANONICAL, NAME);
-        let active = find_param_info(&params_info,"active").bool_default();
-        let decay = find_param_info(&params_info,"decay").continuous_float_default();
-        let max_seconds = find_param_info(&params_info,"max_seconds").continuous_float_default();
-        let max_buffers = find_param_info(&params_info,"max_buffers").continuous_int_default() as usize;
-        let wet = find_param_info(&params_info,"wet").continuous_float_default();
+        let active      = find_param_info(params_info, "active"     ).bool_default();
+        let decay       = find_param_info(params_info, "decay"      ).continuous_float_default();
+        let max_seconds = find_param_info(params_info, "max_seconds").continuous_float_default();
+        let max_buffers = find_param_info(params_info, "max_buffers").continuous_int_default() as usize;
+        let wet         = find_param_info(params_info, "wet"        ).continuous_float_default();
 
         let init_len = (sample_rate * max_seconds) as usize;
         // Pre-allocate buffer[0] (OS gives us lazily-zeroed pages)
         let buf0 = vec![[0.0f32; 2]; init_len];
         Self {
-            params_info, key: key.into(),
+            key: key.into(),
             state:         LooperState::Idle,
             current_pos:   0,
             loop_len:      0,
@@ -788,31 +786,13 @@ impl Device for Looper {
 // ---------------------------------------------------------------------------
 
 impl Parameterized for Looper {
-    fn get_params_info(&self) -> &[ParamInfo] {
-        &self.params_info
-    }
-    fn get_params_info_mut(&mut self) -> &mut [ParamInfo] {
-        &mut self.params_info
-    }
-
     fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
+        // Master clamps to declared bounds and normalises variant before push;
+        // audio just stores. See `ConfigMaster::clamp_to_bounds`.
         match param {
-            "active" => {
-                self.active = value.try_bool()?;
-                Ok(())
-            },
-            "decay"    => {
-                let info = find_param_info(self.get_params_info(), "decay");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.decay = v;
-                r
-            },
-            "wet" => {
-                let info = find_param_info(self.get_params_info(), "wet");
-                let (v, r) = check_bounds(info, value.try_float()?, NAME);
-                self.wet   = v;
-                r
-            },
+            "active" => { self.active = value.try_bool()?;  Ok(()) },
+            "decay"  => { self.decay  = value.try_float()?; Ok(()) },
+            "wet"    => { self.wet    = value.try_float()?; Ok(()) },
             // Maybe this isn't right. Maybe should be action play <secs>
             "pos_secs" => {
                 let secs     = value.try_float()?;

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::debug;
-use super::engine::device::{ParamValue, MetaTarget, ParamInfo};
+use super::engine::device::{ParamValue, MetaTarget};
 use super::config::preset::PresetDef;
 
 // ---------------------------------------------------------------------------
@@ -42,15 +42,15 @@ pub fn connection_id(alias: &str) -> String {
 pub enum ControlMessage {
     SetParam { path: String, value: ParamValue, source: String },
     /// Instance bound override (the runtime "edit a param's min/max/default").
-    /// `path` is the node key (e.g. `"04-chorus"`); `target` selects param + aspect.
-    /// `clamp_ref` is the master-computed Type-resolved view, used by the audio
-    /// thread's `apply_override` for clamping. Routed bus-side without `clamp_ref`.
+    /// `path` is the node key (e.g. `"04-chorus"`); `target` selects param +
+    /// aspect. Master-only notification — audio doesn't react (master clamps
+    /// SETs against the updated bounds before push). Subscribers on the bus
+    /// (other UI clients, telnet) see the change as `PARAM <key>.<param>.<aspect>`.
     SetInfoOverride {
-        path:       String,
-        target:     MetaTarget,
-        value:      ParamValue,
-        clamp_ref:  Vec<ParamInfo>,
-        source:     String,
+        path:   String,
+        target: MetaTarget,
+        value:  ParamValue,
+        source: String,
     },
     Reset { source: String },
     Action { path: String, action: String, source: String },
