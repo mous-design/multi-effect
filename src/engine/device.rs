@@ -565,39 +565,55 @@ pub fn apply_override(
         (
             ParamType::ContinuousFloat { min, max, default, log, .. },
             ParamType::ContinuousFloat { min: cmin, max: cmax, .. },
-        ) => match target.aspect {
-            MetaAspect::Min | MetaAspect::Max | MetaAspect::Default => {
-                let Ok(v_in) = value.try_float() else {
-                    warn!("override {}.{:?}: expected float", target.param, target.aspect);
-                    return false;
-                };
-                let v = v_in.clamp(*cmin, *cmax);
-                if v != v_in {
-                    warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
+        ) => {
+            // Snapshot for invariant rollback. The post-state must satisfy
+            // `!log || (min > 0 && max > 0)` — same rule the construction-time
+            // `assert!` enforces on canonical declarations.
+            let (prev_min, prev_max, prev_default, prev_log) = (*min, *max, *default, *log);
+            let changed = match target.aspect {
+                MetaAspect::Min | MetaAspect::Max | MetaAspect::Default => {
+                    let Ok(v_in) = value.try_float() else {
+                        warn!("override {}.{:?}: expected float", target.param, target.aspect);
+                        return false;
+                    };
+                    let v = v_in.clamp(*cmin, *cmax);
+                    if v != v_in {
+                        warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
+                              target.param, target.aspect);
+                    }
+                    match target.aspect {
+                        MetaAspect::Min     => { *min = v;     bound_changed = true; },
+                        MetaAspect::Max     => { *max = v;     bound_changed = true; },
+                        MetaAspect::Default => { *default = v; },
+                        _ => unreachable!(),
+                    }
+                    true
+                },
+                MetaAspect::Log => {
+                    let Ok(v) = value.try_bool() else {
+                        warn!("override {}.{:?}: expected bool", target.param, target.aspect);
+                        return false;
+                    };
+                    *log = v;
+                    true
+                },
+                MetaAspect::Step => {
+                    warn!("override {}.{:?}: Step aspect not supported by ContinuousFloat",
                           target.param, target.aspect);
-                }
-                match target.aspect {
-                    MetaAspect::Min     => { *min = v;     bound_changed = true; },
-                    MetaAspect::Max     => { *max = v;     bound_changed = true; },
-                    MetaAspect::Default => { *default = v; },
-                    _ => unreachable!(),
-                }
-                true
-            },
-            MetaAspect::Log => {
-                let Ok(v) = value.try_bool() else {
-                    warn!("override {}.{:?}: expected bool", target.param, target.aspect);
-                    return false;
-                };
-                *log = v;
-                true
-            },
-            MetaAspect::Step => {
-                warn!("override {}.{:?}: Step aspect not supported by ContinuousFloat",
+                    false
+                },
+                MetaAspect::Visible => unreachable!("Visible aspect handled at top level"),
+            };
+            // Invariant check on the resulting state — single rule that covers
+            // every aspect that touches log/min/max.
+            if *log && (*min <= 0.0 || *max <= 0.0) {
+                warn!("override {}.{:?}: log scale requires min > 0 && max > 0; rolled back",
                       target.param, target.aspect);
-                false
-            },
-            MetaAspect::Visible => unreachable!("Visible aspect handled at top level"),
+                *min = prev_min; *max = prev_max; *default = prev_default; *log = prev_log;
+                bound_changed = false;
+                return false;
+            }
+            changed
         },
         (
             ParamType::ContinuousInt { min, max, default, .. },
