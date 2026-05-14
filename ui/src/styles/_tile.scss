@@ -58,6 +58,62 @@
     }
 }
 
+.tile-settings-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 $gap-xs;
+    border-radius: $radius-sm;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+
+    &:hover {
+        color: var(--text-strong);
+        background: var(--bg-hover, rgba(0,0,0,0.05));
+    }
+}
+
+// ── Tile settings popup body ────────────────────────────────────────────────
+.tile-settings {
+    display: flex;
+    flex-direction: column;
+    gap: $gap-sm;
+    min-width: 360px;
+}
+
+.param-settings-row {
+    display: flex;
+    align-items: center;
+    gap: $gap;
+    padding: $gap-xs 0;
+    border-bottom: 1px solid var(--border-muted, rgba(0,0,0,0.08));
+
+    &:last-child { border-bottom: none; }
+}
+
+.param-settings-name {
+    flex: 0 0 auto;
+    min-width: 80px;
+    font-weight: 500;
+}
+
+.param-settings-field {
+    display: inline-flex;
+    align-items: center;
+    gap: $gap-xs;
+    font-size: $font-sm;
+    color: var(--text-muted);
+
+    input[type="number"] {
+        width: 60px;
+        padding: 2px 4px;
+        font-size: $font-sm;
+    }
+}
+
 .tile-params {
     display: flex;
     flex-wrap: nowrap;

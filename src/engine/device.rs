@@ -587,13 +587,40 @@ pub fn apply_override(
                 },
                 MetaAspect::Visible => unreachable!("Visible aspect handled at top level"),
             };
-            // Invariant check on the resulting state — single rule that covers
-            // every aspect that touches log/min/max.
+            // Invariant: log scale requires strictly-positive bounds.
             if *log && (*min <= 0.0 || *max <= 0.0) {
                 warn!("override {}.{:?}: log scale requires min > 0 && max > 0; rolled back",
                       target.param, target.aspect);
                 *min = prev_min; *max = prev_max; *default = prev_default; *log = prev_log;
                 return false;
+            }
+            // Invariant: min <= max.
+            if *min > *max {
+                warn!("override {}.{:?}: min ({}) > max ({}); rolled back",
+                      target.param, target.aspect, *min, *max);
+                *min = prev_min; *max = prev_max; *default = prev_default; *log = prev_log;
+                return false;
+            }
+            // Invariant: default ∈ [min, max]. Direct edits must satisfy;
+            // cascaded clamps (after a min/max change) auto-fix silently.
+            match target.aspect {
+                MetaAspect::Default => {
+                    if *default < *min || *default > *max {
+                        warn!("override {}.default: {} outside [{}, {}]; rolled back",
+                              target.param, *default, *min, *max);
+                        *min = prev_min; *max = prev_max; *default = prev_default; *log = prev_log;
+                        return false;
+                    }
+                },
+                MetaAspect::Min | MetaAspect::Max => {
+                    let clamped = default.clamp(*min, *max);
+                    if clamped != *default {
+                        tracing::info!("override {}.{:?}: default {} out of new range [{}, {}], auto-clamped to {}",
+                              target.param, target.aspect, *default, *min, *max, clamped);
+                        *default = clamped;
+                    }
+                },
+                _ => {},
             }
             changed
         },
@@ -601,6 +628,7 @@ pub fn apply_override(
             ParamType::ContinuousInt { min, max, default, .. },
             ParamType::ContinuousInt { min: cmin, max: cmax, .. },
         ) => {
+            let (prev_min, prev_max, prev_default) = (*min, *max, *default);
             let Ok(v_in) = value.try_int() else {
                 warn!("override {}.{:?}: expected int", target.param, target.aspect);
                 return false;
@@ -610,7 +638,7 @@ pub fn apply_override(
                 warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
                       target.param, target.aspect);
             }
-            match target.aspect {
+            let changed = match target.aspect {
                 MetaAspect::Min     => { *min = v;     true },
                 MetaAspect::Max     => { *max = v;     true },
                 MetaAspect::Default => { *default = v; true },
@@ -619,7 +647,35 @@ pub fn apply_override(
                           target.param, target.aspect);
                     false
                 },
+            };
+            // Invariant: min <= max.
+            if *min > *max {
+                warn!("override {}.{:?}: min ({}) > max ({}); rolled back",
+                      target.param, target.aspect, *min, *max);
+                *min = prev_min; *max = prev_max; *default = prev_default;
+                return false;
             }
+            // Invariant: default ∈ [min, max]. Direct → hard reject; cascaded → auto-clamp.
+            match target.aspect {
+                MetaAspect::Default => {
+                    if *default < *min || *default > *max {
+                        warn!("override {}.default: {} outside [{}, {}]; rolled back",
+                              target.param, *default, *min, *max);
+                        *min = prev_min; *max = prev_max; *default = prev_default;
+                        return false;
+                    }
+                },
+                MetaAspect::Min | MetaAspect::Max => {
+                    let clamped = (*default).clamp(*min, *max);
+                    if clamped != *default {
+                        tracing::info!("override {}.{:?}: default {} out of new range [{}, {}], auto-clamped to {}",
+                              target.param, target.aspect, *default, *min, *max, clamped);
+                        *default = clamped;
+                    }
+                },
+                _ => {},
+            }
+            changed
         },
         (ParamType::DiscreteBool { default, .. }, _) => {
             if !matches!(target.aspect, MetaAspect::Default) {

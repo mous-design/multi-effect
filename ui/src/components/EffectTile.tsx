@@ -3,6 +3,7 @@ import type { NodeDef, ParamInfo } from '../types';
 import { sendAction } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
+import { TileSettingsPopup } from './TileSettingsPopup';
 import { t } from '../i18n';
 
 // Looper `transport` is a UI-only composite widget (rec/play/stop + timer +
@@ -36,6 +37,15 @@ function PauseIcon() {
     <svg width="10" height="13" viewBox="0 0 10 13" fill="currentColor">
       <rect x="0" y="0" width="3.5" height="13" rx="1"/>
       <rect x="6.5" y="0" width="3.5" height="13" rx="1"/>
+    </svg>
+  );
+}
+
+function CogIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
   );
 }
@@ -135,6 +145,7 @@ function useLooperTimer(node: NodeDef): string {
 
 export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [transportHidden, setTransportHidden] = useState(() => loadTransportHidden(presetName, node.key));
   const looperTime = useLooperTimer(node);
 
@@ -203,11 +214,15 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
 
   return (
     <div className={`tile${active ? '' : ' inactive'}${expanded ? ' expanded' : ''}`}>
+      {showSettings && (
+        <TileSettingsPopup node={node} onMetaSet={onMetaSet} onClose={() => setShowSettings(false)} />
+      )}
       <div className="tile-header">
         {activeEntry
           ? <Toggle nodeKey={node.key} param="active" value={active} label="" onSet={(p, v) => onSet(p, v)} />
           : <div className="tile-header-spacer" />}
         <span className="tile-type">{t(`type.${node.type}`)}</span>
+        <button className="tile-settings-btn" onClick={() => setShowSettings(true)} title={t('ui.settings')}><CogIcon /></button>
         <button className="tile-delete" onClick={() => onDelete(node.key)} title="Delete">×</button>
       </div>
       <div className="tile-body">

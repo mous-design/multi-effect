@@ -12,7 +12,7 @@ use crate::control::{self, EventBus, NetworkControl, SerialControl, ControlMessa
 use crate::control::mapping::{ControlDef, ControllerDef, DeviceDef};
 use crate::control::midi::{MidiControl, MidiOutControl};
 use crate::engine::AudioHandle;
-use crate::engine::device::{MetaTarget, ParamValue};
+use crate::engine::device::{MetaAspect, MetaTarget, ParamInfo, ParamKind, ParamValue};
 use crate::engine::patch::{self, resolve_params_info, Chain};
 
 // ---------------------------------------------------------------------------
@@ -402,8 +402,11 @@ impl ConfigMaster {
             .context("patch channel full, patch not applied")?;
         self.snapshot.preset.chains = chain_defs;
         self.refresh_preset_params_info();
-        // Explicit structural mutation: always notify (see handle_update_controllers).
-        self.notify_preset_loaded(source);
+        // Always notify ALL clients — originator included. The originator's
+        // optimistic update for an added node lacks `params_info` (only master
+        // knows canonical), so they need the broadcast to populate it. Use
+        // `source = "master"` so they're not filtered out.
+        self.notify_preset_loaded("master");
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed(source);
         }
@@ -416,11 +419,17 @@ impl ConfigMaster {
         // Single validator: `apply_set` handles type check, clamp, variant
         // normalisation, and storage in one pass. Returns the actually-stored
         // value for downstream broadcast — never the raw input.
-        if let Some(value) = self.snapshot.apply_set(path, value)? {
+        if let Some(stored) = self.snapshot.apply_set(path, value)? {
             if self.snapshot.set_state(Dirty) {
                 self.notify_state_changed(source);
             }
-            let cm = ControlMessage::SetParam { path: path.clone(), value, source: source.to_string() };
+            // Source-rewrite rule: filter the originator only when the broadcast
+            // is a faithful echo of their request. If master clamped or
+            // variant-normalised, broadcast with `source = "master"` so the
+            // originator also hears the authoritative value (corrects their
+            // optimistic UI).
+            let bcast_source = if stored == value { source.to_string() } else { "master".into() };
+            let cm = ControlMessage::SetParam { path: path.clone(), value: stored, source: bcast_source };
             self.audio.push_control(cm.clone())?;
             self.bus.send(cm).ok();
         }
@@ -468,27 +477,91 @@ impl ConfigMaster {
         debug!("SET META {node_key}.{}.{:?} = {:?} [source={source}]",
                target.param, target.aspect, value);
 
-        // Broadcast to other clients (handle.rs formats as `PARAM <key>.<param>.<aspect>`).
-        // Audio doesn't react — master clamps subsequent SETs against the new
-        // bounds before pushing to audio, so the audio thread sees only legal values.
-        let cm = ControlMessage::SetInfoOverride {
-            path:   node_key.to_string(),
-            target: target.clone(),
-            value,
-            source: source.to_string(),
-        };
-        self.bus.send(cm).ok();
+        // Snapshot the targeted param's aspects before applying — used after
+        // resolve to diff against the new state and broadcast every aspect
+        // that changed (including cascades like default auto-clamp).
+        let param = target.param.clone();
+        let old_aspects = self.snapshot.preset.chains.iter()
+            .flat_map(|c| c.nodes.iter())
+            .find(|n| n.key == node_key)
+            .and_then(|n| n.params_info.iter()
+                .find(|i| i.name == param && matches!(i.kind, ParamKind::ParamMeta { .. }))
+                .map(extract_aspects))
+            .unwrap_or_default();
 
-        // Persist into the active preset's snapshot so the override survives
-        // autosave + restart and is included when the preset is saved. Refresh
-        // this node's resolved `params_info` so subsequent wire snapshots and
-        // master reads reflect the new bound without recomputation.
-        if let Some(node) = self.snapshot.preset.chains.iter_mut()
+        // Persist override + refresh resolved view.
+        let current_value = if let Some(node) = self.snapshot.preset.chains.iter_mut()
             .flat_map(|c| c.nodes.iter_mut())
             .find(|n| n.key == node_key)
         {
-            node.overrides.insert(target, value);
+            node.overrides.insert(target.clone(), value);
             node.params_info = resolve_params_info(node, &self.cfg).unwrap_or_default();
+            node.params.get(&param).copied()
+        } else {
+            None
+        };
+
+        // Broadcast every aspect that changed (user's direct edit + cascades).
+        let new_aspects = self.snapshot.preset.chains.iter()
+            .flat_map(|c| c.nodes.iter())
+            .find(|n| n.key == node_key)
+            .and_then(|n| n.params_info.iter()
+                .find(|i| i.name == param && matches!(i.kind, ParamKind::ParamMeta { .. }))
+                .map(extract_aspects))
+            .unwrap_or_default();
+
+        let mut new_default: Option<ParamValue> = None;
+        let mut default_changed = false;
+        for (aspect, new_v) in &new_aspects {
+            let old_v = old_aspects.iter().find(|(a, _)| a == aspect).map(|(_, v)| *v);
+            if *aspect == MetaAspect::Default {
+                new_default = Some(*new_v);
+                if Some(*new_v) != old_v { default_changed = true; }
+            }
+            if Some(*new_v) != old_v {
+                // Source-rewrite: only the user's own direct edit with an
+                // unmodified value is a true echo (filter their copy). Cascade
+                // aspects (default auto-clamp) and any kernel-clamped value
+                // go out with `source = "master"` so all clients — originator
+                // included — hear the authoritative state.
+                let bcast_source = if *aspect == target.aspect && *new_v == value {
+                    source.to_string()
+                } else {
+                    "master".into()
+                };
+                self.bus.send(ControlMessage::SetInfoOverride {
+                    path:   node_key.to_string(),
+                    target: MetaTarget { param: param.clone(), aspect: *aspect },
+                    value:  *new_v,
+                    source: bcast_source,
+                }).ok();
+            }
+        }
+
+        // Make sure the audio thread's runtime state matches the new effective
+        // value of this param. Two independent cases:
+        //   1. min/max shifted AND a stored override exists → re-apply via
+        //      `handle_apply_set` (clamps to new bounds, broadcasts on bus,
+        //      pushes to audio).
+        //   2. `default` changed (cascaded or directly edited) AND the value
+        //      is at-default (no stored override) → push the new default
+        //      straight to audio. No bus broadcast: clients' `effectiveValue`
+        //      uses `info.default` fallback, already updated via the `default`
+        //      aspect PARAM broadcast above.
+        if matches!(target.aspect, MetaAspect::Min | MetaAspect::Max) {
+            if let Some(current) = current_value {
+                let path = format!("{node_key}.{param}");
+                self.handle_apply_set(&path, current, "master")?;
+            }
+        }
+        if default_changed && current_value.is_none() {
+            if let Some(default) = new_default {
+                self.audio.push_control(ControlMessage::SetParam {
+                    path:   format!("{node_key}.{param}"),
+                    value:  default,
+                    source: "master".into(),
+                }).ok();
+            }
         }
 
         // Instance bound edits are part of preset state; mark dirty.
@@ -698,4 +771,32 @@ where
     let (tx, rx) = oneshot::channel();
     master_tx.send(build(tx)).await?;
     rx.await?
+}
+
+/// Extract all editable aspects of a `ParamInfo` as `(aspect, value)` pairs.
+/// Used to diff before/after states around `apply_override` and broadcast
+/// every aspect that actually changed (the user's direct edit plus any
+/// cascades — default auto-clamp on min/max change, etc.).
+fn extract_aspects(info: &ParamInfo) -> Vec<(MetaAspect, ParamValue)> {
+    use crate::engine::device::ParamType;
+    let mut out = vec![(MetaAspect::Visible, ParamValue::Bool(info.visible))];
+    match info.data_kind {
+        ParamType::ContinuousFloat { min, max, default, log, .. } => {
+            out.push((MetaAspect::Min,     ParamValue::Float(min)));
+            out.push((MetaAspect::Max,     ParamValue::Float(max)));
+            out.push((MetaAspect::Default, ParamValue::Float(default)));
+            out.push((MetaAspect::Log,     ParamValue::Bool(log)));
+        },
+        ParamType::ContinuousInt { min, max, default, .. } => {
+            out.push((MetaAspect::Min,     ParamValue::Int(min)));
+            out.push((MetaAspect::Max,     ParamValue::Int(max)));
+            out.push((MetaAspect::Default, ParamValue::Int(default)));
+        },
+        ParamType::DiscreteBool { default, .. } => {
+            out.push((MetaAspect::Default, ParamValue::Bool(default)));
+        },
+        // DiscreteFloat / Event: no editable bound aspects today.
+        _ => {},
+    }
+    out
 }

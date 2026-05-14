@@ -38,18 +38,6 @@ function itemKey(item: NodeItem): string {
 
 const EFFECT_TYPES = ['delay', 'reverb', 'chorus', 'looper', 'mix', 'eq_mid', 'eq_low', 'eq_high'];
 
-const DEFAULT_PARAMS: Record<string, object> = {
-  delay:      { time: 0.3, feedback: 0.4, wet: 0.5, active: true },
-  reverb:     { room_size: 0.5, damping: 0.5, wet: 0.3, active: true },
-  chorus:     { rate_hz: 1.0, depth_ms: 8, wet: 0.3, active: true },
-  harmonizer: { root: 57, wet: 0.5, vel_sense: 0.0, active: true },
-  looper:     { wet: 1.0, decay: 1.0, active: true },
-  mix:        { dry: 0.0, wet: 1.0, gain: 1.0, pan: 0.0, active: true },
-  eq_mid:     { freq: 1000, gain_db: 0, q: 1.0, active: true },
-  eq_low:     { freq: 200, gain_db: 0, active: true },
-  eq_high:    { freq: 8000, gain_db: 0, active: true },
-};
-
 interface Props {
   chainIdx: number;
   chain: ChainDef;
@@ -145,7 +133,10 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
   function handleAddNode() {
     const key = addKey.trim();
     if (!key) return;
-    const node: NodeDef = { key, type: addType, ...DEFAULT_PARAMS[addType] };
+    // No initial params — let backend's canonical defaults apply (sparse storage).
+    // PRESET broadcast back will populate params_info; values stay at-default
+    // unless the user explicitly edits them.
+    const node: NodeDef = { key, type: addType };
     onAddNode(chainIdx, node);
     setShowAddForm(false);
   }

@@ -44,8 +44,8 @@ export interface AppState {
 export type MidiChannel = number | '*';
 
 export type DeviceDef =
-  | { type: 'serial';   dev: string;   baud: number;   fallback: boolean; active: boolean }
-  | { type: 'net';      host: string;  port: number;  fallback: boolean; active: boolean }
+  | { type: 'serial';   dev: string;   baud: number; active: boolean }
+  | { type: 'net';      host: string;  port: number; active: boolean }
   | { type: 'midi-in';  dev?: string;  channel: MidiChannel; active: boolean }
   | { type: 'midi-out'; dev?: string;  channel: number; active: boolean };
 

@@ -18,6 +18,7 @@ const en: Record<string, string> = {
     'type.eq_high': 'EQ High',
 
     // ── Parameters ────────────────────────────────────────────────────────────
+    'param.active': 'Active',
     'param.wet': 'Wet',
     'param.dry': 'Dry',
     'param.gain': 'Gain',
@@ -86,7 +87,6 @@ const en: Record<string, string> = {
     'device.host': 'Host',
     'device.port': 'Port',
     'device.channel': 'Channel',
-    'device.fallback': 'Mapping fallback',
     'device.type.serial': 'Serial',
     'device.type.net': 'Network',
     'device.type.midi-in': 'MIDI In',

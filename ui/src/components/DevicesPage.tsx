@@ -10,8 +10,8 @@ type DeviceType = typeof DEVICE_TYPES[number];
 
 function defaultDef(type: DeviceType): AnyDevice {
     switch (type) {
-        case 'serial': return { type: 'serial', dev: '/dev/ttyUSB0', baud: 115200, fallback: true, active: true };
-        case 'net': return { type: 'net', host: '0.0.0.0', port: 9000, fallback: true, active: true };
+        case 'serial': return { type: 'serial', dev: '/dev/ttyUSB0', baud: 115200, active: true };
+        case 'net': return { type: 'net', host: '0.0.0.0', port: 9000, active: true };
         case 'midi-in': return { type: 'midi-in', channel: '*', active: true };
         case 'midi-out': return { type: 'midi-out', channel: 1, active: true };
     }
@@ -105,9 +105,6 @@ function DeviceTile({ alias: initialAlias, def: initialDef, isNew, onSave, onDel
                             ))}
                         </select>
                     </DeviceField>
-                    <DeviceField label={t('device.fallback')} wide>
-                        <input type="checkbox" checked={def.fallback ?? true} onChange={e => set({ fallback: e.target.checked })} />
-                    </DeviceField>
                 </>}
 
                 {def.type === 'net' && <>
@@ -116,9 +113,6 @@ function DeviceTile({ alias: initialAlias, def: initialDef, isNew, onSave, onDel
                     </DeviceField>
                     <DeviceField label={t('device.port')}>
                         <input type="number" value={def.port ?? 9000} onChange={e => set({ port: Number(e.target.value) })} />
-                    </DeviceField>
-                    <DeviceField label={t('device.fallback')} wide>
-                        <input type="checkbox" checked={def.fallback ?? true} onChange={e => set({ fallback: e.target.checked })} />
                     </DeviceField>
                 </>}
 

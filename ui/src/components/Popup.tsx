@@ -17,12 +17,12 @@ export function Popup({ title, onClose, confirmLabel, onConfirm, confirmDisabled
                 <p className="popup-title">{title}</p>
                 {children}
                 <div className="popup-actions">
+                    <button className="popup-cancel" onClick={onClose}>{t('ui.cancel')}</button>
                     {onConfirm && (
                         <button className="popup-confirm" onClick={onConfirm} disabled={confirmDisabled}>
                             {confirmLabel ?? t('ui.apply')}
                         </button>
                     )}
-                    <button className="popup-cancel" onClick={onClose}>{t('ui.cancel')}</button>
                 </div>
             </div>
         </div>
