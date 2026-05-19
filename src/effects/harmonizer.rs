@@ -109,6 +109,13 @@ pub static CANONICAL: [ParamInfo; 4] = [
 ];
 const _: () = validate_canonical(&CANONICAL);
 
+pub const REGISTRATION: crate::effects::registry::EffectRegistration =
+    crate::effects::registry::EffectRegistration {
+        name:      NAME,
+        canonical: &CANONICAL,
+        factory:   |key, sr, info| Box::new(Harmonizer::new(key, sr, info)),
+    };
+
 impl Harmonizer {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
         let active    = find_param_info(params_info, "active"   ).bool_default();

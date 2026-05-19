@@ -961,19 +961,9 @@ fn sanitize_one(canonical: &[ParamInfo], om: &mut OverrideMap) {
 /// just gathers them into one map keyed by `device_type` for the Type-overrides
 /// editor.
 fn canonical_map() -> HashMap<String, Vec<ParamInfo>> {
-    use crate::effects::{chorus, delay, eq, harmonizer, looper, reverb};
-    use crate::engine::mix;
-    [
-        (mix::NAME,        mix::CANONICAL.to_vec()),
-        (looper::NAME,     looper::CANONICAL.to_vec()),
-        (delay::NAME,      delay::CANONICAL.to_vec()),
-        (reverb::NAME,     reverb::CANONICAL.to_vec()),
-        (chorus::NAME,     chorus::CANONICAL.to_vec()),
-        (harmonizer::NAME, harmonizer::CANONICAL.to_vec()),
-        (eq::NAME_MID,     eq::CANONICAL_MID.to_vec()),
-        (eq::NAME_LOW,     eq::CANONICAL_LOW.to_vec()),
-        (eq::NAME_HIGH,    eq::CANONICAL_HIGH.to_vec()),
-    ].into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    crate::effects::registry::REGISTRY.iter()
+        .map(|r| (r.name.to_string(), r.canonical.to_vec()))
+        .collect()
 }
 
 /// Extract all editable aspects of a `ParamInfo` as `(aspect, value)` pairs.

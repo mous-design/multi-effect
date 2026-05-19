@@ -4,3 +4,4 @@ pub mod eq;
 pub mod harmonizer;
 pub mod looper;
 pub mod reverb;
+pub mod registry;

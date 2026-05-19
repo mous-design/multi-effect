@@ -4,10 +4,7 @@ use tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::effects::{chorus, delay, eq, harmonizer, reverb,looper};
-use crate::effects::eq::EqType;
 use super::device::{Device, Frame, MetaTarget, ParamInfo, Parameterized, ParamValue};
-use super::mix;
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -315,6 +312,7 @@ pub fn resolve_params_info(def: &NodeDef, cfg: &Config) -> Option<Vec<ParamInfo>
 
 fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
     use crate::engine::device::{build_info, OverrideMap};
+    use crate::effects::registry;
     let sr = cfg.sample_rate as f32;
     // Type-resolved is the clamp_ref / construction base. Instance overrides
     // are replayed on top so they can shrink within Type; the audio thread's
@@ -322,22 +320,11 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
     // so a runtime Instance widen-back stays within the buffer.
     let empty = OverrideMap::new();
     let t = cfg.type_overrides.get(&def.device_type).unwrap_or(&empty);
-    let canonical = canonical_for(&def.device_type)
+    let reg = registry::lookup(&def.device_type)
         .ok_or_else(|| anyhow::anyhow!("unknown device type: '{}'", def.device_type))?;
-    let type_resolved = build_info(canonical, t);
+    let type_resolved = build_info(reg.canonical, t);
 
-    let mut device: Box<dyn Device> = match def.device_type.as_str() {
-        mix::NAME        => Box::new(mix::Mix::new(&def.key, &type_resolved)),
-        looper::NAME     => Box::new(looper::Looper::new(&def.key, sr, &type_resolved)),
-        delay::NAME      => Box::new(delay::Delay::new(&def.key, sr, &type_resolved)),
-        reverb::NAME     => Box::new(reverb::Reverb::new(&def.key, sr, &type_resolved)),
-        chorus::NAME     => Box::new(chorus::Chorus::new(&def.key, sr, &type_resolved)),
-        harmonizer::NAME => Box::new(harmonizer::Harmonizer::new(&def.key, sr, &type_resolved)),
-        eq::NAME_MID     => Box::new(eq::Eq::new(&def.key, EqType::Peak,      sr, &type_resolved)),
-        eq::NAME_LOW     => Box::new(eq::Eq::new(&def.key, EqType::LowShelf,  sr, &type_resolved)),
-        eq::NAME_HIGH    => Box::new(eq::Eq::new(&def.key, EqType::HighShelf, sr, &type_resolved)),
-        other            => bail!("unknown device type: '{other}'"),
-    };
+    let mut device: Box<dyn Device> = (reg.factory)(&def.key, sr, &type_resolved);
     // Instance overrides aren't replayed to audio — audio doesn't store
     // bounds. Master clamps SETs against the Instance-resolved view before
     // pushing here, so audio only ever sees values within Type-resolved (the
@@ -355,18 +342,7 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
 /// Used by master to compute Type-resolved bounds on the fly when the user
 /// submits an Instance bound edit (3-segment `SET <key>.<param>.<aspect> <value>`).
 pub fn canonical_for(effect_type: &str) -> Option<&'static [crate::engine::device::ParamInfo]> {
-    match effect_type {
-        mix::NAME        => Some(&mix::CANONICAL),
-        looper::NAME     => Some(&looper::CANONICAL),
-        delay::NAME      => Some(&delay::CANONICAL),
-        reverb::NAME     => Some(&reverb::CANONICAL),
-        chorus::NAME     => Some(&chorus::CANONICAL),
-        harmonizer::NAME => Some(&harmonizer::CANONICAL),
-        eq::NAME_MID     => Some(&eq::CANONICAL_MID),
-        eq::NAME_LOW     => Some(&eq::CANONICAL_LOW),
-        eq::NAME_HIGH    => Some(&eq::CANONICAL_HIGH),
-        _                => None,
-    }
+    crate::effects::registry::lookup(effect_type).map(|r| r.canonical)
 }
 
 fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {

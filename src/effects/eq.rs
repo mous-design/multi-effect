@@ -77,6 +77,27 @@ const _: () = validate_canonical(&CANONICAL_LOW);
 const _: () = validate_canonical(&CANONICAL_MID);
 const _: () = validate_canonical(&CANONICAL_HIGH);
 
+pub const REG_MID: crate::effects::registry::EffectRegistration =
+    crate::effects::registry::EffectRegistration {
+        name:      NAME_MID,
+        canonical: &CANONICAL_MID,
+        factory:   |key, sr, info| Box::new(Eq::new(key, EqType::Peak, sr, info)),
+    };
+
+pub const REG_LOW: crate::effects::registry::EffectRegistration =
+    crate::effects::registry::EffectRegistration {
+        name:      NAME_LOW,
+        canonical: &CANONICAL_LOW,
+        factory:   |key, sr, info| Box::new(Eq::new(key, EqType::LowShelf, sr, info)),
+    };
+
+pub const REG_HIGH: crate::effects::registry::EffectRegistration =
+    crate::effects::registry::EffectRegistration {
+        name:      NAME_HIGH,
+        canonical: &CANONICAL_HIGH,
+        factory:   |key, sr, info| Box::new(Eq::new(key, EqType::HighShelf, sr, info)),
+    };
+
 impl Eq {
     pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
         let active  = find_param_info(params_info, "active" ).bool_default();

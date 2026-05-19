@@ -42,6 +42,14 @@ pub static CANONICAL: [ParamInfo; 5] = [
 ];
 const _: () = validate_canonical(&CANONICAL);
 
+pub const REGISTRATION: crate::effects::registry::EffectRegistration =
+    crate::effects::registry::EffectRegistration {
+        name:      NAME,
+        canonical: &CANONICAL,
+        // `Mix` doesn't use `sample_rate`.
+        factory:   |key, _sr, info| Box::new(Mix::new(key, info)),
+    };
+
 impl Mix {
     pub fn new(key: impl Into<String>, params_info: &[ParamInfo]) -> Self {
         let active = find_param_info(params_info, "active").bool_default();
