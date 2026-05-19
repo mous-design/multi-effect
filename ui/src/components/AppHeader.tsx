@@ -43,7 +43,7 @@ interface Props {
 export function AppHeader(p: Props) {
     return (
         <header className="app-header">
-            <h1 className="app-title-link" onClick={p.onNavigateHome}>multi-effect</h1>
+            <h1 className="app-title-link" onClick={p.onNavigateHome}>{t('ui.app_name')}</h1>
             <div className={`status ${p.connected ? 'connected' : 'disconnected'}`}>
                 <span className="status-dot" />
                 {p.connected ? t('ui.live') : t('ui.reconnecting')}

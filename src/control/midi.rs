@@ -23,7 +23,7 @@ impl MidiControl {
     /// Channel filtering happens locally (MIDI-native). CC translation is
     /// delegated to master via `ApplyCtrl`.
     pub fn run(self, master_tx: mpsc::Sender<ConfigRequest>) {
-        let midi_in = match midir::MidiInput::new("multi-effect") {
+        let midi_in = match midir::MidiInput::new("effectance") {
             Ok(m)  => m,
             Err(e) => { error!("MIDI init error: {e}"); return; }
         };
@@ -61,7 +61,7 @@ impl MidiControl {
 
         let conn = midi_in.connect(
             port,
-            "multi-effect-midi-in",
+            "effectance-midi-in",
             move |_stamp, msg, _| {
                 if msg.is_empty() { return; }
                 let status   = msg[0];
@@ -157,7 +157,7 @@ impl MidiOutControl {
     pub fn run(self, bus: EventBus) {
         let mut bus_rx = bus.subscribe();
         std::thread::spawn(move || {
-            let midi_out = match midir::MidiOutput::new("multi-effect-out") {
+            let midi_out = match midir::MidiOutput::new("effectance-out") {
                 Ok(m)  => m,
                 Err(e) => { error!("MIDI out init error: {e}"); return; }
             };
@@ -190,7 +190,7 @@ impl MidiOutControl {
             let port_name = midi_out.port_name(port).unwrap_or_default();
             info!("MIDI out: opening port '{port_name}'");
 
-            let mut conn = match midi_out.connect(port, "multi-effect-midi-out") {
+            let mut conn = match midi_out.connect(port, "effectance-midi-out") {
                 Ok(c)  => c,
                 Err(e) => { error!("MIDI out connect error: {e}"); return; }
             };

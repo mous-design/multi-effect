@@ -16,7 +16,7 @@ impl SyslogLayer {
         let formatter = syslog::Formatter3164 {
             facility: syslog::Facility::LOG_DAEMON,
             hostname: None,
-            process: "multi-effect".into(),
+            process: "effectance".into(),
             pid: std::process::id(),
         };
         let logger = syslog::unix(formatter)?;
@@ -66,16 +66,16 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SyslogLayer {
 /// Initialise the global tracing subscriber.
 ///
 /// `target`:  `"stderr"` (default) or `"syslog"`.
-/// `verbose`: if true, force stderr and set level to `multi_effect=debug`.
+/// `verbose`: if true, force stderr and set level to `effectance=debug`.
 ///            Overrides `target`; ignored when `RUST_LOG` is set.
 pub fn init(target: &str, verbose: bool) -> Result<()> {
     // RUST_LOG always wins; otherwise compute a sensible default.
     let filter = if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::from_default_env()
     } else if verbose {
-        EnvFilter::new("warn,multi_effect=debug")
+        EnvFilter::new("warn,effectance=debug")
     } else {
-        EnvFilter::new("warn,multi_effect=info")
+        EnvFilter::new("warn,effectance=info")
     };
 
     if verbose || target != "syslog" {

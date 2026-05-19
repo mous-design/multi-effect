@@ -65,9 +65,14 @@ impl PresetDefs {
         self.items.iter_mut().find(|p| p.index == index)
     }
 
-    /// Active preset, or first preset as fallback.
+    /// Active preset, or first preset as fallback. Covers two cases:
+    /// `active == PRESET_NONE` (just deleted the current preset, nothing
+    /// explicitly selected yet) and `active` pointing at a slot that no
+    /// longer exists (deleted out from under us). In either case, fall
+    /// through to the first available preset so the system boots into
+    /// something audible instead of an empty chain.
     pub fn active_entry(&self) -> Option<&PresetDef> {
-        self.get(self.active)
+        self.get(self.active).or_else(|| self.items.first())
     }
 
     /// All preset indices (for listing).

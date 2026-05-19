@@ -213,7 +213,7 @@ export function DevicesPage({ onHome }: Props) {
         <div className="app">
             <header className="app-header">
                 <button className="back-btn" onClick={onHome} title={t('ui.home')}>←</button>
-                <h1 className="app-title-link" onClick={onHome}>multi-effect</h1>
+                <h1 className="app-title-link" onClick={onHome}>{t('ui.app_name')}</h1>
                 <span className="devices-page-title">{t('ui.devices')}</span>
             </header>
 

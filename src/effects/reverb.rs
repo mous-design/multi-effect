@@ -1,4 +1,4 @@
-use crate::engine::device::{find_param_info,
+use crate::engine::device::{find_param_info, validate_canonical,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
@@ -111,6 +111,7 @@ pub static CANONICAL: [ParamInfo; 4] = [
     ParamInfo::new_continuous_float("damping",   0.0, 1.0, 0.5, false, None),
     ParamInfo::new_continuous_float("wet",       0.0, 1.0, 0.3, false, None),
 ];
+const _: () = validate_canonical(&CANONICAL);
 
 impl Reverb {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {

@@ -1,4 +1,4 @@
-import type { ControllerDef, AudioConfig, DeviceMap } from './types';
+import type { ControllerDef, AudioConfig, DeviceMap, ParamInfo, TypeOverrides } from './types';
 export function splitN(s: string, sep: string, n: number): string[] {
     const out: string[] = [];
     let remaining = s;
@@ -13,10 +13,11 @@ export function splitN(s: string, sep: string, n: number): string[] {
 }
 
 //---------- Errors ----------//
-// Set default error handler to consoele. Overload with setApiErrorHandler()
-let onError: (msg: string) => void = console.error;
-// Global error handler — set by App on mount.
-export function setApiErrorHandler(fn: (msg: string) => void) { onError = fn; }
+// Error messages flow as i18n keys + optional placeholder args. The handler
+// (toast layer) is responsible for translating; api.ts just emits. Variadic
+// args feed `t()`'s `{}` placeholder substitution.
+let onError: (key: string, ...args: (string | number)[]) => void = console.error;
+export function setApiErrorHandler(fn: (key: string, ...args: (string | number)[]) => void) { onError = fn; }
 
 //---------- Websocket ----------//
 let ws: WebSocket|null = null;
@@ -25,11 +26,17 @@ const pending: Pending[] = [];
 
 // Send a line. Drops silently if not connected — UI will resync on reconnect
 // via the SNAPSHOT line the server sends on handshake.
+//
+// Return tuple: `[ok, payload]`. On success `ok=true`, `payload` is the
+// server's response body (or null for plain `OK`). On failure `ok=false` and
+// `payload` is the server's ERR message — callers that want to react to
+// specific errors (e.g. `confirm_required:` for reload acknowledgement) parse
+// it. The default `onError` toast still fires for visibility.
 function sendWs(line: string, expect: string = 'OK'): Promise<[boolean, string|null]> {
     return new Promise(resolve => {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
-            onError('not connected');
-            resolve([false, null]);
+            onError('error.not_connected');
+            resolve([false, 'not connected']);
             return;
         }
         pending.push({
@@ -37,8 +44,12 @@ function sendWs(line: string, expect: string = 'OK'): Promise<[boolean, string|n
             resolve: (value: string|null) => {
                 resolve([true, value]);
             }, reject: e => {
-                onError(e.message);
-                resolve([false, null]);
+                // `confirm_required:` is a soft error the caller handles
+                // (shows a reload-acknowledgement popup) — don't toast it.
+                if (!e.message.startsWith('confirm_required:')) {
+                    onError(e.message);
+                }
+                resolve([false, e.message]);
             }
         });
         ws.send(line);
@@ -48,7 +59,7 @@ function sendWs(line: string, expect: string = 'OK'): Promise<[boolean, string|n
 async function fetchWs<T>(command: string, expect: string): Promise<T | null> {
     const [ok, value] = await sendWs(command, expect);
     if (!ok || value === null) return null;
-    try { return JSON.parse(value) as T; } catch { onError(`bad ${expect} payload`); return null; }
+    try { return JSON.parse(value) as T; } catch { onError('error.bad_payload', expect); return null; }
 }
 
 function handleLine(line: string, onMessage: (msg: string, param: string) => void) {
@@ -127,8 +138,19 @@ export async function sendAction(target: string, action: string): Promise<boolea
 // from value (2-segment) / action (2-segment, non-parseable value).
 // e.g. sendParamMeta('04-chorus', 'depth_ms', 'visible', false)
 //      → wire: `SET 04-chorus.depth_ms.visible false`
-export async function sendParamMeta(nodeKey: string, param: string, aspect: string, value: number | boolean): Promise<boolean> {
-    return (await sendWs(`SET ${nodeKey}.${param}.${aspect} ${value}`, 'STATE'))[0];
+//
+// `confirmed` opts into a reload the master would otherwise refuse (when the
+// edit widens a non-growable max). On `false`, server may reply with
+// `ERR confirm_required:...` — caller surfaces a popup and re-sends with
+// `confirmed=true`. Result: `{ok, confirmRequired}` — `confirmRequired` is
+// set only when the server refused pending acknowledgement.
+export async function sendParamMeta(
+    nodeKey: string, param: string, aspect: string, value: number | boolean,
+    confirmed: boolean = false,
+): Promise<{ ok: boolean; confirmRequired: boolean }> {
+    const flag = confirmed ? ' --confirmed' : '';
+    const [ok, msg] = await sendWs(`SET ${nodeKey}.${param}.${aspect} ${value}${flag}`, 'STATE');
+    return { ok, confirmRequired: !ok && (msg?.startsWith('confirm_required:') ?? false) };
 }
 
 export async function savePreset(n: number):Promise<boolean> {
@@ -154,6 +176,34 @@ export async function fetchConfig(): Promise<AudioConfig|null> {
 export async function saveConfig(cfg: AudioConfig): Promise<boolean> {
     const value = JSON.stringify(cfg);
     return (await sendWs(`SAVE_CONFIG ${value}`))[0];
+}
+
+/// Canonical (firmware-declared) `ParamInfo` per effect type. Absolute envelope
+/// for the Type-overrides editor — overrides clamp against these.
+export async function fetchCanonical(): Promise<Record<string, ParamInfo[]> | null> {
+    return fetchWs<Record<string, ParamInfo[]>>('FETCH_CANONICAL', 'CANONICAL');
+}
+
+/// Fetch current Type overrides from the full config patch.
+export async function fetchTypeOverrides(): Promise<TypeOverrides | null> {
+    const cfg = await fetchWs<{ type_overrides?: TypeOverrides }>('FETCH_CONFIG', 'CONFIG');
+    return cfg?.type_overrides ?? {};
+}
+
+/// Replace the full Type-overrides map. Master refreshes `params_info` on
+/// every existing instance and broadcasts the new resolved preset.
+///
+/// `confirmed` opts into a reload the master would otherwise refuse (when
+/// the change widens a non-growable max on an existing instance). On
+/// `false`, server may reply with `ERR confirm_required:...` — caller
+/// surfaces a popup and re-sends with `confirmed=true`.
+export async function saveTypeOverrides(
+    overrides: TypeOverrides, confirmed: boolean = false,
+): Promise<{ ok: boolean; confirmRequired: boolean }> {
+    const flag = confirmed ? '--confirmed ' : '';
+    const value = JSON.stringify({ type_overrides: overrides });
+    const [ok, msg] = await sendWs(`SAVE_CONFIG ${flag}${value}`);
+    return { ok, confirmRequired: !ok && (msg?.startsWith('confirm_required:') ?? false) };
 }
 
 export async function deletePreset(n: number): Promise<boolean> {

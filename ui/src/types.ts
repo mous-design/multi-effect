@@ -22,9 +22,8 @@ export type ParamType =
 
 /// Mirrors `engine::device::ParamKind`.
 export type ParamKind =
-  | { tag: 'ParamMeta'; max_growable_at_runtime: boolean }
-  | { tag: 'TypeMeta';     aspect: string }
-  | { tag: 'InstanceMeta'; aspect: string };
+  | { tag: 'ParamMeta';  max_growable_at_runtime: boolean }
+  | { tag: 'BoundMeta';  aspect: string };
 
 /// Mirrors `engine::device::ParamInfo` — `ParamType` fields are flattened in.
 export type ParamInfo = ParamType & {
@@ -71,3 +70,9 @@ export interface AudioConfig {
     in_channels: number;
     out_channels: number;
 }
+
+/// Per-effect-type bound overrides. Keyed by effect type (`"chorus"`,
+/// `"delay"`, …); each value is a flat `{ "param.aspect": value }` map —
+/// e.g. `{ "depth_ms.max": 20, "rate_hz.log": false }`.
+export type OverrideMap = Record<string, number | boolean>;
+export type TypeOverrides = Record<string, OverrideMap>;

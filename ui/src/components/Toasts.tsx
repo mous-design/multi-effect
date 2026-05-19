@@ -1,3 +1,5 @@
+import { t } from '../i18n';
+
 export interface Toast {
   id: number;
   msg: string;
@@ -13,14 +15,14 @@ export function Toasts({ toasts, onDismiss }: Props) {
   if (toasts.length === 0) return null;
   return (
     <div className="toast-area">
-      {toasts.map(t => (
+      {toasts.map(toast => (
         <div
-          key={t.id}
-          className={`toast ${t.fading ? 'fading' : ''}`}
-          onClick={() => onDismiss(t.id)}
-          title="Click to dismiss"
+          key={toast.id}
+          className={`toast ${toast.fading ? 'fading' : ''}`}
+          onClick={() => onDismiss(toast.id)}
+          title={t('ui.dismiss')}
         >
-          <span>{t.msg}</span>
+          <span>{toast.msg}</span>
           <span className="toast-x">×</span>
         </div>
       ))}

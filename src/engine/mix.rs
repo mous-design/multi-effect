@@ -1,4 +1,4 @@
-use crate::engine::device::{find_param_info,
+use crate::engine::device::{find_param_info, validate_canonical,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 pub const NAME: &str = "mix";
@@ -40,6 +40,7 @@ pub static CANONICAL: [ParamInfo; 5] = [
     ParamInfo::new_continuous_float("gain",  0.0, 1.0, 1.0, false, None).with_hidden(),
     ParamInfo::new_continuous_float("pan", -1.0, 1.0, 0.0, false, None).with_hidden(),
 ];
+const _: () = validate_canonical(&CANONICAL);
 
 impl Mix {
     pub fn new(key: impl Into<String>, params_info: &[ParamInfo]) -> Self {

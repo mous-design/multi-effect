@@ -195,9 +195,14 @@ async fn handle_command(
             format!("CONFIG {}\n", serde_json::to_string(&config.to_wire()?)?)
         },
         "SAVE_CONFIG" => {
-            let config: ConfigPatch = serde_json::from_str(rest)?;
+            // Optional `--confirmed` prefix lets the client opt into a reload
+            // that the master would otherwise refuse. The flag goes between
+            // the verb and the JSON so the trailing payload stays whitespace-
+            // free of protocol concerns.
+            let (confirmed, json) = take_confirmed_prefix(rest);
+            let config: ConfigPatch = serde_json::from_str(json)?;
             snd_request(master_tx, |tx| ConfigRequest::UpdateConfig {
-                resp: Some(tx), source, config,
+                resp: Some(tx), source, config, confirmed,
             }).await?;
             "OK\n".into()
         },
@@ -214,7 +219,13 @@ async fn handle_command(
             let val_str = val_str.trim();
             match path.matches('.').count() {
                 2 => {
-                    // Meta override.
+                    // Meta override. Optional trailing `--confirmed` token
+                    // (separated from `<value>` by whitespace) opts into a
+                    // reload the master would otherwise refuse.
+                    let (val_str, confirmed) = match val_str.split_once(' ') {
+                        Some((v, flag)) if flag.trim() == "--confirmed" => (v, true),
+                        _                                               => (val_str, false),
+                    };
                     let (node_key, meta_str) = path.split_once('.')
                         .context("malformed meta path")?;
                     let target = MetaTarget::parse_str(meta_str)
@@ -229,7 +240,7 @@ async fn handle_command(
                         anyhow::bail!("expected bool / int / float, got '{val_str}'");
                     };
                     let state = snd_request(master_tx, |tx| ConfigRequest::ApplyInfoOverride {
-                        path: node_key.to_string(), target, value, source, resp: Some(tx),
+                        path: node_key.to_string(), target, value, confirmed, source, resp: Some(tx),
                     }).await?;
                     format!("STATE {}\n", state.label())
                 },
@@ -316,6 +327,10 @@ async fn handle_command(
             let devices = snd_request(master_tx, |tx| ConfigRequest::GetDevices {resp: tx}).await?;
             format!("DEVICES {}\n", serde_json::to_string(&devices)?)
         },
+        "FETCH_CANONICAL" => {
+            let canonical = snd_request(master_tx, |tx| ConfigRequest::GetCanonical { resp: tx }).await?;
+            format!("CANONICAL {}\n", serde_json::to_string(&canonical)?)
+        },
         "PUT_DEVICE" => {
             let (alias, val_str) = rest
                 .split_once(' ')
@@ -366,5 +381,16 @@ fn split_cmd(line: &str) -> (&str, &str) {
     match line.split_once(' ') {
         Some((cmd, rest)) => (cmd, rest.trim()),
         None => (line, ""),
+    }
+}
+
+/// If `rest` starts with `--confirmed ` (the JSON-bearing-verb convention),
+/// peel it off and return `(true, remainder)`. Else `(false, rest)` unchanged.
+/// Used by `SAVE_CONFIG` to read the bound-grow confirmation flag without
+/// touching the trailing JSON payload.
+fn take_confirmed_prefix(rest: &str) -> (bool, &str) {
+    match rest.strip_prefix("--confirmed ") {
+        Some(remainder) => (true, remainder.trim_start()),
+        None => (false, rest),
     }
 }

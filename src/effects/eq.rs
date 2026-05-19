@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 
-use crate::engine::device::{find_param_info,
+use crate::engine::device::{find_param_info, validate_canonical,
     ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,6 +72,10 @@ pub static CANONICAL_HIGH: [ParamInfo; 4] = [
     ParamInfo::new_continuous_float("q",           0.1,    10.0,   0.707, true,  None).with_hidden(),
     ParamInfo::new_continuous_float("gain_db",   -15.0,    15.0,     0.0, false, Some("dB")),
 ];
+
+const _: () = validate_canonical(&CANONICAL_LOW);
+const _: () = validate_canonical(&CANONICAL_MID);
+const _: () = validate_canonical(&CANONICAL_HIGH);
 
 impl Eq {
     pub fn new(key: impl Into<String>, eq_type: EqType, sample_rate: f32, params_info: &[ParamInfo]) -> Self {

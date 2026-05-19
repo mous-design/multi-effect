@@ -124,14 +124,21 @@ pub enum EventAction {
 /// flows through `apply_override` and the meta-form `SET` regardless of whether
 /// it's a bound or a presentation hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MetaAspect { Min, Max, Default, Step, Log, Visible }
 
 /// Role of a `ParamInfo` entry within a canonical list.
 ///
-/// `ParamMeta` entries are live params (knob / toggle on the tile).
-/// `TypeMeta` / `InstanceMeta` entries are override-form descriptors —
-/// their `name` matches the targeted live `ParamMeta`'s name; `aspect`
-/// disambiguates which bound (Min / Max / Default / ...) the entry edits.
+/// `ParamMeta` entries are the live params themselves (knob / toggle on the
+/// tile). `BoundMeta` entries declare the editable envelope for an aspect
+/// (Min / Max) of a targeted `ParamMeta` — i.e. the *bounds of the bounds*.
+/// Their `name` matches the targeted live param's name; `aspect` picks which
+/// bound. Override values clamp to the `BoundMeta`'s range; when no
+/// `BoundMeta` is declared, the ParamMeta's own range is the cap.
+///
+/// Only `Min` and `Max` aspects need `BoundMeta` entries:
+/// - `default` is invariant-bound to the resolved `[min, max]`.
+/// - `log`, `visible` are bool — no range to declare.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "tag")]
 pub enum ParamKind {
@@ -140,10 +147,11 @@ pub enum ParamKind {
     /// attempts to grow it past the construction-time max are rejected by the
     /// resolver — master surfaces a reload-required event to the UI.
     ParamMeta { max_growable_at_runtime: bool },
-    /// Per-effect-type bound editor — appears in the global config form.
-    TypeMeta { aspect: MetaAspect },
-    /// Per-instance bound editor — appears in the tile settings tab.
-    InstanceMeta { aspect: MetaAspect },
+    /// Editable envelope for one aspect of a targeted `ParamMeta`. The
+    /// entry's own `min`/`max` describe the range an override of that aspect
+    /// can take. Lets canonical separate "default knob range" (ParamMeta)
+    /// from "absolute envelope for the override" (BoundMeta) per param.
+    BoundMeta { aspect: MetaAspect },
 }
 
 /// Metadata describing one parameter of an effect.
@@ -167,7 +175,7 @@ pub struct ParamInfo {
     /// Role of this entry — live param vs override-form descriptor.
     /// Defaults to `ParamMeta { max_growable_at_runtime: true }` at
     /// construction; override-form entries are tagged via
-    /// `with_kind_type_meta(aspect)` / `with_kind_instance_meta(aspect)`.
+    /// `with_kind_bound_meta(aspect)`.
     pub kind: ParamKind,
     /// Whether the UI should render this param's knob on the tile.
     /// Defaults to `true` at construction; canonical entries can flip it
@@ -231,22 +239,15 @@ impl ParamInfo {
         Self { visible: false, ..self }
     }
 
-    /// Tag this entry as a per-effect-type bound editor for the targeted live
-    /// param (matched by `name`). `aspect` selects which bound is edited.
-    #[allow(dead_code)]
-    pub const fn with_kind_type_meta(self, aspect: MetaAspect) -> Self {
+    /// Tag this entry as the editable envelope for an aspect of the
+    /// targeted live param (matched by `name`). `aspect` ∈ `Min` / `Max` —
+    /// the entry's `min`/`max` describe the range an override of that aspect
+    /// can take. Lets canonical declare a wider override envelope than the
+    /// param's default knob range (e.g. delay time widenable to 60 s) or a
+    /// tighter one (e.g. feedback never above 0.99 even by override).
+    pub const fn with_kind_bound_meta(self, aspect: MetaAspect) -> Self {
         Self {
-            kind: ParamKind::TypeMeta { aspect },
-            ..self
-        }
-    }
-
-    /// Tag this entry as a per-instance bound editor for the targeted live
-    /// param. Same shape as `with_kind_type_meta` but applied per-tile.
-    #[allow(dead_code)]
-    pub const fn with_kind_instance_meta(self, aspect: MetaAspect) -> Self {
-        Self {
-            kind: ParamKind::InstanceMeta { aspect },
+            kind: ParamKind::BoundMeta { aspect },
             ..self
         }
     }
@@ -257,6 +258,7 @@ impl ParamInfo {
             _ => panic!("{}: expected ContinuousFloat", self.name),
         }
     }
+    #[allow(dead_code)]
     pub fn continuous_float_min(&self) -> f32 {
         match &self.data_kind {
             ParamType::ContinuousFloat { min, .. } => *min,
@@ -559,9 +561,19 @@ pub fn apply_override(
                         warn!("override {}.{:?}: expected float", target.param, target.aspect);
                         return false;
                     };
-                    let v = v_in.clamp(*cmin, *cmax);
+                    // For Min / Max: consult BoundMeta envelope if declared,
+                    // else fall back to the targeted ParamMeta's range. For
+                    // Default: clamp to the ParamMeta range (kernel invariant
+                    // re-asserts default ∈ [min, max] below).
+                    let (lo, hi) = match target.aspect {
+                        MetaAspect::Min | MetaAspect::Max =>
+                            bound_meta_float(clamp_ref, &target.param, target.aspect)
+                                .unwrap_or((*cmin, *cmax)),
+                        _ => (*cmin, *cmax),
+                    };
+                    let v = v_in.clamp(lo, hi);
                     if v != v_in {
-                        warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
+                        warn!("override {}.{:?}: value {v_in} out of [{lo}, {hi}], clamped to {v}",
                               target.param, target.aspect);
                     }
                     match target.aspect {
@@ -633,9 +645,16 @@ pub fn apply_override(
                 warn!("override {}.{:?}: expected int", target.param, target.aspect);
                 return false;
             };
-            let v = v_in.clamp(*cmin, *cmax);
+            // BoundMeta envelope for Min / Max, else ParamMeta range.
+            let (lo, hi) = match target.aspect {
+                MetaAspect::Min | MetaAspect::Max =>
+                    bound_meta_int(clamp_ref, &target.param, target.aspect)
+                        .unwrap_or((*cmin, *cmax)),
+                _ => (*cmin, *cmax),
+            };
+            let v = v_in.clamp(lo, hi);
             if v != v_in {
-                warn!("override {}.{:?}: value {v_in} out of canonical range [{cmin}, {cmax}], clamped to {v}",
+                warn!("override {}.{:?}: value {v_in} out of [{lo}, {hi}], clamped to {v}",
                       target.param, target.aspect);
             }
             let changed = match target.aspect {
@@ -805,6 +824,122 @@ pub trait Device: Parameterized + Send + Sync {
 
 pub fn find_param_info<'a>(params_info: &'a [ParamInfo], name: &str) -> &'a ParamInfo {
     params_info.iter().find(|i| i.name == name).unwrap() // unwrap is cool here, since param_info is hard-coded.
+}
+
+/// `BoundMeta`-declared envelope for `(param, aspect)` as `(min, max)`.
+/// `None` when no `BoundMeta` entry exists — caller falls back to the
+/// targeted `ParamMeta`'s own range. Float-typed lookup; the canonical
+/// validator ensures `BoundMeta` matches its target's `ParamType`.
+pub fn bound_meta_float(slice: &[ParamInfo], param: &str, aspect: MetaAspect) -> Option<(f32, f32)> {
+    slice.iter().find_map(|i| {
+        if i.name != param { return None; }
+        let ParamKind::BoundMeta { aspect: a } = i.kind else { return None; };
+        if a != aspect { return None; }
+        match i.data_kind {
+            ParamType::ContinuousFloat { min, max, .. } => Some((min, max)),
+            _ => None,
+        }
+    })
+}
+
+/// Same as [`bound_meta_float`] for integer params.
+pub fn bound_meta_int(slice: &[ParamInfo], param: &str, aspect: MetaAspect) -> Option<(i32, i32)> {
+    slice.iter().find_map(|i| {
+        if i.name != param { return None; }
+        let ParamKind::BoundMeta { aspect: a } = i.kind else { return None; };
+        if a != aspect { return None; }
+        match i.data_kind {
+            ParamType::ContinuousInt { min, max, .. } => Some((min, max)),
+            _ => None,
+        }
+    })
+}
+
+/// Current value of one aspect on a `ParamInfo`, as a `ParamValue`. Symmetric
+/// to `apply_override`'s write side — reads back the same fields the kernel
+/// writes. Returns `None` when the aspect doesn't apply to this entry's
+/// `data_kind` (e.g. `Log` on `DiscreteBool`, `Step` on any variant — not
+/// stored anywhere today).
+///
+/// Used by the Type-overrides sanitiser to re-extract clamped values out of
+/// `resolved` after `apply_override` has run.
+pub fn aspect_value(info: &ParamInfo, aspect: MetaAspect) -> Option<ParamValue> {
+    if matches!(aspect, MetaAspect::Visible) {
+        return Some(ParamValue::Bool(info.visible));
+    }
+    match (&info.data_kind, aspect) {
+        (ParamType::ContinuousFloat { min,     .. }, MetaAspect::Min)     => Some((*min)    .into()),
+        (ParamType::ContinuousFloat { max,     .. }, MetaAspect::Max)     => Some((*max)    .into()),
+        (ParamType::ContinuousFloat { default, .. }, MetaAspect::Default) => Some((*default).into()),
+        (ParamType::ContinuousFloat { log,     .. }, MetaAspect::Log)     => Some((*log)    .into()),
+        (ParamType::ContinuousInt   { min,     .. }, MetaAspect::Min)     => Some((*min)    .into()),
+        (ParamType::ContinuousInt   { max,     .. }, MetaAspect::Max)     => Some((*max)    .into()),
+        (ParamType::ContinuousInt   { default, .. }, MetaAspect::Default) => Some((*default).into()),
+        (ParamType::DiscreteBool    { default, .. }, MetaAspect::Default) => Some((*default).into()),
+        _ => None,
+    }
+}
+
+/// Compile-time validator for a canonical `[ParamInfo]` array.
+///
+/// Run via `const _: () = validate_canonical(&CANONICAL);` after each effect's
+/// canonical static — any malformed `BoundMeta` declaration becomes a
+/// const-eval panic at build time:
+/// - bad aspect (not Min or Max)
+/// - no matching `ParamMeta` target by name
+/// - type mismatch (Float BoundMeta on Int target, etc.)
+///
+/// Widening past canonical on a non-growable `ParamMeta` is allowed — the
+/// reload-required UX gate (Type-overrides popup → confirm reload → process
+/// restart) rebuilds the effect with the widened max, so audio buffers get
+/// sized correctly. The "non-growable" flag is purely about *runtime* growth
+/// (no reload), which the resolver still rejects.
+pub const fn validate_canonical(arr: &[ParamInfo]) {
+    let mut i = 0;
+    while i < arr.len() {
+        if let ParamKind::BoundMeta { aspect } = arr[i].kind {
+            // Aspect must be Min or Max (default is invariant-bound, log/visible are bool).
+            match aspect {
+                MetaAspect::Min | MetaAspect::Max => {},
+                _ => panic!("BoundMeta aspect must be Min or Max"),
+            }
+            // Find matching ParamMeta with same name and compatible ParamType.
+            let mut j = 0;
+            let mut ok = false;
+            while j < arr.len() {
+                if let ParamKind::ParamMeta { .. } = arr[j].kind {
+                    if const_str_eq(arr[j].name, arr[i].name) {
+                        match (&arr[j].data_kind, &arr[i].data_kind) {
+                            (ParamType::ContinuousFloat { .. },
+                             ParamType::ContinuousFloat { .. }) => { ok = true; },
+                            (ParamType::ContinuousInt { .. },
+                             ParamType::ContinuousInt { .. }) => { ok = true; },
+                            _ => panic!("BoundMeta type does not match targeted ParamMeta"),
+                        }
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            if !ok {
+                panic!("BoundMeta has no matching ParamMeta target by name");
+            }
+        }
+        i += 1;
+    }
+}
+
+/// `const fn` byte-by-byte string equality — `str::eq` isn't const yet.
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] { return false; }
+        i += 1;
+    }
+    true
 }
 
 /// System-wide target resolution for outbound rounding. Roughly equivalent to

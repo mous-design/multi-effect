@@ -390,6 +390,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "cpal",
+ "futures-util",
+ "midir",
+ "rtrb",
+ "serde",
+ "serde_json",
+ "syslog",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-serial",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -863,27 +884,6 @@ dependencies = [
  "nix 0.29.0",
  "serialport",
  "winapi",
-]
-
-[[package]]
-name = "multi-effect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "cpal",
- "futures-util",
- "midir",
- "rtrb",
- "serde",
- "serde_json",
- "syslog",
- "thiserror 1.0.69",
- "tokio",
- "tokio-serial",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

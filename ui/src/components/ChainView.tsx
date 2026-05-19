@@ -36,8 +36,6 @@ function itemKey(item: NodeItem): string {
   return Array.isArray(item) ? item.map(n => n.key).join('|') : item.key;
 }
 
-const EFFECT_TYPES = ['delay', 'reverb', 'chorus', 'looper', 'mix', 'eq_mid', 'eq_low', 'eq_high'];
-
 interface Props {
   chainIdx: number;
   chain: ChainDef;
@@ -45,6 +43,9 @@ interface Props {
   controllers: ControllerDef[];
   devices: DeviceMap;
   allNodes: NodeDef[];
+  /// Server-derived list of effect types (canonical map keys, sorted). Single
+  /// source of truth shared with the Per-effect settings popup.
+  effectTypes: string[];
   onSet: (path: string, value: number | boolean) => void;
   onMetaSet: (nodeKey: string, param: string, aspect: string, value: number | boolean) => void;
   onDelete: (key: string) => void;
@@ -55,7 +56,7 @@ interface Props {
   onSaveControllers: (controllers: ControllerDef[]) => void;
 }
 
-export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, onSet, onMetaSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
+export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, effectTypes, onSet, onMetaSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
   const items = groupNodes(chain.nodes);
 
   const [mappingsOpen, setMappingsOpen] = useState(false);
@@ -110,9 +111,11 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
     dragItem.current = null;
   }
 
-  // Add node form state
+  // Add node form state. `addType` starts blank — same placeholder UX as the
+  // Per-effect settings popup; user picks explicitly. Add button is disabled
+  // until both a type and a non-empty key are set.
   const [showAddForm, setShowAddForm] = useState(false);
-  const [addType, setAddType] = useState('delay');
+  const [addType, setAddType] = useState('');
   const [addKey, setAddKey] = useState('');
 
   function suggestKey(type: string, nodeCount: number): string {
@@ -121,18 +124,18 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
 
   function handleAddTypeChange(t: string) {
     setAddType(t);
-    setAddKey(suggestKey(t, chain.nodes.length));
+    setAddKey(t ? suggestKey(t, chain.nodes.length) : '');
   }
 
   function handleOpenAddForm() {
-    setAddType('delay');
-    setAddKey(suggestKey('delay', chain.nodes.length));
+    setAddType('');
+    setAddKey('');
     setShowAddForm(true);
   }
 
   function handleAddNode() {
     const key = addKey.trim();
-    if (!key) return;
+    if (!key || !addType) return;
     // No initial params — let backend's canonical defaults apply (sparse storage).
     // PRESET broadcast back will populate params_info; values stay at-default
     // unless the user explicitly edits them.
@@ -158,7 +161,7 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
             <circle cx="10" cy="10" r="2" fill="currentColor" stroke="none" />
           </svg>
         </button>
-        <button className="chain-routing-btn" onClick={() => onRouting(chainIdx)} title="Edit routing">
+        <button className="chain-routing-btn" onClick={() => onRouting(chainIdx)} title={t('ui.edit_routing')}>
           in [{chain.input.join(',')}] → out [{chain.output.join(',')}]
         </button>
         {confirmDelete ? (
@@ -171,7 +174,7 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
           <button
             className="tile-delete chain-delete"
             onClick={() => chain.nodes.length === 0 ? onDeleteChain(chainIdx) : setConfirmDelete(true)}
-            title="Delete chain"
+            title={t('ui.delete_chain')}
           >×</button>
         )}
       </div>
@@ -223,14 +226,15 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
 
         {/* Add node button / form */}
         {!showAddForm ? (
-          <button className="add-node-btn" onClick={handleOpenAddForm}>＋ new effect</button>
+          <button className="add-node-btn" onClick={handleOpenAddForm}>＋ {t('ui.new_effect')}</button>
         ) : (
           <div className="add-node-form">
             <select
               value={addType}
               onChange={e => handleAddTypeChange(e.target.value)}
             >
-              {EFFECT_TYPES.map(type => <option key={type} value={type}>{t(`type.${type}`)}</option>)}
+              <option value="">{t('ui.select_effect')}</option>
+              {effectTypes.map(type => <option key={type} value={type}>{t(`type.${type}`)}</option>)}
             </select>
             <input
               type="text"
@@ -238,7 +242,7 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
               onChange={e => setAddKey(e.target.value)}
               placeholder={t('ui.node_key')}
             />
-            <button onClick={handleAddNode}>{t('ui.add')}</button>
+            <button onClick={handleAddNode} disabled={!addType || !addKey.trim()}>{t('ui.add')}</button>
             <button onClick={() => setShowAddForm(false)}>{t('ui.cancel')}</button>
           </div>
         )}

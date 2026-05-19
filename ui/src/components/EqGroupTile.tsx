@@ -1,6 +1,7 @@
 import { NodeDef } from '../types';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
+import { t } from '../i18n';
 
 const EQ_PARAMS: Record<string, { min: number; max: number; label: string; unit?: string }> = {
   freq:    { min: 20,  max: 20000, label: 'Freq', unit: 'Hz' },
@@ -31,7 +32,7 @@ export function EqGroupTile({ nodes, onSet, onDelete }: Props) {
           <div key={node.key} className="eq-band">
             <div className="eq-band-label">
               {TYPE_SHORT[node.type] ?? node.type}
-              <button className="tile-delete" onClick={() => onDelete(node.key)} title="Delete">×</button>
+              <button className="tile-delete" onClick={() => onDelete(node.key)} title={t('ui.delete')}>×</button>
             </div>
             {typeof node.active === 'boolean' &&
               <Toggle nodeKey={node.key} param="active" value={node.active}

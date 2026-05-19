@@ -12,7 +12,8 @@ use crate::control::{self, EventBus, NetworkControl, SerialControl, ControlMessa
 use crate::control::mapping::{ControlDef, ControllerDef, DeviceDef};
 use crate::control::midi::{MidiControl, MidiOutControl};
 use crate::engine::AudioHandle;
-use crate::engine::device::{MetaAspect, MetaTarget, ParamInfo, ParamKind, ParamValue};
+use crate::engine::device::{apply_override, aspect_value, MetaAspect, MetaTarget, OverrideMap,
+    ParamInfo, ParamKind, ParamValue};
 use crate::engine::patch::{self, resolve_params_info, Chain};
 
 // ---------------------------------------------------------------------------
@@ -29,8 +30,12 @@ pub enum ConfigRequest {
     GetConfig       { resp: Resp<ConfigPatch> },
     GetSnapshot     { resp: Resp<ConfigSnapshot> },
     GetDevices      { resp: Resp<HashMap<String, DeviceDef>> },
+    /// Canonical (firmware-declared, pre-override) `ParamInfo` per effect
+    /// type. Used by the Type-overrides editor UI as the absolute envelope:
+    /// every override clamps against this.
+    GetCanonical    { resp: Resp<HashMap<String, Vec<ParamInfo>>> },
     // -- Config mutations (need response for HTTP) --
-    UpdateConfig      { config: ConfigPatch, source: String, resp: OptionRespEmpty },
+    UpdateConfig      { config: ConfigPatch, confirmed: bool, source: String, resp: OptionRespEmpty },
     SwitchPreset      { slot: u8, source: String, resp: OptionRespEmpty },
     SavePreset        { slot: u8, source: String, resp: OptionRespEmpty },
     DeletePreset      { slot: u8, source: String, resp: OptionRespEmpty },
@@ -49,7 +54,7 @@ pub enum ConfigRequest {
     /// aspect, `value` is the new bound value. Master computes the
     /// Type-resolved view and forwards to the audio thread.
     ApplyInfoOverride { path: String, target: MetaTarget, value: ParamValue,
-                        source: String, resp: OptionResp<SnapshotState> },
+                        confirmed: bool, source: String, resp: OptionResp<SnapshotState> },
     /// Reverse-map a parameter to (channel_id, raw_value) without rounding.
     /// Use for binary protocols (MIDI) that do their own integer rounding.
     ReverseMap        { path: String, value: f32, alias: String,
@@ -132,6 +137,18 @@ impl ConfigMaster {
     // -----------------------------------------------------------------------
 
     async fn run(mut self, mut rx: mpsc::Receiver<ConfigRequest>) {
+        // Boot-time Type-overrides sanitiser: clamp stale entries the file may
+        // carry from an earlier session (e.g. canonical narrowed since save,
+        // or an old build with wider BoundMeta). Persist if anything changed
+        // so the on-disk file is cleaned up too.
+        let before = self.cfg.type_overrides.clone();
+        sanitize_type_overrides(&mut self.cfg.type_overrides);
+        if self.cfg.type_overrides != before {
+            if let Err(e) = self.cfg.persist() {
+                warn!("persist after Type-overrides sanitise failed: {e}");
+            }
+        }
+
         self.spawn_initial_devices();
 
         // Resolve `params_info` on each node of the active preset — it isn't
@@ -178,9 +195,12 @@ impl ConfigMaster {
             ConfigRequest::GetDevices { resp } => {
                 let _ = resp.send(Ok(self.cfg.control_devices.clone()));
             }
+            ConfigRequest::GetCanonical { resp } => {
+                let _ = resp.send(Ok(canonical_map()));
+            }
             // Mutations
-            ConfigRequest::UpdateConfig { config, source, resp } => {
-                Self::respond(resp, self.handle_update_config(config, &source));
+            ConfigRequest::UpdateConfig { config, confirmed, source, resp } => {
+                Self::respond(resp, self.handle_update_config(config, confirmed, &source));
             },
             ConfigRequest::SwitchPreset { slot, source, resp } => {
                 Self::respond(resp, self.handle_switch_preset(slot, &source));
@@ -218,8 +238,8 @@ impl ConfigMaster {
             ConfigRequest::ApplyReset { source, resp } => {
                 Self::respond(resp, self.handle_apply_reset(&source));
             },
-            ConfigRequest::ApplyInfoOverride { path, target, value, source, resp } => {
-                Self::respond(resp, self.handle_apply_info_override(&path, target, value, &source));
+            ConfigRequest::ApplyInfoOverride { path, target, value, confirmed, source, resp } => {
+                Self::respond(resp, self.handle_apply_info_override(&path, target, value, confirmed, &source));
             },
             ConfigRequest::ReverseMap { path, value, alias, resp } => {
                 let result = self.lookup_reverse(&path, &alias)
@@ -250,13 +270,51 @@ impl ConfigMaster {
     // Mutation handlers
     // -----------------------------------------------------------------------
 
-    fn handle_update_config(&mut self, config: ConfigPatch, source: &str) -> Result<()> {
-        if let Some(v) = config.sample_rate       { self.cfg.sample_rate       = v as u32; }
-        if let Some(v) = config.buffer_size       { self.cfg.buffer_size       = v as u32; }
-        if let Some(v) = config.audio_device   { self.cfg.audio_device      = v.to_string(); }
-        if let Some(v) = config.in_channels       { self.cfg.in_channels       = v as u16; }
-        if let Some(v) = config.out_channels      { self.cfg.out_channels      = v as u16; }
+    fn handle_update_config(&mut self, config: ConfigPatch, confirmed: bool, source: &str) -> Result<()> {
+        // Phase 1: type_overrides. Mutate in-memory, run the bound-grow check
+        // against pre-mutation snapshot. If a non-growable max grew and the
+        // client hasn't acknowledged the reload, roll back and refuse with a
+        // `confirm_required:` error — client re-sends with `confirmed=true`.
+        let type_overrides_changed = config.type_overrides.is_some();
+        let before_overrides = self.cfg.type_overrides.clone();
+        let before_maxes = type_overrides_changed.then(|| self.non_growable_maxes());
+        let mut grew = false;
+        if let Some(mut v) = config.type_overrides {
+            sanitize_type_overrides(&mut v);
+            self.cfg.type_overrides = v;
+            self.refresh_preset_params_info();
+            if let Some(before) = &before_maxes {
+                grew = Self::growth_requires_reload(before, &self.non_growable_maxes());
+            }
+            if grew && !confirmed {
+                // Rollback in-memory state — no persist yet, no broadcasts emitted.
+                info!("type_overrides: bound widens past current — confirm_required");
+                self.cfg.type_overrides = before_overrides;
+                self.refresh_preset_params_info();
+                bail!("confirm_required: bound widens past current — reload needed");
+            }
+        }
+
+        // Phase 2: other fields (none of these trigger reload).
+        if let Some(v) = config.sample_rate  { self.cfg.sample_rate  = v as u32; }
+        if let Some(v) = config.buffer_size  { self.cfg.buffer_size  = v as u32; }
+        if let Some(v) = config.audio_device { self.cfg.audio_device = v.to_string(); }
+        if let Some(v) = config.in_channels  { self.cfg.in_channels  = v as u16; }
+        if let Some(v) = config.out_channels { self.cfg.out_channels = v as u16; }
+
         self.cfg.persist()?;
+        if type_overrides_changed {
+            // Source = "master": the originator's optimistic state doesn't
+            // cover the per-instance params_info refresh; everyone gets it.
+            self.notify_preset_loaded("master");
+        }
+        if grew {
+            // Only reached when client supplied `confirmed = true` (else we
+            // bailed in Phase 1). Audio buffers are now too small for the new
+            // resolved max — schedule a process-level reload.
+            info!("type_overrides grew a non-growable max — scheduling reload");
+            self.schedule_reload();
+        }
         info!("Updated config [source={source}]");
         Ok(())
     }
@@ -472,6 +530,7 @@ impl ConfigMaster {
         node_key: &str,
         target:   MetaTarget,
         value:    ParamValue,
+        confirmed: bool,
         source:   &str,
     ) -> Result<SnapshotState> {
         debug!("SET META {node_key}.{}.{:?} = {:?} [source={source}]",
@@ -489,6 +548,16 @@ impl ConfigMaster {
                 .map(extract_aspects))
             .unwrap_or_default();
 
+        // Bound-grow guard: snapshot non-growable maxes + the prior per-node
+        // overrides/params_info for potential rollback. If the override grows
+        // a non-growable max and the client didn't acknowledge the reload,
+        // restore prior state and refuse with `confirm_required:`.
+        let before_maxes = self.non_growable_maxes();
+        let prior_node_state = self.snapshot.preset.chains.iter()
+            .flat_map(|c| c.nodes.iter())
+            .find(|n| n.key == node_key)
+            .map(|n| (n.overrides.clone(), n.params_info.clone()));
+
         // Persist override + refresh resolved view.
         let current_value = if let Some(node) = self.snapshot.preset.chains.iter_mut()
             .flat_map(|c| c.nodes.iter_mut())
@@ -500,6 +569,23 @@ impl ConfigMaster {
         } else {
             None
         };
+
+        // Grow check — bail before any broadcasts or audio writes when the
+        // client hasn't acknowledged. Rollback restores the per-node state
+        // captured above; nothing outside this node was touched.
+        let grew = Self::growth_requires_reload(&before_maxes, &self.non_growable_maxes());
+        if grew && !confirmed {
+            if let (Some((prior_overrides, prior_info)), Some(node)) = (
+                prior_node_state,
+                self.snapshot.preset.chains.iter_mut()
+                    .flat_map(|c| c.nodes.iter_mut())
+                    .find(|n| n.key == node_key),
+            ) {
+                node.overrides = prior_overrides;
+                node.params_info = prior_info;
+            }
+            bail!("confirm_required: bound widens past current — reload needed");
+        }
 
         // Broadcast every aspect that changed (user's direct edit + cascades).
         let new_aspects = self.snapshot.preset.chains.iter()
@@ -568,6 +654,14 @@ impl ConfigMaster {
         if self.snapshot.set_state(SnapshotState::Dirty) {
             self.notify_state_changed(source);
         }
+        if grew {
+            // Only reached when client supplied `confirmed = true` (else we
+            // bailed before the broadcast pass). The live audio buffer was
+            // sized smaller than the new resolved max — process restart will
+            // rebuild the effect with the widened bound.
+            info!("instance override grew a non-growable max — scheduling reload");
+            self.schedule_reload();
+        }
         Ok(self.snapshot.state)
     }
 
@@ -607,12 +701,53 @@ impl ConfigMaster {
 
     fn handle_reload(&mut self, source: &str) -> Result<()> {
         debug!("RELOAD [source={source}]");
-        let tx = self.reload_tx.clone(); 
+        self.schedule_reload();
+        Ok(())
+    }
+
+    /// Schedule a process-level reload. 100 ms delay lets any in-flight
+    /// response flush to the originator before the runtime drops. Used by the
+    /// explicit `RELOAD` command and by the bound-grow auto-trigger.
+    fn schedule_reload(&self) {
+        let tx = self.reload_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let _ = tx.send(()).await;
         });
-        Ok(())
+    }
+
+    /// Map of every node's current resolved max for `ContinuousFloat` params
+    /// marked `max_growable_at_runtime: false`. These are buffer-affecting —
+    /// the audio thread sized its fixed buffer from this value at
+    /// construction. Comparing this map before and after a bound mutation
+    /// tells us whether the live buffer is now too small.
+    fn non_growable_maxes(&self) -> HashMap<(String, String), f32> {
+        use crate::engine::device::ParamType;
+        let mut out = HashMap::new();
+        for chain in &self.snapshot.preset.chains {
+            for node in &chain.nodes {
+                for info in &node.params_info {
+                    let ParamKind::ParamMeta { max_growable_at_runtime: false } = info.kind
+                        else { continue; };
+                    if let ParamType::ContinuousFloat { max, .. } = info.data_kind {
+                        out.insert((node.key.clone(), info.name.to_string()), max);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// True if any (node, param) in `after` has a strictly greater max than
+    /// the matching entry in `before`. New keys (post-mutation only) are
+    /// ignored — they belong to nodes/params that didn't exist before, so no
+    /// pre-sized buffer is at stake.
+    fn growth_requires_reload(
+        before: &HashMap<(String, String), f32>,
+        after:  &HashMap<(String, String), f32>,
+    ) -> bool {
+        after.iter().any(|(k, new_max)|
+            before.get(k).is_some_and(|old_max| new_max > old_max))
     }
 
     fn handle_save_state(&mut self) {        
@@ -771,6 +906,74 @@ where
     let (tx, rx) = oneshot::channel();
     master_tx.send(build(tx)).await?;
     rx.await?
+}
+
+/// Clamp inbound Type-overrides against canonical bounds before storage, and
+/// drop entries whose post-clamp value matches canonical (sparse-storage
+/// convention). Makes `cfg.type_overrides` round-trip cleanly through
+/// FETCH_CONFIG / SAVE_CONFIG — the stored map is the resolved view, not the
+/// user's raw input. Unknown effect types and unknown params are dropped
+/// (warnings already fire from `apply_override`).
+fn sanitize_type_overrides(map: &mut HashMap<String, OverrideMap>) {
+    let canon = canonical_map();
+    map.retain(|effect_type, om| {
+        let Some(canonical) = canon.get(effect_type) else {
+            warn!("type_overrides: unknown effect type '{effect_type}' — dropping");
+            return false;
+        };
+        sanitize_one(canonical, om);
+        !om.is_empty()
+    });
+}
+
+/// Per-effect sanitiser: clamp every entry by replaying it through
+/// `apply_override` against canonical, then re-extract the post-clamp value
+/// out of `resolved`. Entries that collapse to canonical are dropped.
+fn sanitize_one(canonical: &[ParamInfo], om: &mut OverrideMap) {
+    let mut resolved = canonical.to_vec();
+    for (target, value) in om.iter() {
+        apply_override(&mut resolved, canonical, target, value);
+    }
+    let targets: Vec<MetaTarget> = om.keys().cloned().collect();
+    for target in targets {
+        let Some(idx) = resolved.iter()
+            .position(|i|
+                i.name == target.param && matches!(i.kind, ParamKind::ParamMeta { .. })
+            )
+        else {
+            om.remove(&target);
+            continue;
+        };
+        let Some(clamped) = aspect_value(&resolved[idx], target.aspect) else {
+            om.remove(&target);
+            continue;
+        };
+        if aspect_value(&canonical[idx], target.aspect) == Some(clamped) {
+            om.remove(&target);
+        } else {
+            om.insert(target, clamped);
+        }
+    }
+}
+
+/// Snapshot of every effect type's canonical `ParamInfo` list. Single source
+/// of truth lives in each effect module's `pub static CANONICAL: [_; N]`; this
+/// just gathers them into one map keyed by `device_type` for the Type-overrides
+/// editor.
+fn canonical_map() -> HashMap<String, Vec<ParamInfo>> {
+    use crate::effects::{chorus, delay, eq, harmonizer, looper, reverb};
+    use crate::engine::mix;
+    [
+        (mix::NAME,        mix::CANONICAL.to_vec()),
+        (looper::NAME,     looper::CANONICAL.to_vec()),
+        (delay::NAME,      delay::CANONICAL.to_vec()),
+        (reverb::NAME,     reverb::CANONICAL.to_vec()),
+        (chorus::NAME,     chorus::CANONICAL.to_vec()),
+        (harmonizer::NAME, harmonizer::CANONICAL.to_vec()),
+        (eq::NAME_MID,     eq::CANONICAL_MID.to_vec()),
+        (eq::NAME_LOW,     eq::CANONICAL_LOW.to_vec()),
+        (eq::NAME_HIGH,    eq::CANONICAL_HIGH.to_vec()),
+    ].into_iter().map(|(k, v)| (k.to_string(), v)).collect()
 }
 
 /// Extract all editable aspects of a `ParamInfo` as `(aspect, value)` pairs.

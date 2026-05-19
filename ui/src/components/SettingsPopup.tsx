@@ -13,9 +13,12 @@ interface Props {
     config: AudioConfig;
     onSave: (cfg: AudioConfig) => Promise<boolean>;
     onClose: () => void;
+    /// Open the per-effect bounds editor and close this popup. Lifted to the
+    /// caller so the bounds editor's lifecycle survives this popup unmounting.
+    onOpenEffectBounds: () => void;
 }
 
-export function SettingsPopup({ config, onSave, onClose }: Props) {
+export function SettingsPopup({ config, onSave, onClose, onOpenEffectBounds }: Props) {
     const [sample_rate, setSampleRate] = useState(config.sample_rate);
     const [buffer_size, setBufferSize] = useState(config.buffer_size);
     const [audio_device, setDevice] = useState(config.audio_device);
@@ -31,8 +34,18 @@ export function SettingsPopup({ config, onSave, onClose }: Props) {
         else { setError(true); }
     }
 
+    const effectBoundsBtn = (
+        <button className="popup-confirm" onClick={onOpenEffectBounds}>
+            {t('ui.effect_bounds')}
+        </button>
+    );
+
     return (
-        <Popup title={t('ui.settings')} onClose={onClose} confirmLabel={t('ui.save')} onConfirm={handleSave}>
+        <Popup title={t('ui.settings')}
+            onClose={onClose}
+            confirmLabel={t('ui.save_quick')}
+            onConfirm={handleSave}
+            extraAction={effectBoundsBtn}>
             <table className="routing-table">
                 <tbody>
                     <FormRow label={t('ui.audio_device')}>

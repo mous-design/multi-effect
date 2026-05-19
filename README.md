@@ -1,4 +1,4 @@
-# multi-effect
+# Effectance
 
 ![Status: WIP](https://img.shields.io/badge/status-WIP-orange)
 
@@ -42,7 +42,7 @@ Audio device, sample rate, buffer size, etc. are configured in `config.json` —
   "out_channels":        2,
   "http_port":           8080,
   "log_target":          "stderr",
-  "state_save_path":     "/tmp/multi-effect-state.json",
+  "state_save_path":     "/tmp/effectance-state.json",
   "state_save_interval": 300,
 
   "control_devices": { ... },
@@ -60,7 +60,7 @@ Audio device, sample rate, buffer size, etc. are configured in `config.json` —
 | `out_channels` | u16 | 2 | Physical output channels |
 | `http_port` | u16 | 8080 | HTTP/WebSocket port (0 = disabled) |
 | `log_target` | string | `"stderr"` | `"stderr"` or `"syslog"` |
-| `state_save_path` | path | `/tmp/multi-effect-state.json` | Where snapshot state is persisted |
+| `state_save_path` | path | `/tmp/effectance-state.json` | Where snapshot state is persisted |
 | `state_save_interval` | u64 | 300 | Seconds between auto-saves (0 = disabled) |
 | `control_devices` | map | `{}` | Control device aliases → connection config |
 | `presets` | object | empty | Numbered preset slots |

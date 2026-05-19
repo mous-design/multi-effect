@@ -1,5 +1,5 @@
-use crate::engine::device::{find_param_info,
-    ParamInfo, Device, Frame, Parameterized, ParamValue};
+use crate::engine::device::{find_param_info, validate_canonical,
+    MetaAspect, ParamInfo, Device, Frame, Parameterized, ParamValue};
 use crate::engine::ring_buffer::RingBuffer;
 
 pub const NAME: &str = "delay";
@@ -31,12 +31,21 @@ pub struct Delay {
     sample_rate: f32,
 }
 
-pub static CANONICAL: [ParamInfo; 4] = [
+pub static CANONICAL: [ParamInfo; 5] = [
     ParamInfo::new_discrete_bool("active", true, None),
     ParamInfo::new_continuous_float("time",     0.1, 2.0, 1.0, true,  Some("s")).with_non_growable(),
     ParamInfo::new_continuous_float("feedback", 0.0, 1.0, 0.4, false, None),
     ParamInfo::new_continuous_float("wet",      0.0, 1.0, 0.5, false, None),
+    // BoundMeta: `time.max` can be overridden up to 60 s — wider than the
+    // default 2 s knob range. `time` is `with_non_growable()`, so widening
+    // past 2 s only takes effect on the *next* `Delay::new()` (buffer is
+    // sized from `info_time.continuous_float_max()` at construction). The
+    // TypeOverridesPopup gates the save behind a reload confirmation; the
+    // process restart rebuilds Delay with the new max, audio buffer included.
+    ParamInfo::new_continuous_float("time",     0.1, 60.0, 2.0, false, Some("s"))
+        .with_kind_bound_meta(MetaAspect::Max),
 ];
+const _: () = validate_canonical(&CANONICAL);
 
 impl Delay {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {

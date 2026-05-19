@@ -68,8 +68,9 @@ function effectiveValue(node: NodeDef, info: ParamInfo): unknown {
 
 /// Pair each live-param `ParamInfo` with its effective value.
 /// Order follows the canonical declaration order (effect-author intent).
-/// Only `ParamMeta` entries render as knobs/toggles — `TypeMeta` /
-/// `InstanceMeta` entries are override-form descriptors handled elsewhere.
+/// Only `ParamMeta` entries render as knobs/toggles — `BoundMeta` entries
+/// describe the override envelope for an aspect (Min / Max) and aren't
+/// rendered directly; the bound editors consult them for input ranges.
 function getRenderableParams(node: NodeDef): { info: ParamInfo; value: unknown }[] {
   const infos = node.params_info;
   if (!infos) return [];
@@ -215,7 +216,7 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
   return (
     <div className={`tile${active ? '' : ' inactive'}${expanded ? ' expanded' : ''}`}>
       {showSettings && (
-        <TileSettingsPopup node={node} onMetaSet={onMetaSet} onClose={() => setShowSettings(false)} />
+        <TileSettingsPopup node={node} onClose={() => setShowSettings(false)} />
       )}
       <div className="tile-header">
         {activeEntry
@@ -223,7 +224,7 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
           : <div className="tile-header-spacer" />}
         <span className="tile-type">{t(`type.${node.type}`)}</span>
         <button className="tile-settings-btn" onClick={() => setShowSettings(true)} title={t('ui.settings')}><CogIcon /></button>
-        <button className="tile-delete" onClick={() => onDelete(node.key)} title="Delete">×</button>
+        <button className="tile-delete" onClick={() => onDelete(node.key)} title={t('ui.delete')}>×</button>
       </div>
       <div className="tile-body">
         <div className="tile-params">
@@ -271,7 +272,7 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}
-                      title="Stop (go to start)"
+                      title={t('ui.looper_stop')}
                       onMouseDown={e => e.stopPropagation()}
                       onClick={() => sendAction(`${node.key}.action`, 'stop')}>
                       ■
@@ -340,7 +341,7 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}
-                      title="Reset (clear loop)"
+                      title={t('ui.looper_reset')}
                       onMouseDown={e => e.stopPropagation()}
                       onClick={() => sendAction(`${node.key}.action`, 'reset')}>
                       {t('looper.reset')}

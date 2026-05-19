@@ -42,20 +42,25 @@ pub trait ToWire {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigPatch {
-    sample_rate:        Option<u32>,
-    buffer_size:        Option<u32>,
-    audio_device:       Option<String>,
-    in_channels:        Option<u16>,
-    out_channels:       Option<u16>,
+    pub sample_rate:    Option<u32>,
+    pub buffer_size:    Option<u32>,
+    pub audio_device:   Option<String>,
+    pub in_channels:    Option<u16>,
+    pub out_channels:   Option<u16>,
+    /// Per-effect-type bound overrides. `None` means "leave as-is"; `Some(map)`
+    /// replaces the whole `Config.type_overrides` map. Per-key partial updates
+    /// are not supported — clients send the full resolved map.
+    pub type_overrides: Option<HashMap<String, crate::engine::device::OverrideMap>>,
 }
 impl ConfigPatch {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
-            sample_rate:        Some(cfg.sample_rate),
-            buffer_size:        Some(cfg.buffer_size),
-            audio_device:       Some(cfg.audio_device.clone()),
-            in_channels:        Some(cfg.in_channels),
-            out_channels:       Some(cfg.out_channels),
+            sample_rate:    Some(cfg.sample_rate),
+            buffer_size:    Some(cfg.buffer_size),
+            audio_device:   Some(cfg.audio_device.clone()),
+            in_channels:    Some(cfg.in_channels),
+            out_channels:   Some(cfg.out_channels),
+            type_overrides: Some(cfg.type_overrides.clone()),
         }
     }
 }
@@ -133,7 +138,7 @@ pub struct Config {
 impl Config {
     fn default_log_target()          -> String { "stderr".into() }
     fn default_state_save_interval() -> u64    { 300 }
-    fn default_state_save_path()     -> PathBuf { PathBuf::from("/tmp/multi-effect-state.json") }
+    fn default_state_save_path()     -> PathBuf { PathBuf::from("/tmp/effectance-state.json") }
     fn default_http_port()           -> u16    { 8080 }
 
     pub fn from_args() -> Result<(Self, bool, bool)> {

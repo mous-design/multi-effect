@@ -76,12 +76,46 @@
     }
 }
 
-// ── Tile settings popup body ────────────────────────────────────────────────
+// ── Tile / per-type settings popup body ─────────────────────────────────────
 .tile-settings {
     display: flex;
     flex-direction: column;
     gap: $gap-sm;
     min-width: 360px;
+}
+
+.type-overrides {
+    display: flex;
+    flex-direction: column;
+    gap: $gap;
+    min-width: 420px;
+}
+
+.type-overrides-picker {
+    display: flex;
+    align-items: center;
+    gap: $gap-sm;
+
+    label {
+        display: inline-flex;
+        align-items: center;
+        gap: $gap;
+    }
+}
+
+.settings-section {
+    margin-top: $gap;
+    text-align: right;
+}
+
+.settings-link-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: $font-sm;
+    cursor: pointer;
+
+    &:hover { color: var(--text-strong); text-decoration: underline; }
 }
 
 .param-settings-row {

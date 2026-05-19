@@ -11,6 +11,7 @@ import { BottomBar } from './components/BottomBar';
 import { ChainView } from './components/ChainView';
 import { ChainRoutingPopup } from './components/ChainRoutingPopup';
 import { SettingsPopup } from './components/SettingsPopup';
+import { TypeOverridesPopup } from './components/TypeOverridesPopup';
 import { DevicesPage } from './components/DevicesPage';
 import { splitN } from './api';
 
@@ -51,6 +52,10 @@ export default function App() {
     stateRef.current = state;
     const [routingIdx, setRoutingIdx] = useState<number | null>(null);
     const [showSettings, setShowSettings] = useState(false);
+    // Per-effect bounds editor — hoisted out of SettingsPopup so closing
+    // Settings doesn't unmount it (clicking "Effect bounds" closes Settings
+    // and opens this).
+    const [showTypeOverrides, setShowTypeOverrides] = useState(false);
 
     // Apply a SNAPSHOT message body (full state replacement).
     // Used both for initial WS handshake and for PROGRAM/COMPARE responses.
@@ -65,7 +70,7 @@ export default function App() {
     };
 
     // --- Connection (WS + config + devices) ---
-    const { connected, audioConfig, setAudioConfig, devices } = useConnection((msg, params) => {
+    const { connected, audioConfig, setAudioConfig, devices, canonical } = useConnection((msg, params) => {
         switch(msg) {
             case 'PARAM': {
                 const [path, valueStr] = splitN(params, ' ', 2);
@@ -169,7 +174,7 @@ export default function App() {
     // --- Preset handlers ---
 
     const handleSwitchPreset = async (n: number) => {
-        if (!presets.includes(n)) { addToast(t('error.preset_missing', n)); return; }
+        if (!presets.includes(n)) { addToast('error.preset_missing', n); return; }
         if (await sendProgram(n)) {
             setActivePreset(n);
             setIsDirty(false);
@@ -376,7 +381,11 @@ export default function App() {
                     config={audioConfig}
                     onSave={handleSaveConfig}
                     onClose={() => setShowSettings(false)}
+                    onOpenEffectBounds={() => { setShowSettings(false); setShowTypeOverrides(true); }}
                 />
+            )}
+            {showTypeOverrides && (
+                <TypeOverridesPopup onClose={() => setShowTypeOverrides(false)} />
             )}
             {routingChain && routingIdx !== null && (
                 <ChainRoutingPopup
@@ -399,6 +408,7 @@ export default function App() {
                         controllers={controllers}
                         devices={devices}
                         allNodes={state.chains.flatMap(c => c.nodes)}
+                        effectTypes={Object.keys(canonical).sort()}
                         onSet={handleSet}
                         onMetaSet={handleMetaSet}
                         onDelete={handleDelete}
