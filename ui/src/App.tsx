@@ -14,6 +14,25 @@ import { SettingsPopup } from './components/SettingsPopup';
 import { TypeOverridesPopup } from './components/TypeOverridesPopup';
 import { DevicesPage } from './components/DevicesPage';
 import { splitN } from './api';
+import type { ParamInfo } from './types';
+
+/// Optimistic patch of one `ParamInfo` after a 3-segment meta override.
+/// `ParamMeta` writes the value to `info[aspect]`. `Setting`'s configured
+/// value lives in `info.default` (the aspect tag is just the descriptor),
+/// so when name + aspect match the Setting, write to `default`. Everything
+/// else passes through. The `as ParamInfo` cast bypasses TS's struggle to
+/// narrow the discriminated union through a computed-property spread; at
+/// runtime the shape is valid by construction (server only sends 3-segment
+/// PARAMs for aspects that legitimately exist on the target entry).
+function patchMetaAspect(
+    info: ParamInfo, param: string, aspect: string, value: number | string | boolean,
+): ParamInfo {
+    if (info.name !== param) return info;
+    if (info.kind?.tag === 'ParamMeta') return { ...info, [aspect]: value } as ParamInfo;
+    if (info.kind?.tag === 'Setting' && info.kind.aspect === aspect)
+        return { ...info, default: value } as ParamInfo;
+    return info;
+}
 
 export default function App() {
 
@@ -97,17 +116,16 @@ export default function App() {
                         }))
                     });
                 } else if (segs.length === 3) {
-                    // 3-segment path = meta override (min/max/default/log/visible/…).
+                    // 3-segment path = meta override. Patch `params_info` so
+                    // subsequent reads (override popup, knob render) see the
+                    // new value. Shapes mirror `handleMetaSet`.
                     const [nodeKey, param, aspect] = segs;
                     setState(prev => prev && {
                         ...prev, chains: prev.chains.map(chain => ({
                             ...chain,
                             nodes: chain.nodes.map(node => node.key === nodeKey
                                 ? { ...node, params_info: node.params_info?.map(info =>
-                                    info.name === param && info.kind?.tag === 'ParamMeta'
-                                        ? { ...info, [aspect]: value }
-                                        : info
-                                  ) }
+                                    patchMetaAspect(info, param, aspect, value)) }
                                 : node
                             ),
                         }))
@@ -139,8 +157,11 @@ export default function App() {
             case 'EVENT':
                 const [key, event, json] = splitN(params, ' ', 3);
                 if (event === 'looper_state') {
-                    const data = JSON.parse(json); 
-                    const { state: ls, loop_ms, pos_ms, overdub_count } = data;
+                    const data = JSON.parse(json);
+                    const { state: ls, duration_secs, pos_ms, buffer_cnt } = data;
+                    // `duration` and `buffer_cnt` are read-only ParamMeta values;
+                    // bridging them onto the node lets the generic param-display
+                    // path render them.
                     setState(prev => {
                         if (!prev) return prev;
                         return {
@@ -148,7 +169,7 @@ export default function App() {
                                 ...chain,
                                 nodes: chain.nodes.map(node =>
                                     node.key === key
-                                        ? { ...node, state: ls, loop_secs: loop_ms / 1000, pos_secs: pos_ms / 1000, overdub_count }
+                                        ? { ...node, state: ls, duration: duration_secs, pos_secs: pos_ms / 1000, buffer_cnt }
                                         : node
                                 ),
                             }))
@@ -254,18 +275,15 @@ export default function App() {
     };
 
     // Meta-override (3-segment SET) — bound / visibility edit on a single
-    // param. Optimistic update of `params_info[i].<aspect>` on the addressed
-    // node; the server's PARAM broadcast goes to other clients only.
+    // param. Optimistic update of `params_info[i]` on the addressed node;
+    // the server's PARAM broadcast goes to other clients only.
     const handleMetaSet = (nodeKey: string, param: string, aspect: string, value: number | boolean) => {
         setState(prev => prev && {
             ...prev, chains: prev.chains.map(chain => ({
                 ...chain,
                 nodes: chain.nodes.map(node => node.key === nodeKey
                     ? { ...node, params_info: node.params_info?.map(info =>
-                        info.name === param && info.kind?.tag === 'ParamMeta'
-                            ? { ...info, [aspect]: value }
-                            : info
-                      ) }
+                        patchMetaAspect(info, param, aspect, value)) }
                     : node
                 ),
             }))

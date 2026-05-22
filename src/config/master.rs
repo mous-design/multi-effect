@@ -540,11 +540,18 @@ impl ConfigMaster {
         // resolve to diff against the new state and broadcast every aspect
         // that changed (including cascades like default auto-clamp).
         let param = target.param.clone();
+        // Match the override's target entry: ParamMeta by name, or Setting by
+        // name + aspect. Mirrors `apply_override`'s dispatch.
+        let find_target = |i: &ParamInfo| i.name == param && match i.kind {
+            ParamKind::ParamMeta { .. }       => true,
+            ParamKind::Setting   { aspect, .. } => aspect == target.aspect,
+            ParamKind::BoundMeta { .. }       => false,
+        };
         let old_aspects = self.snapshot.preset.chains.iter()
             .flat_map(|c| c.nodes.iter())
             .find(|n| n.key == node_key)
             .and_then(|n| n.params_info.iter()
-                .find(|i| i.name == param && matches!(i.kind, ParamKind::ParamMeta { .. }))
+                .find(|i| find_target(i))
                 .map(extract_aspects))
             .unwrap_or_default();
 
@@ -592,7 +599,7 @@ impl ConfigMaster {
             .flat_map(|c| c.nodes.iter())
             .find(|n| n.key == node_key)
             .and_then(|n| n.params_info.iter()
-                .find(|i| i.name == param && matches!(i.kind, ParamKind::ParamMeta { .. }))
+                .find(|i| find_target(i))
                 .map(extract_aspects))
             .unwrap_or_default();
 
@@ -727,10 +734,27 @@ impl ConfigMaster {
         for chain in &self.snapshot.preset.chains {
             for node in &chain.nodes {
                 for info in &node.params_info {
-                    let ParamKind::ParamMeta { max_growable_at_runtime: false } = info.kind
-                        else { continue; };
-                    if let ParamType::ContinuousFloat { max, .. } = info.data_kind {
-                        out.insert((node.key.clone(), info.name.to_string()), max);
+                    // Both kinds participate in buffer sizing:
+                    // - `ParamMeta { max_growable_at_runtime: false }` — buffer
+                    //   sized from the ParamMeta's `max` at construction.
+                    // - `Setting   { max_growable_at_runtime: false }` — buffer
+                    //   sized from the Setting's `default` (the configured cap)
+                    //   at construction.
+                    let (is_locked, value) = match info.kind {
+                        ParamKind::ParamMeta { max_growable_at_runtime: false } => {
+                            if let ParamType::ContinuousFloat { max, .. } = info.data_kind {
+                                (true, max)
+                            } else { continue; }
+                        },
+                        ParamKind::Setting { max_growable_at_runtime: false, .. } => {
+                            if let ParamType::ContinuousFloat { default, .. } = info.data_kind {
+                                (true, default)
+                            } else { continue; }
+                        },
+                        _ => (false, 0.0),
+                    };
+                    if is_locked {
+                        out.insert((node.key.clone(), info.name.to_string()), value);
                     }
                 }
             }
@@ -936,10 +960,15 @@ fn sanitize_one(canonical: &[ParamInfo], om: &mut OverrideMap) {
     }
     let targets: Vec<MetaTarget> = om.keys().cloned().collect();
     for target in targets {
+        // Find the entry the override touches: either a ParamMeta named
+        // `target.param` (whose aspect field gets edited) or a Setting with
+        // matching name + aspect (whose `default` field IS the value).
         let Some(idx) = resolved.iter()
-            .position(|i|
-                i.name == target.param && matches!(i.kind, ParamKind::ParamMeta { .. })
-            )
+            .position(|i| i.name == target.param && match i.kind {
+                ParamKind::ParamMeta { .. }       => true,
+                ParamKind::Setting   { aspect, .. } => aspect == target.aspect,
+                ParamKind::BoundMeta { .. }       => false,
+            })
         else {
             om.remove(&target);
             continue;
@@ -971,7 +1000,17 @@ fn canonical_map() -> HashMap<String, Vec<ParamInfo>> {
 /// every aspect that actually changed (the user's direct edit plus any
 /// cascades — default auto-clamp on min/max change, etc.).
 fn extract_aspects(info: &ParamInfo) -> Vec<(MetaAspect, ParamValue)> {
-    use crate::engine::device::ParamType;
+    use crate::engine::device::{ParamKind, ParamType};
+    // Setting: a single aspect (the one declared on the Setting), with the
+    // configured value sourced from `default`. No `visible` flag — Settings
+    // don't have a knob to hide.
+    if let ParamKind::Setting { aspect, .. } = info.kind {
+        return match info.data_kind {
+            ParamType::ContinuousFloat { default, .. } => vec![(aspect, ParamValue::Float(default))],
+            ParamType::ContinuousInt   { default, .. } => vec![(aspect, ParamValue::Int(default))],
+            _ => vec![],
+        };
+    }
     let mut out = vec![(MetaAspect::Visible, ParamValue::Bool(info.visible))];
     match info.data_kind {
         ParamType::ContinuousFloat { min, max, default, log, .. } => {

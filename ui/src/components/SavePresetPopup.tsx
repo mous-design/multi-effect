@@ -10,7 +10,7 @@ interface Props {
 
 export function SavePresetPopup({ presetNum, onChangeNum, onConfirm, onClose }: Props) {
     return (
-        <Popup title={t('ui.save_preset_title')} onClose={onClose} confirmLabel={t('ui.save')} onConfirm={onConfirm}>
+        <Popup title={t('ui.save_preset_title')} onClose={onClose} confirmLabel={t('ui.save_as')} onConfirm={onConfirm}>
             <div className="popup-row">
                 <label>{t('ui.preset_number')}</label>
                 <input

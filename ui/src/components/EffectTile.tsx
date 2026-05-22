@@ -68,9 +68,10 @@ function effectiveValue(node: NodeDef, info: ParamInfo): unknown {
 
 /// Pair each live-param `ParamInfo` with its effective value.
 /// Order follows the canonical declaration order (effect-author intent).
-/// Only `ParamMeta` entries render as knobs/toggles — `BoundMeta` entries
-/// describe the override envelope for an aspect (Min / Max) and aren't
-/// rendered directly; the bound editors consult them for input ranges.
+/// Only writable `ParamMeta` entries render as knobs/toggles. `BoundMeta`
+/// describes the override envelope; read-only `ParamMeta` (current loop
+/// length, current overdub count) is driven by the effect itself and
+/// rendered by effect-specific widgets (e.g. looper transport).
 function getRenderableParams(node: NodeDef): { info: ParamInfo; value: unknown }[] {
   const infos = node.params_info;
   if (!infos) return [];
@@ -105,7 +106,7 @@ const LOOPING = new Set(['Playing', 'Overdub']);
 
 function useLooperTimer(node: NodeDef): string {
   const looperState = String(node['state'] ?? 'Idle');
-  const loopSecs    = Number(node['loop_secs'] ?? 0);
+  const loopSecs    = Number(node['duration'] ?? 0);
   const posSecs     = Number(node['pos_secs']  ?? 0);
   const wrapTs      = Number(node['_wrap_ts']  ?? 0);
   const isRunning   = looperState === 'Recording' || looperState === 'Playing' || looperState === 'Overdub';
@@ -231,18 +232,24 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
           {isLooper && (expanded || !transportHidden) && (() => {
             const nd          = node as Record<string, unknown>;
             const looperState = String(nd['state'] ?? 'Idle');
-            const overdubs    = Number(nd['overdub_count'] ?? 0);
-            const maxBufs     = Number(nd['max_buffers']  ?? 0);
+            // `buffer_cnt` is the live count (1 = base only, N = base + N-1
+            // completed overdubs), driven by the looper_state event into
+            // node.buffer_cnt. The cap lives in the `Setting` of the same
+            // name — its `default` is the configured cap (Type-resolved).
+            const bufferCnt   = Number(nd['buffer_cnt'] ?? 0);
+            const bufInfo     = node.params_info?.find(
+                i => i.name === 'buffer_cnt' && i.kind?.tag === 'Setting');
+            const maxBufs     = bufInfo && bufInfo.type === 'ContinuousInt' ? bufInfo.default : 0;
             const isIdle      = looperState === 'Idle';
             const isRecording = looperState === 'Recording';
             const isPlaying   = looperState === 'Playing';
             const isOverdub   = looperState === 'Overdub';
             // During Overdub, a layer is being recorded but not yet counted — show +1
-            const displayOverdubs = isOverdub ? overdubs + 1 : overdubs;
-            const atMerge     = maxBufs > 0 && displayOverdubs >= maxBufs;
-            const canUndo     = isRecording || isOverdub || overdubs > 0;
+            const displayCnt  = isOverdub ? bufferCnt + 1 : bufferCnt;
+            const atMerge     = maxBufs > 0 && displayCnt >= maxBufs;
+            const canUndo     = isRecording || isOverdub || bufferCnt > 1;
             const isStop      = looperState === 'Stop';
-            const loopSecs    = Number(nd['loop_secs'] ?? 0);
+            const loopSecs    = Number(nd['duration'] ?? 0);
             const posSecs     = Number(nd['pos_secs']  ?? 0);
 
             const recActive   = isRecording || isOverdub;
@@ -334,10 +341,10 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
                     }
                     <button className="looper-btn looper-undo-btn"
                       disabled={!canUndo}
-                      title={`Undo overdub (${displayOverdubs} layer${displayOverdubs !== 1 ? 's' : ''})`}
+                      title={`Undo overdub (${displayCnt} layer${displayCnt !== 1 ? 's' : ''})`}
                       onMouseDown={e => e.stopPropagation()}
                       onClick={() => sendAction(`${node.key}.action`, 'undo')}>
-                      ↩<span className="looper-undo-count" style={atMerge ? { color: 'var(--red, #e05)' } : undefined}>{displayOverdubs}</span>
+                      ↩<span className="looper-undo-count" style={atMerge ? { color: 'var(--red, #e05)' } : undefined}>{displayCnt}</span>
                     </button>
                     <button className="looper-btn"
                       disabled={isIdle}

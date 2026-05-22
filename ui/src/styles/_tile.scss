@@ -148,6 +148,17 @@
     }
 }
 
+.param-settings-input-wrap {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 2px;
+}
+
+.param-settings-unit {
+    font-size: $font-sm;
+    color: var(--text-muted);
+}
+
 .tile-params {
     display: flex;
     flex-wrap: nowrap;

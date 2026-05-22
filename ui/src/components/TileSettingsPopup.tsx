@@ -26,7 +26,8 @@ type Edit    = { param: string; aspect: string; value: number | boolean };
 /// `boundFor` for input-range hints.
 /// `DiscreteFloat` / `Event` params are skipped — no useful Instance bounds.
 export function TileSettingsPopup({ node, onClose }: Props) {
-    const params = (node.params_info ?? []).filter(i => i.kind?.tag === 'ParamMeta');
+    const params = (node.params_info ?? []).filter(i =>
+        i.kind?.tag === 'ParamMeta' || i.kind?.tag === 'Setting');
     const [pending, setPending] = useState<Pending>({});
     // Edits the server refused pending reload acknowledgement. Non-null →
     // confirm popup is showing; on confirm we replay these with the flag set,
@@ -76,7 +77,7 @@ export function TileSettingsPopup({ node, onClose }: Props) {
             <Popup title={`${t(`type.${node.type}`)} — ${t('ui.settings')}`}
                 onClose={onClose}
                 onConfirm={save}
-                confirmLabel={t('ui.save_quick')}>
+                confirmLabel={t('ui.apply')}>
                 <div className="tile-settings">
                     {params.map(info => (
                         <ParamRow key={info.name} info={info}
@@ -90,7 +91,7 @@ export function TileSettingsPopup({ node, onClose }: Props) {
                 <Popup title={t('ui.confirm_reload_title')}
                     onClose={() => setNeedConfirm(null)}
                     onConfirm={confirmSave}
-                    confirmLabel={t('ui.save_quick')}>
+                    confirmLabel={t('ui.apply')}>
                     <p>{t('ui.confirm_reload_body')}</p>
                 </Popup>
             )}

@@ -37,18 +37,41 @@ export function ParamRow({ info, effective, bound, onChange }: {
     bound?: (aspect: string) => [number, number] | undefined;
     onChange: (aspect: string, value: number | boolean) => void;
 }) {
+    const unit = (info.type === 'ContinuousFloat' || info.type === 'ContinuousInt') ? info.unit : undefined;
+
+    // Setting: standalone configurable. Single editable field. The label is
+    // just the param's name — context (Per-effect settings + a single value
+    // field) makes the role obvious. The aspect lives on the entry purely for
+    // wire routing (`<key>.<name>.<aspect>`) and structural disambiguation;
+    // doesn't need to be inlined in the human label. The configured value
+    // lives in `default`; the entry's own `[min, max]` is the editable envelope.
+    if (info.kind?.tag === 'Setting') {
+        if (info.type !== 'ContinuousFloat' && info.type !== 'ContinuousInt') return null;
+        const aspect = info.kind.aspect;
+        return (
+            <div className="param-settings-row">
+                <span className="param-settings-name">{t(`param.${info.name}`)}</span>
+                <NumberField label={aspect}
+                    value={effective(aspect, info.default) as number}
+                    onCommit={v => onChange(aspect, v)}
+                    range={[info.min, info.max]}
+                    unit={unit}
+                    integer={info.type === 'ContinuousInt'} />
+            </div>
+        );
+    }
+
+    // ParamMeta: standard min / max / default / log / visible aspect editor.
     // No BoundMeta declared → envelope is the param's own bounds, matching
     // server-side `apply_override` (`bound_meta_float(...).unwrap_or((cmin, cmax))`).
-    // For `Type` overrides those are canonical; for `Instance` overrides
-    // they're Type-resolved. Either way client and server agree.
+    // For Type overrides those are canonical; for Instance overrides they're
+    // Type-resolved. Either way client and server agree.
     const ownRange = (info.type === 'ContinuousFloat' || info.type === 'ContinuousInt')
         ? [info.min, info.max] as [number, number]
         : undefined;
     const minBound = bound?.('min') ?? ownRange;
     const maxBound = bound?.('max') ?? ownRange;
-    // `visible` lives at the top of every ParamInfo (independent of
-    // `data_kind`), so the toggle renders on every variant. Default is `true`
-    // at construction; flipping false hides the knob on the tile.
+    // `visible` is universal across variants.
     const visibleField = (
         <BoolField label="visible" value={effective('visible', info.visible ?? true) as boolean}
             onChange={v => onChange('visible', v)} />
@@ -58,9 +81,9 @@ export function ParamRow({ info, effective, bound, onChange }: {
             return (
                 <div className="param-settings-row">
                     <span className="param-settings-name">{t(`param.${info.name}`)}</span>
-                    <NumberField label="min"     value={effective('min',     info.min)     as number} onCommit={v => onChange('min', v)} range={minBound} />
-                    <NumberField label="max"     value={effective('max',     info.max)     as number} onCommit={v => onChange('max', v)} range={maxBound} />
-                    <NumberField label="default" value={effective('default', info.default) as number} onCommit={v => onChange('default', v)} />
+                    <NumberField label="min"     value={effective('min',     info.min)     as number} onCommit={v => onChange('min', v)} range={minBound} unit={unit} />
+                    <NumberField label="max"     value={effective('max',     info.max)     as number} onCommit={v => onChange('max', v)} range={maxBound} unit={unit} />
+                    <NumberField label="default" value={effective('default', info.default) as number} onCommit={v => onChange('default', v)} unit={unit} />
                     <BoolField   label="log"     value={effective('log',     !!info.log)   as boolean} onChange={v => onChange('log', v)} />
                     {visibleField}
                 </div>
@@ -69,9 +92,9 @@ export function ParamRow({ info, effective, bound, onChange }: {
             return (
                 <div className="param-settings-row">
                     <span className="param-settings-name">{t(`param.${info.name}`)}</span>
-                    <NumberField label="min"     value={effective('min',     info.min)     as number} onCommit={v => onChange('min', v)} range={minBound} integer />
-                    <NumberField label="max"     value={effective('max',     info.max)     as number} onCommit={v => onChange('max', v)} range={maxBound} integer />
-                    <NumberField label="default" value={effective('default', info.default) as number} onCommit={v => onChange('default', v)} integer />
+                    <NumberField label="min"     value={effective('min',     info.min)     as number} onCommit={v => onChange('min', v)} range={minBound} unit={unit} integer />
+                    <NumberField label="max"     value={effective('max',     info.max)     as number} onCommit={v => onChange('max', v)} range={maxBound} unit={unit} integer />
+                    <NumberField label="default" value={effective('default', info.default) as number} onCommit={v => onChange('default', v)} unit={unit} integer />
                     {visibleField}
                 </div>
             );
@@ -91,13 +114,14 @@ export function ParamRow({ info, effective, bound, onChange }: {
 /// Commit-on-blur/Enter number input. Reverts to current value on invalid
 /// entry or when unchanged on blur. `range` (optional) hints the browser
 /// via HTML5 min/max and clamps on commit — used by override editors to
-/// honour BoundMeta envelopes.
-export function NumberField({ label, value, onCommit, integer, range }: {
+/// honour BoundMeta envelopes. `unit` renders next to the input.
+export function NumberField({ label, value, onCommit, integer, range, unit }: {
     label: string;
     value: number;
     onCommit: (v: number) => void;
     integer?: boolean;
     range?: [number, number];
+    unit?: string;
 }) {
     const [text, setText] = useState(String(value));
     useEffect(() => { setText(String(value)); }, [value]);
@@ -111,12 +135,15 @@ export function NumberField({ label, value, onCommit, integer, range }: {
     return (
         <label className="param-settings-field">
             <span>{label}</span>
-            <input type="number" value={text}
-                step={integer ? 1 : 'any'}
-                min={range?.[0]} max={range?.[1]}
-                onChange={e => setText(e.target.value)}
-                onBlur={commit}
-                onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+            <span className="param-settings-input-wrap">
+                <input type="number" value={text}
+                    step={integer ? 1 : 'any'}
+                    min={range?.[0]} max={range?.[1]}
+                    onChange={e => setText(e.target.value)}
+                    onBlur={commit}
+                    onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+                {unit && <span className="param-settings-unit">{unit}</span>}
+            </span>
         </label>
     );
 }

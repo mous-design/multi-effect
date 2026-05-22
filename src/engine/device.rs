@@ -142,16 +142,28 @@ pub enum MetaAspect { Min, Max, Default, Step, Log, Visible }
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "tag")]
 pub enum ParamKind {
-    /// Live param. `max_growable_at_runtime: false` means the max is locked
-    /// at construction (delay buffer, chorus depth, looper init buf). Override
-    /// attempts to grow it past the construction-time max are rejected by the
-    /// resolver — master surfaces a reload-required event to the UI.
+    /// Live param. Rendered as a knob/toggle on the tile; settable via SET.
+    /// `max_growable_at_runtime: false` locks the max at construction (delay
+    /// buffer, chorus depth) — widening `<param>.max` past construction is
+    /// rejected by the resolver and surfaces a reload-required event.
     ParamMeta { max_growable_at_runtime: bool },
     /// Editable envelope for one aspect of a targeted `ParamMeta`. The
     /// entry's own `min`/`max` describe the range an override of that aspect
-    /// can take. Lets canonical separate "default knob range" (ParamMeta)
-    /// from "absolute envelope for the override" (BoundMeta) per param.
+    /// can take. Lets canonical declare a wider override envelope than the
+    /// param's own range (e.g. `delay.time.max` widenable up to 60 s).
     BoundMeta { aspect: MetaAspect },
+    /// Standalone configurable value — a *setting*, not a runtime param.
+    /// No paired `ParamMeta`. Appears in the override editor as a single
+    /// editable field labelled "<Aspect> <param_name>" (e.g. "Max duration").
+    /// The configured value lives in the entry's `default` field; the
+    /// `min`/`max` range is the editable envelope. The effect reads the
+    /// configured value at construction (and on rebuild after reload, when
+    /// non-growable).
+    ///
+    /// `aspect` is purely descriptive — drives label and wire path
+    /// (`SET <key>.<name>.<aspect>`) — not "which field of a target". The
+    /// configured value always lives in `default`.
+    Setting { aspect: MetaAspect, max_growable_at_runtime: bool },
 }
 
 /// Metadata describing one parameter of an effect.
@@ -217,18 +229,23 @@ impl ParamInfo {
 
     // ----- Builders for orthogonal aspects (chained on top of constructors) -----
 
-    /// Lock the live param's max at construction time (sizes a buffer, etc.).
-    /// Override attempts to grow `<param>.max` past construction-time max are
-    /// rejected by the resolver — master surfaces a reload-required event.
-    /// Only valid on `ParamMeta` entries; panics otherwise (compile error in
-    /// const contexts).
+    /// Lock the max at construction time (sizes a buffer, etc.). Override
+    /// attempts to grow past the construction-time max are rejected by the
+    /// resolver — master surfaces a reload-required event. Valid on
+    /// `ParamMeta` and `Setting` (both can drive buffer sizing); panics on
+    /// `BoundMeta` (envelopes don't have a buffer to protect).
     pub const fn with_non_growable(self) -> Self {
         match self.kind {
             ParamKind::ParamMeta { .. } => Self {
                 kind: ParamKind::ParamMeta { max_growable_at_runtime: false },
                 ..self
             },
-            _ => panic!("with_non_growable: only valid for ParamMeta entries"),
+            ParamKind::Setting { aspect, .. } => Self {
+                kind: ParamKind::Setting { aspect, max_growable_at_runtime: false },
+                ..self
+            },
+            ParamKind::BoundMeta { .. } =>
+                panic!("with_non_growable: not valid for BoundMeta entries"),
         }
     }
 
@@ -248,6 +265,18 @@ impl ParamInfo {
     pub const fn with_kind_bound_meta(self, aspect: MetaAspect) -> Self {
         Self {
             kind: ParamKind::BoundMeta { aspect },
+            ..self
+        }
+    }
+
+    /// Tag this entry as a standalone setting (no targeted `ParamMeta`).
+    /// Appears in the override editor as a single editable field; the value
+    /// lives in the entry's `default`. `aspect` is purely descriptive — drives
+    /// the label ("Max duration") and the wire path (`<key>.<name>.<aspect>`).
+    /// Combine with `with_non_growable()` for buffer-affecting caps.
+    pub const fn with_kind_setting(self, aspect: MetaAspect) -> Self {
+        Self {
+            kind: ParamKind::Setting { aspect, max_growable_at_runtime: true },
             ..self
         }
     }
@@ -525,6 +554,16 @@ pub fn apply_override(
               resolved.len(), clamp_ref.len());
         return false;
     }
+
+    // Settings are standalone — name + aspect identifies one uniquely. Try
+    // those first; if no match, fall through to the ParamMeta meta-override path.
+    if let Some(idx) = resolved.iter().position(|i|
+        i.name == target.param && matches!(i.kind,
+            ParamKind::Setting { aspect, .. } if aspect == target.aspect))
+    {
+        return apply_setting_override(resolved, clamp_ref, idx, value);
+    }
+
     let Some(idx) = resolved.iter().position(|i| {
         i.name == target.param && matches!(i.kind, ParamKind::ParamMeta { .. })
     }) else {
@@ -728,6 +767,62 @@ pub fn apply_override(
     changed
 }
 
+/// Apply a standalone `Setting` override — clamp `value` to the entry's own
+/// `[min, max]` and write to its `default` field. Returns `true` if changed.
+///
+/// `clamp_ref` provides the canonical envelope for the clamp; if its kind at
+/// `idx` isn't `Setting`, we fall back to `resolved`'s own bounds.
+fn apply_setting_override(
+    resolved:  &mut [ParamInfo],
+    clamp_ref: &[ParamInfo],
+    idx:       usize,
+    value:     &ParamValue,
+) -> bool {
+    match (&mut resolved[idx].data_kind, &clamp_ref[idx].data_kind) {
+        (
+            ParamType::ContinuousFloat { min, max, default, round_multiplier, .. },
+            ParamType::ContinuousFloat { min: cmin, max: cmax, .. },
+        ) => {
+            let Ok(v_in) = value.try_float() else {
+                warn!("setting {}: expected float", resolved[idx].name);
+                return false;
+            };
+            let v = v_in.clamp(*cmin, *cmax);
+            if v != v_in {
+                warn!("setting {}: value {v_in} out of [{cmin}, {cmax}], clamped to {v}",
+                      resolved[idx].name);
+            }
+            if v == *default { return false; }
+            *default = v;
+            // `min` / `max` are the envelope and don't shift; round_multiplier
+            // depends only on the envelope, so recompute is unnecessary, but
+            // harmless and keeps the field consistent.
+            *round_multiplier = auto_multiplier(*min, *max);
+            true
+        },
+        (
+            ParamType::ContinuousInt { default, .. },
+            ParamType::ContinuousInt { min: cmin, max: cmax, .. },
+        ) => {
+            let Ok(v_in) = value.try_int() else {
+                warn!("setting {}: expected int", resolved[idx].name);
+                return false;
+            };
+            let v = v_in.clamp(*cmin, *cmax);
+            if v != v_in {
+                warn!("setting {}: value {v_in} out of [{cmin}, {cmax}], clamped to {v}",
+                      resolved[idx].name);
+            }
+            if v == *default { return false; }
+            *default = v;
+            true
+        },
+        (a, b) => {
+            warn!("setting {}: unsupported type ({a:?} vs {b:?})", resolved[idx].name);
+            false
+        },
+    }
+}
 
 
 // ---------------------------------------------------------------------------
@@ -864,6 +959,18 @@ pub fn bound_meta_int(slice: &[ParamInfo], param: &str, aspect: MetaAspect) -> O
 /// Used by the Type-overrides sanitiser to re-extract clamped values out of
 /// `resolved` after `apply_override` has run.
 pub fn aspect_value(info: &ParamInfo, aspect: MetaAspect) -> Option<ParamValue> {
+    // Setting: the configured value always lives in `default`, regardless of
+    // the `aspect` tag (which is purely descriptive). The Setting only
+    // responds to its own declared aspect.
+    if let ParamKind::Setting { aspect: a, .. } = info.kind {
+        if a != aspect { return None; }
+        return match &info.data_kind {
+            ParamType::ContinuousFloat { default, .. } => Some((*default).into()),
+            ParamType::ContinuousInt   { default, .. } => Some((*default).into()),
+            _ => None,
+        };
+    }
+    // ParamMeta / BoundMeta: aspect maps directly to the corresponding field.
     if matches!(aspect, MetaAspect::Visible) {
         return Some(ParamValue::Bool(info.visible));
     }
@@ -897,33 +1004,49 @@ pub fn aspect_value(info: &ParamInfo, aspect: MetaAspect) -> Option<ParamValue> 
 pub const fn validate_canonical(arr: &[ParamInfo]) {
     let mut i = 0;
     while i < arr.len() {
-        if let ParamKind::BoundMeta { aspect } = arr[i].kind {
-            // Aspect must be Min or Max (default is invariant-bound, log/visible are bool).
-            match aspect {
-                MetaAspect::Min | MetaAspect::Max => {},
-                _ => panic!("BoundMeta aspect must be Min or Max"),
-            }
-            // Find matching ParamMeta with same name and compatible ParamType.
-            let mut j = 0;
-            let mut ok = false;
-            while j < arr.len() {
-                if let ParamKind::ParamMeta { .. } = arr[j].kind {
-                    if const_str_eq(arr[j].name, arr[i].name) {
-                        match (&arr[j].data_kind, &arr[i].data_kind) {
-                            (ParamType::ContinuousFloat { .. },
-                             ParamType::ContinuousFloat { .. }) => { ok = true; },
-                            (ParamType::ContinuousInt { .. },
-                             ParamType::ContinuousInt { .. }) => { ok = true; },
-                            _ => panic!("BoundMeta type does not match targeted ParamMeta"),
-                        }
-                        break;
-                    }
+        match arr[i].kind {
+            ParamKind::BoundMeta { aspect } => {
+                // Aspect must be Min or Max.
+                match aspect {
+                    MetaAspect::Min | MetaAspect::Max => {},
+                    _ => panic!("BoundMeta aspect must be Min or Max"),
                 }
-                j += 1;
-            }
-            if !ok {
-                panic!("BoundMeta has no matching ParamMeta target by name");
-            }
+                // Find matching ParamMeta with same name and compatible ParamType.
+                let mut j = 0;
+                let mut ok = false;
+                while j < arr.len() {
+                    if let ParamKind::ParamMeta { .. } = arr[j].kind {
+                        if const_str_eq(arr[j].name, arr[i].name) {
+                            match (&arr[j].data_kind, &arr[i].data_kind) {
+                                (ParamType::ContinuousFloat { .. },
+                                 ParamType::ContinuousFloat { .. }) => { ok = true; },
+                                (ParamType::ContinuousInt { .. },
+                                 ParamType::ContinuousInt { .. }) => { ok = true; },
+                                _ => panic!("BoundMeta type does not match targeted ParamMeta"),
+                            }
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if !ok {
+                    panic!("BoundMeta has no matching ParamMeta target by name");
+                }
+            },
+            ParamKind::Setting { aspect, .. } => {
+                // Aspect is descriptive — same constraint as BoundMeta. No
+                // target ParamMeta required. Type must be numeric (default
+                // stores the configured value).
+                match aspect {
+                    MetaAspect::Min | MetaAspect::Max => {},
+                    _ => panic!("Setting aspect must be Min or Max"),
+                }
+                match arr[i].data_kind {
+                    ParamType::ContinuousFloat { .. } | ParamType::ContinuousInt { .. } => {},
+                    _ => panic!("Setting must be ContinuousFloat or ContinuousInt"),
+                }
+            },
+            ParamKind::ParamMeta { .. } => {},
         }
         i += 1;
     }

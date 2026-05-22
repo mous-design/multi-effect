@@ -43,7 +43,7 @@ export function SettingsPopup({ config, onSave, onClose, onOpenEffectBounds }: P
     return (
         <Popup title={t('ui.settings')}
             onClose={onClose}
-            confirmLabel={t('ui.save_quick')}
+            confirmLabel={t('ui.save')}
             onConfirm={handleSave}
             extraAction={effectBoundsBtn}>
             <table className="routing-table">

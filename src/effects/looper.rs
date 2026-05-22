@@ -1,6 +1,6 @@
 use crate::control::{ControlMessage, EventBus};
 use crate::engine::device::{find_param_info, validate_canonical,
-    ParamInfo, Device, Frame, Parameterized, ParamValue};
+    MetaAspect, ParamInfo, Device, Frame, Parameterized, ParamValue};
 use tracing::warn;
 
 const LOOP_FADE_SAMPLES: usize = 8;
@@ -119,10 +119,15 @@ pub struct Looper {
 
 pub static CANONICAL: [ParamInfo; 5] = [
     ParamInfo::new_discrete_bool("active", true, None),
-    ParamInfo::new_continuous_float("decay",       0.0,   1.0,  1.0, false, None),
-    ParamInfo::new_continuous_float("max_seconds", 1.0, 300.0, 30.0, false, Some("s")).with_non_growable(),
-    ParamInfo::new_continuous_int(  "max_buffers", 0,    16,    4,    None),
-    ParamInfo::new_continuous_float("wet",         0.0,   1.0,  0.5, false, None),
+    ParamInfo::new_continuous_float("wet",        0.0,   1.0,  0.5, false, None),
+    ParamInfo::new_continuous_float("decay",      0.0,   1.0,  1.0, false, None),
+    // Standalone settings — caps the looper consults at construction. The
+    // configured value lives in `default`; `min`/`max` is the editable
+    // envelope. Buffer-affecting → non-growable (widen requires reload).
+    ParamInfo::new_continuous_float("duration",   1.0, 300.0, 30.0, false, Some("s"))
+        .with_kind_setting(MetaAspect::Max).with_non_growable(),
+    ParamInfo::new_continuous_int("buffer_cnt",   1,    16,   4,    None)
+        .with_kind_setting(MetaAspect::Max),
 ];
 const _: () = validate_canonical(&CANONICAL);
 
@@ -135,11 +140,14 @@ pub const REGISTRATION: crate::effects::registry::EffectRegistration =
 
 impl Looper {
     pub fn new(key: impl Into<String>, sample_rate: f32, params_info: &[ParamInfo]) -> Self {
-        let active      = find_param_info(params_info, "active"     ).bool_default();
-        let decay       = find_param_info(params_info, "decay"      ).continuous_float_default();
-        let max_seconds = find_param_info(params_info, "max_seconds").continuous_float_default();
-        let max_buffers = find_param_info(params_info, "max_buffers").continuous_int_default() as usize;
-        let wet         = find_param_info(params_info, "wet"        ).continuous_float_default();
+        let active      = find_param_info(params_info, "active"    ).bool_default();
+        let decay       = find_param_info(params_info, "decay"     ).continuous_float_default();
+        let wet         = find_param_info(params_info, "wet"       ).continuous_float_default();
+        // Caps live in the `Setting` entries — their `default` is the
+        // configured value (overrides on `duration.max` / `buffer_cnt.max`
+        // are baked into `default` by the resolver; we just read it).
+        let max_seconds = find_param_info(params_info, "duration"  ).continuous_float_default();
+        let max_buffers = find_param_info(params_info, "buffer_cnt").continuous_int_default() as usize;
 
         let init_len = (sample_rate * max_seconds) as usize;
         // Pre-allocate buffer[0] (OS gives us lazily-zeroed pages)
@@ -180,18 +188,33 @@ impl Looper {
     }
 
     /// Fire a `looper_state` event reflecting the current state.
+    ///
+    /// `duration_secs` / `buffer_cnt` map onto the read-only `ParamMeta`
+    /// entries of the same name — the UI bridges these into `node.duration` /
+    /// `node.buffer_cnt` for the generic param-display path. `state` / `pos_ms`
+    /// remain looper-specific transport state.
     fn fire_state(&self) {
-        let loop_ms = if self.sample_rate > 0.0 && self.loop_len > 0 {
-            (self.loop_len as f32 / self.sample_rate * 1000.0) as u32
-        } else { 0 };
+        self.fire_state_as(self.state, self.current_pos);
+    }
+
+    /// Same as `fire_state` but with a state-override and a pos override —
+    /// used by `do_pause` / `do_stop` to update the UI immediately during the
+    /// short audio fade-out before the actual state transition completes.
+    fn fire_state_as(&self, state: LooperState, pos: usize) {
+        let duration_secs = if self.sample_rate > 0.0 && self.loop_len > 0 {
+            self.loop_len as f32 / self.sample_rate
+        } else { 0.0 };
         let pos_ms = if self.sample_rate > 0.0 {
-            (self.current_pos as f32 / self.sample_rate * 1000.0) as u32
+            (pos as f32 / self.sample_rate * 1000.0) as u32
         } else { 0 };
+        // `buffer_cnt` counts base + completed overdubs (1 = just base, no overdubs).
+        let buffer_cnt = if matches!(state, LooperState::Idle) { 0 }
+                         else { 1 + self.overdub_count };
         self.fire_event("looper_state", serde_json::json!({
-            "state":         format!("{:?}", self.state),
-            "loop_ms":       loop_ms,
+            "state":         format!("{:?}", state),
+            "duration_secs": duration_secs,
             "pos_ms":        pos_ms,
-            "overdub_count": self.overdub_count,
+            "buffer_cnt":    buffer_cnt,
         }));
     }
 
@@ -322,12 +345,7 @@ impl Looper {
         if matches!(self.state, LooperState::Stop) {
             self.fire_state();
         } else if self.stopping {
-            self.fire_event("looper_state", serde_json::json!({
-                "state":         "Stop",
-                "loop_ms":       self.loop_ms(),
-                "pos_ms":        self.pos_ms(),
-                "overdub_count": self.overdub_count,
-            }));
+            self.fire_state_as(LooperState::Stop, self.current_pos);
         }
     }
 
@@ -351,12 +369,7 @@ impl Looper {
                 // Start fade-out; reset pos to 0 immediately (8-sample fade is inaudible).
                 self.start_fade_out();
                 self.current_pos = 0;
-                self.fire_event("looper_state", serde_json::json!({
-                    "state":         "Stop",
-                    "loop_ms":       self.loop_ms(),
-                    "pos_ms":        0u32,
-                    "overdub_count": self.overdub_count,
-                }));
+                self.fire_state_as(LooperState::Stop, 0);
             }
         }
     }
@@ -408,18 +421,6 @@ impl Looper {
             }
         }
         self.fire_state();
-    }
-
-    // Small helpers to avoid repeating the ms conversion formula.
-    fn loop_ms(&self) -> u32 {
-        if self.sample_rate > 0.0 && self.loop_len > 0 {
-            (self.loop_len as f32 / self.sample_rate * 1000.0) as u32
-        } else { 0 }
-    }
-    fn pos_ms(&self) -> u32 {
-        if self.sample_rate > 0.0 {
-            (self.current_pos as f32 / self.sample_rate * 1000.0) as u32
-        } else { 0 }
     }
 
     // -----------------------------------------------------------------------
@@ -662,8 +663,19 @@ impl Device for Looper {
                             1.0
                         };
                         self.buffers[0][self.current_pos] = [inp[0] * gain, inp[1] * gain];
+                        self.current_pos += 1;
+                    } else {
+                        // Buffer full — we've hit the configured `duration`
+                        // cap. Auto-stop recording (same shape as do_stop's
+                        // Recording branch). User can press Play to start
+                        // looping the maxed-out recording.
+                        self.loop_len    = self.buffers[0].len();
+                        self.bake_fade_out(0);
+                        self.init_merge_buf();
+                        self.state       = LooperState::Stop;
+                        self.current_pos = 0;
+                        self.fire_state();
                     }
-                    self.current_pos += 1;
                     // prev_eff passes through during recording
                 }
 
@@ -684,9 +696,7 @@ impl Device for Looper {
                             self.current_pos += 1;
                             if self.current_pos >= self.loop_len {
                                 self.current_pos = 0;
-                                self.fire_event("loop_wrap", serde_json::json!({
-                                    "loop_ms": self.loop_ms()
-                                }));
+                                self.fire_event("loop_wrap", serde_json::json!({}));
                             }
                         }
                     }
@@ -762,9 +772,7 @@ impl Device for Looper {
                                 // at-end: keep accumulating into the same buffer.
                                 // Layer is only committed when the user presses Rec again.
                                 self.current_pos = 0;
-                                self.fire_event("loop_wrap", serde_json::json!({
-                                    "loop_ms": self.loop_ms()
-                                }));
+                                self.fire_event("loop_wrap", serde_json::json!({}));
                             }
                         }
                     }
@@ -810,7 +818,6 @@ impl Parameterized for Looper {
                 self.current_pos = (secs.clamp(0.0, max_secs) * self.sample_rate) as usize;
                 Ok(())
             },
-            "max_seconds" | "max_buffers" => Err(format!("{}: '{param}' is construct only and cannot be set", NAME)),
             _ => Err(format!("{}: unknown param '{param}'", NAME)),
         }
     }

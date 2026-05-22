@@ -85,14 +85,15 @@ export function TypeOverridesPopup({ onClose }: Props) {
     if (!canonical) return null;
 
     const types = Object.keys(canonical).sort();
-    const params = (canonical[selectedType] ?? []).filter(i => i.kind?.tag === 'ParamMeta');
+    const params = (canonical[selectedType] ?? []).filter(i =>
+        i.kind?.tag === 'ParamMeta' || i.kind?.tag === 'Setting');
 
     return createPortal(
         <>
             <Popup title={t('ui.type_overrides')}
                 onClose={onClose}
                 onConfirm={save}
-                confirmLabel={t('ui.save_quick')}>
+                confirmLabel={t('ui.save')}>
                 <div className="type-overrides">
                     <div className="type-overrides-picker">
                         <label>
@@ -121,7 +122,7 @@ export function TypeOverridesPopup({ onClose }: Props) {
                 <Popup title={t('ui.confirm_reload_title')}
                     onClose={() => setConfirm(null)}
                     onConfirm={confirmSave}
-                    confirmLabel={t('ui.save_quick')}>
+                    confirmLabel={t('ui.save')}>
                     <p>{t('ui.confirm_reload_body')}</p>
                 </Popup>
             )}

@@ -68,11 +68,11 @@ export function AppHeader(p: Props) {
                 >
                     <SpeakerIcon /> {p.activePreset}
                 </button>
-                <button className="preset-save-btn" onClick={p.onQuickSave} disabled={p.activePreset === 0 || (!p.isDirty && !p.isComparing)} title={t('ui.save_quick')}>
-                    {p.savedFeedback ? t('ui.saved') : t('ui.save_quick')}
+                <button className="preset-save-btn" onClick={p.onQuickSave} disabled={p.activePreset === 0 || (!p.isDirty && !p.isComparing)} title={t('ui.save')}>
+                    {p.savedFeedback ? t('ui.saved') : t('ui.save')}
                 </button>
-                <button className="preset-save-btn" onClick={p.onOpenSave} title={t('ui.save')}>
-                    {t('ui.save')}
+                <button className="preset-save-btn" onClick={p.onOpenSave} title={t('ui.save_as')}>
+                    {t('ui.save_as')}
                 </button>
                 <button className="devices-btn" onClick={p.onNavigateDevices} title={t('ui.devices')}>
                     <DevicesIcon />

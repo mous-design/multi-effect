@@ -23,7 +23,8 @@ export type ParamType =
 /// Mirrors `engine::device::ParamKind`.
 export type ParamKind =
   | { tag: 'ParamMeta';  max_growable_at_runtime: boolean }
-  | { tag: 'BoundMeta';  aspect: string };
+  | { tag: 'BoundMeta';  aspect: string }
+  | { tag: 'Setting';    aspect: string; max_growable_at_runtime: boolean };
 
 /// Mirrors `engine::device::ParamInfo` — `ParamType` fields are flattened in.
 export type ParamInfo = ParamType & {
