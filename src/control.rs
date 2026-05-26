@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use mapping::ControllerDef;
 use tracing::debug;
-use super::engine::device::{ParamValue, MetaTarget};
+use super::engine::device::{EventAction, ParamValue, MetaTarget};
 use super::config::preset::PresetDef;
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ pub fn connection_id(alias: &str) -> String {
 /// so that outbound tasks can skip echoing messages back to the sender.
 #[derive(Debug, Clone)]
 pub enum ControlMessage {
+    /// Set parameter, mostly coming from a user interface.
     SetParam { path: String, value: ParamValue, source: String },
     /// Instance bound override (the runtime "edit a param's min/max/default").
     /// `path` is the node key (e.g. `"04-chorus"`); `target` selects param +
@@ -53,8 +54,18 @@ pub enum ControlMessage {
         source: String,
     },
     Reset { source: String },
-    Action { path: String, action: String, source: String },
-
+    Action { path: String, action: EventAction, source: String },
+    /// Live read-only-param update emitted by an effect itself (e.g. looper's
+    /// current loop length, current playhead position). Wire-shaped identical
+    /// to a `SetParam` PARAM broadcast, but the variant distinguishes "effect
+    /// publishing internal state" from "user set a value". Not persisted
+    /// with snapshot — purely a notification.
+    LiveParam { path: String, value: ParamValue },
+    /// Audio-thread directive: each effect re-fires its current live state
+    /// (`LiveParam` values + state tags). Used on client-connect to bring
+    /// newly-joining listeners up to date; existing listeners receive the
+    /// same values as a no-op refresh. Master pushes this; not seen on wire.
+    RepublishLiveState,
     // System events — no source needed, no echo risk.
     NoteOn  { note: u8, velocity: u8 },
     NoteOff { note: u8 },

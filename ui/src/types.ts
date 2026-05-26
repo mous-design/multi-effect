@@ -13,24 +13,27 @@ export interface DiscreteFloatOption {
 
 /// Mirrors `engine::device::ParamType` — flat wire shape via `#[serde(flatten)]`
 /// on the parent `ParamInfo`. The `type` field is the discriminator.
+/// `None` is the value-shape for Event entries (the kind carries the payload).
 export type ParamType =
   | { type: 'ContinuousFloat'; min: number; max: number; default: number; unit?: string; log?: boolean }
   | { type: 'ContinuousInt';   min: number; max: number; default: number; unit?: string }
   | { type: 'DiscreteFloat';   options: DiscreteFloatOption[]; default: number }
   | { type: 'DiscreteBool';    default: boolean; labels?: [string, string] }
-  | { type: 'Event';           actions: string[] };
+  | { type: 'None' };
 
 /// Mirrors `engine::device::ParamKind`.
 export type ParamKind =
-  | { tag: 'ParamMeta';  max_growable_at_runtime: boolean }
-  | { tag: 'BoundMeta';  aspect: string }
-  | { tag: 'Setting';    aspect: string; max_growable_at_runtime: boolean };
+  | { tag: 'ParamMeta';    max_growable_at_runtime: boolean; read_only: boolean }
+  | { tag: 'BoundMeta';    aspect: string }
+  | { tag: 'Event';        action: string }
+  | { tag: 'ActionsGroup' };
 
 /// Mirrors `engine::device::ParamInfo` — `ParamType` fields are flattened in.
 export type ParamInfo = ParamType & {
   name: string;
   kind: ParamKind;
   visible: boolean;
+  active: boolean;
 };
 export interface ChainDef {
   input: [number, number];

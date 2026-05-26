@@ -69,14 +69,11 @@ pub enum ParamType {
         labels:  Option<(&'static str, &'static str)>,
     },
 
-    /// Momentary action endpoint — no current value, no default. The param
-    /// has a closed list of action verbs it can dispatch; pressing one fires
-    /// `set_action(name, action)`. Single-button events use a one-element
-    /// `actions` list (no labels: actions carry no per-instance data, so the
-    /// overhead is just the enum byte).
-    Event {
-        actions: &'static [EventAction],
-    },
+    /// No value shape. Used by entries whose role is non-value (currently
+    /// `ParamKind::Event` button-clusters). The kind discriminator carries
+    /// the meaningful payload; data_kind exists purely because the wire-flat
+    /// shape requires *some* `type` tag.
+    None,
 }
 
 /// One option in a `DiscreteFloat` parameter.
@@ -93,9 +90,15 @@ pub struct DiscreteFloatOption {
 /// curated across the effect library; not every effect uses every variant.
 /// Wire form is kebab-case (e.g. `Rec` → `"rec"`); UIs label by combining
 /// `ParamInfo.name` with the action (translation happens at the UI layer).
-#[derive(Debug, Clone, Copy, Serialize)]
+///
+/// Combined verbs (e.g. `RecPlayStopRec`) encode a state-machine choice —
+/// the effect decides which primitive to fire based on its current state.
+/// UI sends the combined verb; effect resolves. No state-machine
+/// duplication on the client side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventAction {
+    // ── Primitives ────────────────────────────────────────────────────
     /// Looper: start recording.
     Rec,
     /// Looper: start/resume playback.
@@ -106,14 +109,58 @@ pub enum EventAction {
     Pause,
     /// Looper: undo last overdub.
     Undo,
-    /// Looper: clear the loop and reset state.
-    Clear,
     /// Generic reset (effect-defined semantics).
     Reset,
-    /// Tap-tempo input (delay, looper, etc.).
-    Tap,
-    /// Freeze / hold (reverb sustain, delay infinite repeat).
-    Freeze,
+
+    // ── Combined transport (looper) ───────────────────────────────────
+    /// 2-letter cycle: Rec ↔ Play. From Playing → Rec (starts overdub at
+    /// current pos); from Overdub → Play. After loop established, alternates
+    /// Play / Overdub on each press.
+    RecPlay,
+    /// 3-letter cycle, Stop wraps back to Rec: idle→Rec, rec→Play, play→Stop,
+    /// stop→Rec.
+    RecPlayStop,
+    /// 4-letter, distinct from `RecPlayStop`: stop→Play (resume) instead of
+    /// wrapping back to Rec.
+    RecPlayStopPlay,
+    /// Playing → Stop (true stop — resets playhead to 0); Stop → Play.
+    PlayStop,
+    /// Playing → Pause (keeps playhead); Stop → Play.
+    PlayPause,
+    /// idle→Rec, then Recording/Overdub→Pause, Playing/Stop→Rec. Press
+    /// oscillates Rec/Pause when active (was historically called `RecStop`
+    /// but the active-state action is Pause).
+    RecPause,
+    /// any-active→pause, stop→reset.
+    StopReset,
+    /// any-active→pause, stop→stop (goto 0).
+    PauseStop,
+    /// State-dependent: pause if running, stop if stopped-at-pos, else reset.
+    PauseStopReset,
+}
+
+impl EventAction {
+    /// Kebab-case name — matches the wire form and is used as the
+    /// `ParamInfo.name` of single-action Event entries.
+    pub const fn name(self) -> &'static str {
+        match self {
+            EventAction::Rec               => "rec",
+            EventAction::Play              => "play",
+            EventAction::Stop              => "stop",
+            EventAction::Pause             => "pause",
+            EventAction::Undo              => "undo",
+            EventAction::Reset             => "reset",
+            EventAction::RecPlay           => "rec-play",
+            EventAction::RecPlayStop       => "rec-play-stop",
+            EventAction::RecPlayStopPlay   => "rec-play-stop-play",
+            EventAction::PlayStop          => "play-stop",
+            EventAction::PlayPause         => "play-pause",
+            EventAction::RecPause          => "rec-pause",
+            EventAction::StopReset         => "stop-reset",
+            EventAction::PauseStop         => "pause-stop",
+            EventAction::PauseStopReset    => "pause-stop-reset",
+        }
+    }
 }
 
 /// Which aspect of a targeted live `ParamMeta` a meta-entry edits.
@@ -125,7 +172,7 @@ pub enum EventAction {
 /// it's a bound or a presentation hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MetaAspect { Min, Max, Default, Step, Log, Visible }
+pub enum MetaAspect { Min, Max, Default, Step, Log, Visible, Active }
 
 /// Role of a `ParamInfo` entry within a canonical list.
 ///
@@ -142,28 +189,40 @@ pub enum MetaAspect { Min, Max, Default, Step, Log, Visible }
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "tag")]
 pub enum ParamKind {
-    /// Live param. Rendered as a knob/toggle on the tile; settable via SET.
+    /// Live param. Rendered on the tile; the contract depends on `read_only`:
+    /// - `read_only: false` — settable via SET; rendered as knob/toggle.
+    /// - `read_only: true`  — effect-driven (current loop position, current
+    ///   buffer count, …); `set_param` rejects writes. Effect publishes value
+    ///   updates via `ControlMessage::LiveParam`. UI renders an effect-specific
+    ///   display widget (timer, counter, …) bound to the same value.
+    ///
     /// `max_growable_at_runtime: false` locks the max at construction (delay
     /// buffer, chorus depth) — widening `<param>.max` past construction is
     /// rejected by the resolver and surfaces a reload-required event.
-    ParamMeta { max_growable_at_runtime: bool },
+    ParamMeta { max_growable_at_runtime: bool, read_only: bool },
     /// Editable envelope for one aspect of a targeted `ParamMeta`. The
     /// entry's own `min`/`max` describe the range an override of that aspect
     /// can take. Lets canonical declare a wider override envelope than the
     /// param's own range (e.g. `delay.time.max` widenable up to 60 s).
     BoundMeta { aspect: MetaAspect },
-    /// Standalone configurable value — a *setting*, not a runtime param.
-    /// No paired `ParamMeta`. Appears in the override editor as a single
-    /// editable field labelled "<Aspect> <param_name>" (e.g. "Max duration").
-    /// The configured value lives in the entry's `default` field; the
-    /// `min`/`max` range is the editable envelope. The effect reads the
-    /// configured value at construction (and on rebuild after reload, when
-    /// non-growable).
+    /// Single action trigger. One ParamInfo entry per button — the entry's
+    /// `name` is the action verb (`"rec"`, `"rec-play-stop-rec"`, …), the
+    /// `action` field is the typed verb. UI renders one button per active
+    /// Event entry. Per-button `active` / `visible` work via the standard
+    /// override pipeline. Wire: `ACT <key>.<verb> <verb>`. The effect's
+    /// state machine resolves combined verbs against current state.
+    Event { action: EventAction },
+    /// UI grouping anchor. Carries no value of its own — exists purely as a
+    /// handle for `visible` / `active` overrides on a related cluster of
+    /// entries (e.g. the looper's transport buttons). The tile renders the
+    /// group iff `info.visible` (and exists at all iff `info.active`).
     ///
-    /// `aspect` is purely descriptive — drives label and wire path
-    /// (`SET <key>.<name>.<aspect>`) — not "which field of a target". The
-    /// configured value always lives in `default`.
-    Setting { aspect: MetaAspect, max_growable_at_runtime: bool },
+    /// Today, which entries belong to which group is hard-coded in the UI
+    /// per effect. A future field on this variant may declare members
+    /// explicitly when the generic tile-ordering work lands — see
+    /// `todo.md → ActionsGroup: membership + custom tile ordering`. The
+    /// marker stays compatible either way.
+    ActionsGroup,
 }
 
 /// Metadata describing one parameter of an effect.
@@ -194,6 +253,13 @@ pub struct ParamInfo {
     /// via `with_hidden()`, and per-instance overrides toggle it at runtime
     /// via `SET <key>.<param>.visible <bool>` (meta form).
     pub visible: bool,
+    /// Whether this entry is declared-active. `false` means the canonical
+    /// declares it but it's hidden from all UI surfaces until an override
+    /// flips it back on. Effects can declare a wide menu of optional
+    /// controls (many transport variants, advanced toggles) marked inactive
+    /// by default; per-instance overrides switch on the ones the user wants.
+    /// Wire path: `SET <key>.<param>.active <bool>`.
+    pub active: bool,
 }
 impl ParamInfo {
     pub const fn new_continuous_float(name: &'static str, min: f32, max: f32, default: f32,
@@ -204,8 +270,9 @@ impl ParamInfo {
         ParamInfo {
             name,
             data_kind: ParamType::ContinuousFloat { min, max, default, log, unit, round_multiplier: 0.0 },
-            kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
+            kind: ParamKind::ParamMeta { max_growable_at_runtime: true, read_only: false },
             visible: true,
+            active: true,
         }
     }
     pub const fn new_continuous_int(name: &'static str, min: i32, max: i32, default: i32,
@@ -213,8 +280,9 @@ impl ParamInfo {
         ParamInfo {
             name,
             data_kind: ParamType::ContinuousInt { min, max, default, unit },
-            kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
+            kind: ParamKind::ParamMeta { max_growable_at_runtime: true, read_only: false },
             visible: true,
+            active: true,
         }
     }
     pub const fn new_discrete_bool(name: &'static str, default: bool,
@@ -222,8 +290,36 @@ impl ParamInfo {
         ParamInfo {
             name,
             data_kind: ParamType::DiscreteBool { default, labels },
-            kind: ParamKind::ParamMeta { max_growable_at_runtime: true },
+            kind: ParamKind::ParamMeta { max_growable_at_runtime: true, read_only: false },
             visible: true,
+            active: true,
+        }
+    }
+    /// Declare a single-action Event entry. The entry's `name` is the
+    /// action verb (kebab-case, derived from `EventAction::name()`); the UI
+    /// renders one button per active Event entry. Effect's `set_action`
+    /// dispatches the verb; combined verbs (e.g. `RecPlayStopRec`) resolve
+    /// against current state in the effect.
+    pub const fn new_event(action: EventAction) -> Self {
+        ParamInfo {
+            name: action.name(),
+            data_kind: ParamType::None,
+            kind: ParamKind::Event { action },
+            visible: true,
+            active: true,
+        }
+    }
+
+    /// Declare a UI grouping anchor — no value, no aspect, just a handle
+    /// for `visible` / `active` overrides on a related cluster of entries.
+    /// The looper's `"transport"` is the only example today.
+    pub const fn new_actions_group(name: &'static str) -> Self {
+        ParamInfo {
+            name,
+            data_kind: ParamType::None,
+            kind: ParamKind::ActionsGroup,
+            visible: true,
+            active: true,
         }
     }
 
@@ -231,21 +327,34 @@ impl ParamInfo {
 
     /// Lock the max at construction time (sizes a buffer, etc.). Override
     /// attempts to grow past the construction-time max are rejected by the
-    /// resolver — master surfaces a reload-required event. Valid on
-    /// `ParamMeta` and `Setting` (both can drive buffer sizing); panics on
-    /// `BoundMeta` (envelopes don't have a buffer to protect).
+    /// resolver — master surfaces a reload-required event. Only valid on
+    /// `ParamMeta`; panics on the other kinds (no value-shape, or no buffer
+    /// to protect).
     pub const fn with_non_growable(self) -> Self {
         match self.kind {
-            ParamKind::ParamMeta { .. } => Self {
-                kind: ParamKind::ParamMeta { max_growable_at_runtime: false },
-                ..self
-            },
-            ParamKind::Setting { aspect, .. } => Self {
-                kind: ParamKind::Setting { aspect, max_growable_at_runtime: false },
+            ParamKind::ParamMeta { read_only, .. } => Self {
+                kind: ParamKind::ParamMeta { max_growable_at_runtime: false, read_only },
                 ..self
             },
             ParamKind::BoundMeta { .. } =>
                 panic!("with_non_growable: not valid for BoundMeta entries"),
+            ParamKind::Event { .. } =>
+                panic!("with_non_growable: not valid for Event entries"),
+            ParamKind::ActionsGroup =>
+                panic!("with_non_growable: not valid for ActionsGroup entries"),
+        }
+    }
+
+    /// Mark this ParamMeta as effect-driven (read-only from the user's POV).
+    /// `set_param` should reject writes; the effect emits `LiveParam` updates
+    /// for the value. UI renders a display widget instead of a knob.
+    pub const fn with_read_only(self) -> Self {
+        match self.kind {
+            ParamKind::ParamMeta { max_growable_at_runtime, .. } => Self {
+                kind: ParamKind::ParamMeta { max_growable_at_runtime, read_only: true },
+                ..self
+            },
+            _ => panic!("with_read_only: only valid for ParamMeta entries"),
         }
     }
 
@@ -254,6 +363,15 @@ impl ParamInfo {
     #[allow(dead_code)]
     pub const fn with_hidden(self) -> Self {
         Self { visible: false, ..self }
+    }
+
+    /// Declare this entry as inactive by default. UI hides it everywhere
+    /// (tile, override popup) until an override flips `active` back on.
+    /// Used to ship a wide menu of optional controls (e.g. all transport
+    /// variants for the looper) with sensible defaults visible.
+    #[allow(dead_code)]
+    pub const fn with_inactive(self) -> Self {
+        Self { active: false, ..self }
     }
 
     /// Tag this entry as the editable envelope for an aspect of the
@@ -265,18 +383,6 @@ impl ParamInfo {
     pub const fn with_kind_bound_meta(self, aspect: MetaAspect) -> Self {
         Self {
             kind: ParamKind::BoundMeta { aspect },
-            ..self
-        }
-    }
-
-    /// Tag this entry as a standalone setting (no targeted `ParamMeta`).
-    /// Appears in the override editor as a single editable field; the value
-    /// lives in the entry's `default`. `aspect` is purely descriptive — drives
-    /// the label ("Max duration") and the wire path (`<key>.<name>.<aspect>`).
-    /// Combine with `with_non_growable()` for buffer-affecting caps.
-    pub const fn with_kind_setting(self, aspect: MetaAspect) -> Self {
-        Self {
-            kind: ParamKind::Setting { aspect, max_growable_at_runtime: true },
             ..self
         }
     }
@@ -337,7 +443,7 @@ impl ParamInfo {
             ParamType::ContinuousInt   { default, .. } => ParamValue::Int(*default),
             ParamType::DiscreteFloat   { default, .. } => ParamValue::Float(*default),
             ParamType::DiscreteBool    { default, .. } => ParamValue::Bool(*default),
-            ParamType::Event { .. } => panic!("{}: Event has no value", self.name),
+            ParamType::None => panic!("{}: Event entry has no value", self.name),
         }
     }
 }
@@ -443,6 +549,7 @@ impl MetaTarget {
             MetaAspect::Step    => "step",
             MetaAspect::Log     => "log",
             MetaAspect::Visible => "visible",
+            MetaAspect::Active  => "active",
         }
     }
 
@@ -457,6 +564,7 @@ impl MetaTarget {
             "step"    => MetaAspect::Step,
             "log"     => MetaAspect::Log,
             "visible" => MetaAspect::Visible,
+            "active"  => MetaAspect::Active,
             other     => return Err(format!("unknown aspect '{other}' in '{s}'")),
         };
         Ok(MetaTarget { param: param.to_string(), aspect })
@@ -482,6 +590,7 @@ impl<'de> serde::Deserialize<'de> for MetaTarget {
             "step"    => MetaAspect::Step,
             "log"     => MetaAspect::Log,
             "visible" => MetaAspect::Visible,
+            "active"  => MetaAspect::Active,
             other     => return Err(D::Error::custom(format!("unknown aspect '{other}' in '{s}'"))),
         };
         Ok(MetaTarget { param: param.to_string(), aspect })
@@ -555,13 +664,34 @@ pub fn apply_override(
         return false;
     }
 
-    // Settings are standalone — name + aspect identifies one uniquely. Try
-    // those first; if no match, fall through to the ParamMeta meta-override path.
+    // ActionsGroup is a UI-only marker — no value, no aspect. Only the
+    // top-level `visible` / `active` flags apply; anything else is nonsense.
+    // Handle here so the ParamMeta lookup below doesn't fall through with
+    // an "unknown param" warning.
     if let Some(idx) = resolved.iter().position(|i|
-        i.name == target.param && matches!(i.kind,
-            ParamKind::Setting { aspect, .. } if aspect == target.aspect))
+        i.name == target.param && matches!(i.kind, ParamKind::ActionsGroup))
     {
-        return apply_setting_override(resolved, clamp_ref, idx, value);
+        let Ok(v) = value.try_bool() else {
+            warn!("override {}.{:?}: expected bool", target.param, target.aspect);
+            return false;
+        };
+        match target.aspect {
+            MetaAspect::Visible => {
+                let changed = resolved[idx].visible != v;
+                resolved[idx].visible = v;
+                return changed;
+            },
+            MetaAspect::Active => {
+                let changed = resolved[idx].active != v;
+                resolved[idx].active = v;
+                return changed;
+            },
+            _ => {
+                warn!("override {}.{:?}: aspect not valid on ActionsGroup",
+                      target.param, target.aspect);
+                return false;
+            },
+        }
     }
 
     let Some(idx) = resolved.iter().position(|i| {
@@ -571,9 +701,8 @@ pub fn apply_override(
         return false;
     };
 
-    // Visible lives at the top of `ParamInfo`, independent of `data_kind`.
-    // No clamping (it's a bool flag); strict bool input — numbers don't
-    // silently flip visibility on or off.
+    // Visible / Active live at the top of `ParamInfo`, independent of
+    // `data_kind`. No clamping (bool flags); strict bool input.
     if matches!(target.aspect, MetaAspect::Visible) {
         let Ok(v) = value.try_bool() else {
             warn!("override {}.visible: expected bool", target.param);
@@ -581,6 +710,15 @@ pub fn apply_override(
         };
         let changed = resolved[idx].visible != v;
         resolved[idx].visible = v;
+        return changed;
+    }
+    if matches!(target.aspect, MetaAspect::Active) {
+        let Ok(v) = value.try_bool() else {
+            warn!("override {}.active: expected bool", target.param);
+            return false;
+        };
+        let changed = resolved[idx].active != v;
+        resolved[idx].active = v;
         return changed;
     }
 
@@ -636,7 +774,8 @@ pub fn apply_override(
                           target.param, target.aspect);
                     false
                 },
-                MetaAspect::Visible => unreachable!("Visible aspect handled at top level"),
+                MetaAspect::Visible | MetaAspect::Active =>
+                    unreachable!("Visible/Active handled at top level"),
             };
             // Invariant: log scale requires strictly-positive bounds.
             if *log && (*min <= 0.0 || *max <= 0.0) {
@@ -767,64 +906,6 @@ pub fn apply_override(
     changed
 }
 
-/// Apply a standalone `Setting` override — clamp `value` to the entry's own
-/// `[min, max]` and write to its `default` field. Returns `true` if changed.
-///
-/// `clamp_ref` provides the canonical envelope for the clamp; if its kind at
-/// `idx` isn't `Setting`, we fall back to `resolved`'s own bounds.
-fn apply_setting_override(
-    resolved:  &mut [ParamInfo],
-    clamp_ref: &[ParamInfo],
-    idx:       usize,
-    value:     &ParamValue,
-) -> bool {
-    match (&mut resolved[idx].data_kind, &clamp_ref[idx].data_kind) {
-        (
-            ParamType::ContinuousFloat { min, max, default, round_multiplier, .. },
-            ParamType::ContinuousFloat { min: cmin, max: cmax, .. },
-        ) => {
-            let Ok(v_in) = value.try_float() else {
-                warn!("setting {}: expected float", resolved[idx].name);
-                return false;
-            };
-            let v = v_in.clamp(*cmin, *cmax);
-            if v != v_in {
-                warn!("setting {}: value {v_in} out of [{cmin}, {cmax}], clamped to {v}",
-                      resolved[idx].name);
-            }
-            if v == *default { return false; }
-            *default = v;
-            // `min` / `max` are the envelope and don't shift; round_multiplier
-            // depends only on the envelope, so recompute is unnecessary, but
-            // harmless and keeps the field consistent.
-            *round_multiplier = auto_multiplier(*min, *max);
-            true
-        },
-        (
-            ParamType::ContinuousInt { default, .. },
-            ParamType::ContinuousInt { min: cmin, max: cmax, .. },
-        ) => {
-            let Ok(v_in) = value.try_int() else {
-                warn!("setting {}: expected int", resolved[idx].name);
-                return false;
-            };
-            let v = v_in.clamp(*cmin, *cmax);
-            if v != v_in {
-                warn!("setting {}: value {v_in} out of [{cmin}, {cmax}], clamped to {v}",
-                      resolved[idx].name);
-            }
-            if v == *default { return false; }
-            *default = v;
-            true
-        },
-        (a, b) => {
-            warn!("setting {}: unsupported type ({a:?} vs {b:?})", resolved[idx].name);
-            false
-        },
-    }
-}
-
-
 // ---------------------------------------------------------------------------
 // Parameterized trait
 // ---------------------------------------------------------------------------
@@ -905,9 +986,18 @@ pub trait Device: Parameterized + Send + Sync {
     /// Nodes that want to emit events (e.g. Looper) store the bus here.
     fn init_bus(&mut self, _bus: &crate::control::EventBus) {}
 
-    /// Dispatch a named action string (e.g. "rec", "play", "rec-play-stop-rec").
-    /// Only meaningful for nodes that have an action-based interface (e.g. Looper).
-    fn set_action(&mut self, param: &str, action: &str) -> Result<(), String> {
+    /// Re-fire all current live state on the bus (LiveParam values + state
+    /// tag). Triggered when a new client connects so it can catch up without
+    /// waiting for the next state transition. Default no-op for effects with
+    /// no published live state.
+    fn republish_state(&self) {}
+
+    /// Dispatch a typed action verb. Effects with an action-based interface
+    /// (looper transport, delay tap, reverb freeze) match on the `EventAction`
+    /// variant exhaustively — typos can't reach here (wire layer parses the
+    /// string into the enum). `param` selects which Event entry on the effect
+    /// the action targets (most effects have just one, named "action").
+    fn set_action(&mut self, param: &str, action: EventAction) -> Result<(), String> {
         let _ = (param, action);
         Err(format!("unknown action '{param}'"))
     }
@@ -919,6 +1009,15 @@ pub trait Device: Parameterized + Send + Sync {
 
 pub fn find_param_info<'a>(params_info: &'a [ParamInfo], name: &str) -> &'a ParamInfo {
     params_info.iter().find(|i| i.name == name).unwrap() // unwrap is cool here, since param_info is hard-coded.
+}
+
+/// Find a `ParamMeta` entry by name. Disambiguates when the canonical has
+/// multiple entries sharing the same `name` (e.g. a read-only ParamMeta
+/// alongside a `BoundMeta` declaring its override envelope).
+pub fn find_param_meta<'a>(params_info: &'a [ParamInfo], name: &str) -> &'a ParamInfo {
+    params_info.iter()
+        .find(|i| i.name == name && matches!(i.kind, ParamKind::ParamMeta { .. }))
+        .unwrap_or_else(|| panic!("ParamMeta entry '{name}' not found"))
 }
 
 /// `BoundMeta`-declared envelope for `(param, aspect)` as `(min, max)`.
@@ -959,20 +1058,12 @@ pub fn bound_meta_int(slice: &[ParamInfo], param: &str, aspect: MetaAspect) -> O
 /// Used by the Type-overrides sanitiser to re-extract clamped values out of
 /// `resolved` after `apply_override` has run.
 pub fn aspect_value(info: &ParamInfo, aspect: MetaAspect) -> Option<ParamValue> {
-    // Setting: the configured value always lives in `default`, regardless of
-    // the `aspect` tag (which is purely descriptive). The Setting only
-    // responds to its own declared aspect.
-    if let ParamKind::Setting { aspect: a, .. } = info.kind {
-        if a != aspect { return None; }
-        return match &info.data_kind {
-            ParamType::ContinuousFloat { default, .. } => Some((*default).into()),
-            ParamType::ContinuousInt   { default, .. } => Some((*default).into()),
-            _ => None,
-        };
-    }
     // ParamMeta / BoundMeta: aspect maps directly to the corresponding field.
     if matches!(aspect, MetaAspect::Visible) {
         return Some(ParamValue::Bool(info.visible));
+    }
+    if matches!(aspect, MetaAspect::Active) {
+        return Some(ParamValue::Bool(info.active));
     }
     match (&info.data_kind, aspect) {
         (ParamType::ContinuousFloat { min,     .. }, MetaAspect::Min)     => Some((*min)    .into()),
@@ -1033,20 +1124,26 @@ pub const fn validate_canonical(arr: &[ParamInfo]) {
                     panic!("BoundMeta has no matching ParamMeta target by name");
                 }
             },
-            ParamKind::Setting { aspect, .. } => {
-                // Aspect is descriptive — same constraint as BoundMeta. No
-                // target ParamMeta required. Type must be numeric (default
-                // stores the configured value).
-                match aspect {
-                    MetaAspect::Min | MetaAspect::Max => {},
-                    _ => panic!("Setting aspect must be Min or Max"),
-                }
+            ParamKind::ParamMeta { .. } => {},
+            ParamKind::Event { .. } => {
+                // Event entries must have `data_kind = None` — they don't
+                // carry a value. The canonical constructor `new_event`
+                // enforces this; this check catches manual struct-literal
+                // construction (which shouldn't happen but isn't impossible).
                 match arr[i].data_kind {
-                    ParamType::ContinuousFloat { .. } | ParamType::ContinuousInt { .. } => {},
-                    _ => panic!("Setting must be ContinuousFloat or ContinuousInt"),
+                    ParamType::None => {},
+                    _ => panic!("Event entries must have data_kind = None"),
                 }
             },
-            ParamKind::ParamMeta { .. } => {},
+            ParamKind::ActionsGroup => {
+                // Same as Event: no value-shape, no aspect. The canonical
+                // constructor `new_actions_group` enforces None data_kind;
+                // this check catches manual struct-literal construction.
+                match arr[i].data_kind {
+                    ParamType::None => {},
+                    _ => panic!("ActionsGroup entries must have data_kind = None"),
+                }
+            },
         }
         i += 1;
     }

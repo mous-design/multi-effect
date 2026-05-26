@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { ParamInfo, TypeOverrides } from '../types';
 import { fetchCanonical, fetchTypeOverrides, saveTypeOverrides } from '../api';
 import { Popup } from './Popup';
-import { ParamRow, boundFor } from './ParamAspectsRow';
+import { ParamRow, ActionsTable, boundFor } from './ParamAspectsRow';
 import { t } from '../i18n';
 
 interface Props {
@@ -86,7 +86,8 @@ export function TypeOverridesPopup({ onClose }: Props) {
 
     const types = Object.keys(canonical).sort();
     const params = (canonical[selectedType] ?? []).filter(i =>
-        i.kind?.tag === 'ParamMeta' || i.kind?.tag === 'Setting');
+        i.kind?.tag === 'ParamMeta' || i.kind?.tag === 'Event'
+        || i.kind?.tag === 'ActionsGroup');
 
     return createPortal(
         <>
@@ -108,12 +109,21 @@ export function TypeOverridesPopup({ onClose }: Props) {
                     </div>
                     {selectedType && (
                         <div className="tile-settings">
-                            {params.map(info => (
-                                <ParamRow key={info.name} info={info}
+                            {params.filter(i => i.kind?.tag !== 'Event').map(info => (
+                                <ParamRow key={info.name} info={info} scope="type"
                                     effective={(aspect, fallback) => effective(selectedType, info.name, aspect, fallback)}
                                     bound={aspect => boundFor(canonical[selectedType], info.name, aspect)}
                                     onChange={(aspect, v) => setAspect(selectedType, info.name, aspect, v)} />
                             ))}
+                            {params.some(i => i.kind?.tag === 'Event') && (
+                                <>
+                                    <div className="param-settings-section">{t('ui.actions')}</div>
+                                    <ActionsTable
+                                        events={params.filter(i => i.kind?.tag === 'Event')}
+                                        effective={(name, aspect, fb) => effective(selectedType, name, aspect, fb)}
+                                        onChange={(name, aspect, v) => setAspect(selectedType, name, aspect, v)} />
+                                </>
+                            )}
                         </div>
                     )}
                 </div>

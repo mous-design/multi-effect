@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, watch};
 
 use super::mapping::{ControllerDef, DeviceDef};
 use crate::engine::patch::ChainDef;
-use crate::engine::device::{MetaAspect, MetaTarget, ParamValue};
+use crate::engine::device::{EventAction, MetaAspect, MetaTarget, ParamValue};
 use crate::config::master::{ConfigRequest, snd_request};
 use crate::config::{ConfigPatch, ToWire};
 use super::{connection_id, ControlMessage, EventBus};
@@ -46,6 +46,11 @@ where
             return Ok(()); // peer disconnected before initial snapshot
         }
     }
+
+    // Ask the audio thread to re-fire every effect's current live state
+    // (LiveParam values, state tags). The new client picks them up via the
+    // bus subscription above; existing clients see a no-op refresh.
+    let _ = snd_request(&master_tx, |tx| ConfigRequest::RepublishLiveState { resp: Some(tx) }).await;
 
     // Outbound: sole owner of the writer.
     // Selects over bus events and ack responses from inbound.
@@ -92,8 +97,16 @@ where
                                 MetaAspect::Step    => "step",
                                 MetaAspect::Log     => "log",
                                 MetaAspect::Visible => "visible",
+                                MetaAspect::Active  => "active",
                             };
                             format!("PARAM {path}.{}.{aspect} {v}\n", target.param)
+                        },
+                        ControlMessage::LiveParam { path, value } => {
+                            // Effect-published live state. Distinct verb so
+                            // the UI updates `node[param]` without marking
+                            // the preset dirty (PARAM is for user-initiated
+                            // changes; LIVE is for effect-emitted state).
+                            format!("LIVE {path} {value}\n")
                         },
                         ControlMessage::Reset { .. } => "RESET\n".to_string(),
                         ControlMessage::PresetLoaded { ref preset, .. } => {
@@ -207,12 +220,9 @@ async fn handle_command(
             "OK\n".into()
         },
         "SET" => {
-            // One verb, three dispatches, discriminated by path arity:
-            //   1 dot  →  value or action  (`SET 04-chorus.wet 0.5`,
-            //                               `SET 01-looper.action rec`).
-            //   2 dots →  meta override    (`SET 04-chorus.depth_ms.max 20`).
-            // UI sends the right variant based on the param's declared type
-            // (from `params_info`); CTRL paths arrive pre-wrapped at master.
+            // One verb, two dispatches, discriminated by path arity:
+            //   1 dot  →  value SET            (`SET 04-chorus.wet 0.5`)
+            //   2 dots →  meta override         (`SET 04-chorus.depth_ms.max 20`)
             let (path, val_str) = rest
                 .split_once(' ')
                 .context("usage: SET <key>.<param>[.<aspect>] <value>")?;
@@ -245,27 +255,37 @@ async fn handle_command(
                     format!("STATE {}\n", state.label())
                 },
                 1 => {
-                    // Value or action.
                     let value =
-                        if let Ok(b) = val_str.parse::<bool>() { Some(ParamValue::Bool(b)) }
-                        else if let Ok(i) = val_str.parse::<i32>() { Some(ParamValue::Int(i)) }
-                        else if let Ok(f) = val_str.parse::<f32>() { Some(ParamValue::Float(f)) }
-                        else { None };
-                    if let Some(value) = value {
-                        let state = snd_request(master_tx, |tx| ConfigRequest::ApplySet {
-                             path: path.to_string(), value, source, resp: Some(tx)
-                        }).await?;
-                        format!("STATE {}\n", state.label())
-                    } else {
-                        // Non-parseable → action dispatch (e.g. "SET 01-looper.action rec").
-                        snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
-                            path: path.to_string(), action: val_str.to_string(), source, resp: Some(tx)
-                        }).await?;
-                        "OK\n".into()
-                    }
+                        if let Ok(b) = val_str.parse::<bool>() { ParamValue::Bool(b) }
+                        else if let Ok(i) = val_str.parse::<i32>() { ParamValue::Int(i) }
+                        else if let Ok(f) = val_str.parse::<f32>() { ParamValue::Float(f) }
+                        else {
+                            anyhow::bail!("SET value must parse as bool/int/float");
+                        };
+                    let state = snd_request(master_tx, |tx| ConfigRequest::ApplySet {
+                         path: path.to_string(), value, source, resp: Some(tx)
+                    }).await?;
+                    format!("STATE {}\n", state.label())
                 },
                 _ => bail!("usage: SET <key>.<param>[.<aspect>] <value>"),
             }
+        },
+        "ACT" => {
+            // Fire an action (one-shot event) on a specific param. Wire path:
+            //   ACT <key>.<param> <action-verb>
+            // e.g. `ACT 01-looper.action rec`. Action verbs are parsed into
+            // the `EventAction` enum at the wire boundary — typos become wire
+            // errors, not silent no-ops downstream.
+            let (path, action_str) = rest
+                .split_once(' ')
+                .context("usage: ACT <key>.<param> <action>")?;
+            let action_str = action_str.trim();
+            let action: EventAction = serde_json::from_value(serde_json::Value::String(action_str.to_string()))
+                .map_err(|_| anyhow::anyhow!("unknown action '{action_str}'"))?;
+            snd_request(master_tx, |tx| ConfigRequest::ApplyAction {
+                path: path.to_string(), action, source, resp: Some(tx),
+            }).await?;
+            "OK\n".into()
         },
         "CHAINS" => {
             let chains: Vec<ChainDef> = serde_json::from_str(rest)?;

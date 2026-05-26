@@ -128,6 +128,61 @@
     &:last-child { border-bottom: none; }
 }
 
+// Section header within an override popup ("Actions" before the grid).
+.param-settings-section {
+    margin-top: $gap;
+    padding-top: $gap-sm;
+    border-top: 1px solid var(--border-muted, rgba(0,0,0,0.08));
+    font-size: $font-sm;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+// Multi-column layout for Event rows. Outer wrapper lays N mini-tables side
+// by side; each mini-table has its own `active | visible` subheader, then
+// a row per Event entry. Big "Actions" section header is once, in the caller.
+.param-settings-actions-cols {
+    display: grid;
+    gap: $gap;
+    // `grid-template-columns` set inline (column count varies with content).
+
+    > .param-settings-actions:not(:first-child) {
+        padding-left: $gap;
+        border-left: 1px solid var(--border-muted, rgba(0,0,0,0.12));
+    }
+}
+
+.param-settings-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.param-settings-actions-row {
+    display: grid;
+    grid-template-columns: 1fr 36px;
+    align-items: center;
+    gap: $gap-sm;
+    padding: $gap-xs 0;
+
+    input[type="checkbox"] { justify-self: center; }
+}
+
+.param-settings-actions-header {
+    font-size: $font-sm;
+    color: var(--text-muted);
+    text-transform: lowercase;
+    border-bottom: 1px solid var(--border-muted, rgba(0,0,0,0.08));
+
+    > span { text-align: center; }
+}
+
+.param-settings-actions-icon {
+    font-weight: 500;
+}
+
 .param-settings-name {
     flex: 0 0 auto;
     min-width: 80px;

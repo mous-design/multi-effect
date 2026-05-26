@@ -90,6 +90,14 @@ impl ConfigSnapshot {
                 else {
                     bail!("SET {param_path}: unknown param");
                 };
+                // Read-only ParamMetas are effect-driven (looper's
+                // duration / buffer_cnt). The effect publishes via LiveParam;
+                // user-level SET is rejected so stale values can't leak into
+                // the persisted snapshot.
+                if matches!(info.kind, ParamKind::ParamMeta { read_only: true, .. }) {
+                    tracing::warn!("SET {param_path}: read-only param — ignored");
+                    return Ok(None);
+                }
                 let Some(value) = validate_set(info, value, param_path) else {
                     return Ok(None); // type mismatch warned, no change
                 };
@@ -271,8 +279,8 @@ fn validate_set(info: &ParamInfo, value: ParamValue, path: &str) -> Option<Param
                 None
             },
         },
-        ParamType::Event { .. } => {
-            tracing::warn!("SET {path}: Event endpoint takes actions, not values — ignored");
+        ParamType::None => {
+            tracing::warn!("SET {path}: non-value endpoint (e.g. Event button-cluster) — ignored");
             None
         },
     }

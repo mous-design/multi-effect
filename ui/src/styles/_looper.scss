@@ -17,7 +17,10 @@
     right: $gap-sm;
 }
 
-.looper-buttons {
+// One row of transport cells (buttons + timer). The looper's transport panel
+// splits its active+visible cells into two equal rows; each row uses this
+// class so cells sit side-by-side at the same height.
+.looper-row {
     display: flex;
     gap: 6px;
 }
@@ -81,15 +84,13 @@
     }
 }
 
-.looper-bottom-row {
+// Timer cell — sized to match a `.looper-btn` so it fits the row grid.
+.looper-time {
     display: flex;
     align-items: center;
-    gap: 6px;
-}
-
-.looper-time {
-    min-width: 54px;
-    text-align: center;
+    justify-content: center;
+    width: 54px;
+    padding: 7px 0;
     font-size: 16px;
     font-family: monospace;
     font-weight: 600;
@@ -125,8 +126,15 @@
 
 .looper-undo-count {
     position: absolute;
-    top: 3px;
-    right: $gap-sm;
-    font-size: 0.64em;
+    top: 2px;
+    right: 2px;
+    font-size: 0.6em;
     line-height: 1;
+    color: var(--accent);
+}
+
+// When the layer stack is at the configured cap, the next overdub will
+// merge the two oldest layers. Turn the count red as a warning.
+.looper-btn-at-merge .looper-undo-count {
+    color: var(--red, #e05);
 }

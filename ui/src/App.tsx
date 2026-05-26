@@ -17,20 +17,24 @@ import { splitN } from './api';
 import type { ParamInfo } from './types';
 
 /// Optimistic patch of one `ParamInfo` after a 3-segment meta override.
-/// `ParamMeta` writes the value to `info[aspect]`. `Setting`'s configured
-/// value lives in `info.default` (the aspect tag is just the descriptor),
-/// so when name + aspect match the Setting, write to `default`. Everything
-/// else passes through. The `as ParamInfo` cast bypasses TS's struggle to
-/// narrow the discriminated union through a computed-property spread; at
-/// runtime the shape is valid by construction (server only sends 3-segment
-/// PARAMs for aspects that legitimately exist on the target entry).
+/// `active` / `visible` are top-level on every kind. `ParamMeta` writes
+/// other aspects directly to `info[aspect]`. Event / BoundMeta / ActionsGroup
+/// entries with non-{active,visible} aspects pass through unchanged. The
+/// `as ParamInfo` cast bypasses TS's struggle to narrow the discriminated
+/// union through a computed-property spread; at runtime the shape is valid
+/// by construction (server only sends 3-segment PARAMs for aspects that
+/// legitimately exist on the target entry).
 function patchMetaAspect(
     info: ParamInfo, param: string, aspect: string, value: number | string | boolean,
 ): ParamInfo {
     if (info.name !== param) return info;
+    // `active` and `visible` are top-level on every ParamInfo regardless of
+    // kind — apply directly. Without this, Event / ActionsGroup entries
+    // don't optimistically update on toggle (originator's broadcast is
+    // filtered).
+    if ((aspect === 'active' || aspect === 'visible') && typeof value === 'boolean')
+        return { ...info, [aspect]: value } as ParamInfo;
     if (info.kind?.tag === 'ParamMeta') return { ...info, [aspect]: value } as ParamInfo;
-    if (info.kind?.tag === 'Setting' && info.kind.aspect === aspect)
-        return { ...info, default: value } as ParamInfo;
     return info;
 }
 
@@ -133,6 +137,32 @@ export default function App() {
                 }
                 break;
             }
+            case 'LIVE': {
+                // Effect-published live state (looper pos/duration/buffer_cnt,
+                // future effects' meters/scopes). Same shape as PARAM but does
+                // NOT mark the preset dirty — live state is ephemeral, not a
+                // user mutation.
+                const [path, valueStr] = splitN(params, ' ', 2);
+                const segs = path.split('.');
+                if (segs.length !== 2) break;
+                const [nodeKey, param] = segs;
+                let value: number | string | boolean;
+                if      (valueStr === 'true')  value = true;
+                else if (valueStr === 'false') value = false;
+                else {
+                    const num = Number(valueStr);
+                    value = isFinite(num) ? num : valueStr;
+                }
+                setState(prev => prev && {
+                    ...prev, chains: prev.chains.map(chain => ({
+                        ...chain,
+                        nodes: chain.nodes.map(node =>
+                            node.key === nodeKey ? {...node, [param]: value} : node
+                        ),
+                    }))
+                });
+                break;
+            }
             case 'SNAPSHOT':
                 applySnapshot(JSON.parse(params));
                 break;
@@ -156,36 +186,27 @@ export default function App() {
             }
             case 'EVENT':
                 const [key, event, json] = splitN(params, ' ', 3);
-                if (event === 'looper_state') {
-                    const data = JSON.parse(json);
-                    const { state: ls, duration_secs, pos_ms, buffer_cnt } = data;
-                    // `duration` and `buffer_cnt` are read-only ParamMeta values;
-                    // bridging them onto the node lets the generic param-display
-                    // path render them.
-                    setState(prev => {
-                        if (!prev) return prev;
-                        return {
-                            ...prev, chains: prev.chains.map(chain => ({
-                                ...chain,
-                                nodes: chain.nodes.map(node =>
-                                    node.key === key
-                                        ? { ...node, state: ls, duration: duration_secs, pos_secs: pos_ms / 1000, buffer_cnt }
-                                        : node
-                                ),
-                            }))
-                        };
+                if (event === 'state') {
+                    // Abstract state tag broadcast (e.g. `looper-recording`).
+                    // Stored on the node as `node.state_tag`; widgets match on it
+                    // for state-driven styling.
+                    const { tag } = JSON.parse(json);
+                    setState(prev => prev && {
+                        ...prev, chains: prev.chains.map(chain => ({
+                            ...chain,
+                            nodes: chain.nodes.map(node =>
+                                node.key === key ? { ...node, state_tag: tag } : node
+                            ),
+                        }))
                     });
                 } else if (event === 'loop_wrap') {
-                    setState(prev => {
-                        if (!prev) return prev;
-                        return {
-                            ...prev, chains: prev.chains.map(chain => ({
-                                ...chain,
-                                nodes: chain.nodes.map(node =>
-                                    node.key === key ? { ...node, pos_secs: 0, _wrap_ts: Date.now() } : node
-                                ),
-                            }))
-                        };
+                    setState(prev => prev && {
+                        ...prev, chains: prev.chains.map(chain => ({
+                            ...chain,
+                            nodes: chain.nodes.map(node =>
+                                node.key === key ? { ...node, pos_secs: 0, _wrap_ts: Date.now() } : node
+                            ),
+                        }))
                     });
                 }
                 break;
@@ -274,10 +295,16 @@ export default function App() {
         sendSet(path, value);
     };
 
-    // Meta-override (3-segment SET) — bound / visibility edit on a single
-    // param. Optimistic update of `params_info[i]` on the addressed node;
-    // the server's PARAM broadcast goes to other clients only.
-    const handleMetaSet = (nodeKey: string, param: string, aspect: string, value: number | boolean) => {
+    // Meta-override (3-segment SET) — bound / visibility / active edit on a
+    // single param. Optimistic update of `params_info[i]` on the addressed
+    // node; the originator's source-filter drops master's echoed PARAM, so
+    // the local update is the *only* way this client learns the new state
+    // until next snapshot. Returns the wire result so callers that need to
+    // surface `confirm_required` (bound-growth) can react.
+    const handleMetaSet = async (
+        nodeKey: string, param: string, aspect: string,
+        value: number | boolean, confirmed?: boolean,
+    ): Promise<{ ok: boolean; confirmRequired: boolean }> => {
         setState(prev => prev && {
             ...prev, chains: prev.chains.map(chain => ({
                 ...chain,
@@ -288,7 +315,7 @@ export default function App() {
                 ),
             }))
         });
-        sendParamMeta(nodeKey, param, aspect, value);
+        return sendParamMeta(nodeKey, param, aspect, value, confirmed);
     };
 
     const handleDelete = (nodeKey: string) => {

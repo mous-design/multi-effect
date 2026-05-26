@@ -1,10 +1,16 @@
 const en: Record<string, string> = {
-    // ── Looper actions ────────────────────────────────────────────────────────
-    'looper.rec': '⏺',
-    'looper.play': '▶',
-    'looper.stop': '■',
-    'looper.reset': '↺',
-    'looper.undo': '↩ undo',
+    // ── Action button labels (canonical-driven button cluster) ───────────────
+    // Primitives — single icons. Combined verbs (e.g. `play-stop`) are
+    // auto-composed by `actionLabel` from these primitive entries, so a
+    // `play-stop` button renders as `▶■`, `rec-play-stop-rec` as `⏺▶■⏺`,
+    // etc. Adding a combined verb needs no new i18n entry. Add an explicit
+    // `action.<verb>` here only to override the auto-composition.
+    'action.rec':                '⏺',
+    'action.play':               '▶',
+    'action.pause':              '⏸',
+    'action.stop':               '■',
+    'action.reset':              '↺',
+    'action.undo':               '↩',
 
     // ── Effect types ──────────────────────────────────────────────────────────
     'type.delay': 'Delay',
@@ -38,6 +44,8 @@ const en: Record<string, string> = {
     'param.decay': 'Decay',
     'param.duration': 'Duration',
     'param.buffer_cnt': 'Buffer count',
+    'param.pos_secs': 'Position',
+    'param.transport': 'Transport',
 
     // ── UI strings ────────────────────────────────────────────────────────────
     'ui.preset': 'Preset',
@@ -63,6 +71,7 @@ const en: Record<string, string> = {
     'ui.hide_param': 'Hide',
     'ui.show_param': 'Show',
     'ui.settings': 'Settings',
+    'ui.actions':  'Actions',
     'ui.type_overrides': 'Per effect settings',
     'ui.effect_type': 'Effect',
     'ui.select_effect': 'Select',

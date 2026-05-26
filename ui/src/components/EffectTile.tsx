@@ -4,14 +4,14 @@ import { sendAction } from '../api';
 import { Knob } from './Knob';
 import { Toggle } from './Toggle';
 import { TileSettingsPopup } from './TileSettingsPopup';
-import { t } from '../i18n';
+import { t, actionLabel } from '../i18n';
 
-// Looper `transport` is a UI-only composite widget (rec/play/stop + timer +
-// seek), not a real backend param — its visibility lives only in localStorage.
-// All real params get their visibility from `info.visible` (canonical
-// `with_hidden()` or runtime `SET <key>.<param>.visible <bool>` overrides).
-const TRANSPORT_KEY = 'transport';
-const LOOPER_TRANSPORT_HIDDEN_DEFAULT = true;
+// Looper `transport` is a composite widget (rec/play/stop + timer + seek).
+// Its visibility/active state lives in `params_info` as an `ActionsGroup`
+// entry — toggled via the standard override pipeline (`SET <key>.transport.
+// visible <bool>`) so Type and Instance overrides work uniformly. The UI
+// looks up the entry by name and treats it as just another tile element.
+const TRANSPORT_NAME = 'transport';
 
 function EyeIcon() {
   return (
@@ -28,15 +28,6 @@ function EyeOffIcon() {
       <ellipse cx="6" cy="6" rx="5" ry="3.5" />
       <circle cx="6" cy="6" r="1.5" fill="currentColor" stroke="none" />
       <line x1="2" y1="2" x2="10" y2="10" />
-    </svg>
-  );
-}
-
-function PauseIcon() {
-  return (
-    <svg width="10" height="13" viewBox="0 0 10 13" fill="currentColor">
-      <rect x="0" y="0" width="3.5" height="13" rx="1"/>
-      <rect x="6.5" y="0" width="3.5" height="13" rx="1"/>
     </svg>
   );
 }
@@ -62,7 +53,7 @@ function effectiveValue(node: NodeDef, info: ParamInfo): unknown {
     case 'ContinuousInt':
     case 'DiscreteFloat':
     case 'DiscreteBool': return info.default;
-    case 'Event':        return null;
+    case 'None':         return null;
   }
 }
 
@@ -75,41 +66,38 @@ function effectiveValue(node: NodeDef, info: ParamInfo): unknown {
 function getRenderableParams(node: NodeDef): { info: ParamInfo; value: unknown }[] {
   const infos = node.params_info;
   if (!infos) return [];
+  // Skip read-only entries: their values are effect-driven and rendered by
+  // effect-specific widgets in the tile (timer for looper.duration, counter
+  // for looper.buffer_cnt). Generic knob-render would mislead.
   return infos
-    .filter(info => info.kind?.tag === 'ParamMeta')
+    .filter(info => info.kind?.tag === 'ParamMeta'
+        && info.active !== false
+        && info.kind.read_only !== true)
     .map(info => ({ info, value: effectiveValue(node, info) }));
-}
-
-// Transport-only localStorage. Real-param visibility comes from `info.visible`
-// on the wire; only the looper's UI-only `transport` widget caches its hidden
-// state here.
-function transportLsKey(preset: string, nodeKey: string) {
-  return `transport-hidden:${preset}:${nodeKey}`;
-}
-function loadTransportHidden(preset: string, nodeKey: string): boolean {
-  const stored = localStorage.getItem(transportLsKey(preset, nodeKey));
-  return stored === null ? LOOPER_TRANSPORT_HIDDEN_DEFAULT : stored === 'true';
-}
-function saveTransportHidden(preset: string, nodeKey: string, hidden: boolean) {
-  localStorage.setItem(transportLsKey(preset, nodeKey), hidden ? 'true' : 'false');
 }
 
 interface Props {
   node: NodeDef;
   presetName: string;
   onSet: (path: string, value: number | boolean) => void;
-  onMetaSet: (nodeKey: string, param: string, aspect: string, value: number | boolean) => void;
+  /// Meta-override edit: applies the optimistic local patch + fires the wire
+  /// `SET <key>.<param>.<aspect> <value>`. Returns the wire result so the
+  /// settings popup can react to `confirm_required` (bound-growth path).
+  onMetaSet: (
+    nodeKey: string, param: string, aspect: string,
+    value: number | boolean, confirmed?: boolean,
+  ) => Promise<{ ok: boolean; confirmRequired: boolean }>;
   onDelete: (key: string) => void;
 }
 
-const LOOPING = new Set(['Playing', 'Overdub']);
+const LOOPING = new Set(['looper-playing', 'looper-overdub']);
 
 function useLooperTimer(node: NodeDef): string {
-  const looperState = String(node['state'] ?? 'Idle');
+  const looperState = String(node['state_tag'] ?? 'looper-idle');
   const loopSecs    = Number(node['duration'] ?? 0);
   const posSecs     = Number(node['pos_secs']  ?? 0);
   const wrapTs      = Number(node['_wrap_ts']  ?? 0);
-  const isRunning   = looperState === 'Recording' || looperState === 'Playing' || looperState === 'Overdub';
+  const isRunning   = looperState === 'looper-recording' || looperState === 'looper-playing' || looperState === 'looper-overdub';
 
   const [displaySecs, setDisplaySecs] = useState(0);
   const syncRef      = useRef<{ time: number; pos: number }>({ time: Date.now(), pos: 0 });
@@ -127,7 +115,7 @@ function useLooperTimer(node: NodeDef): string {
 
     syncRef.current = { time: Date.now(), pos: startPos };
     if (!isRunning) {
-      setDisplaySecs(looperState === 'Idle' ? 0 : startPos);
+      setDisplaySecs(looperState === 'looper-idle' ? 0 : startPos);
       return;
     }
     const id = setInterval(() => {
@@ -139,7 +127,7 @@ function useLooperTimer(node: NodeDef): string {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [looperState, posSecs, wrapTs]);
 
-  if (looperState === 'Idle' || (looperState === 'Stop' && loopSecs === 0)) return '-.--';
+  if (looperState === 'looper-idle' || (looperState === 'looper-stop' && loopSecs === 0)) return '-.--';
   const sInt   = Math.floor(displaySecs);
   const sTenth = Math.floor((displaySecs * 10) % 10);
   return `${sInt}.${sTenth}`;
@@ -148,11 +136,9 @@ function useLooperTimer(node: NodeDef): string {
 export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [transportHidden, setTransportHidden] = useState(() => loadTransportHidden(presetName, node.key));
   const looperTime = useLooperTimer(node);
 
   useEffect(() => {
-    setTransportHidden(loadTransportHidden(presetName, node.key));
     setExpanded(false);
   }, [presetName, node.key]);
 
@@ -165,29 +151,24 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
 
   const isLooper = node.type === 'looper';
 
-  // Seek scrubber: only active when looper is in Stop state
-  const looperStateVal = isLooper ? String((node as Record<string, unknown>)['state'] ?? 'Idle') : '';
-  const [seekEditing, setSeekEditing] = useState(false);
-  const [seekInput, setSeekInput]     = useState('');
-  const seekDragRef = useRef<{ startY: number; startPos: number; moved: boolean } | null>(null);
-
-  useEffect(() => {
-    if (isLooper && looperStateVal !== 'Stop') setSeekEditing(false);
-  }, [isLooper, looperStateVal]);
+  // Transport visibility lives in params_info as an ActionsGroup entry.
+  // `active === false` removes the group entirely (declared-but-off);
+  // `visible === false` hides it from the default tile view but the
+  // expand-arrow reveals it. Mirrors how every other ParamInfo entry behaves.
+  const transportInfo    = node.params_info?.find(
+    i => i.name === TRANSPORT_NAME && i.kind?.tag === 'ActionsGroup');
+  const transportActive  = !!transportInfo && transportInfo.active !== false;
+  const transportVisible = transportInfo?.visible !== false;
+  const transportHidden  = transportActive && !transportVisible;
 
   const hiddenCount = bodyParams.filter(({ info }) => !info.visible).length
-                    + (isLooper && transportHidden ? 1 : 0);
+                    + (transportHidden ? 1 : 0);
 
-  // Eye toggle. Real params: round-trip via `onMetaSet` (optimistic
-  // `info.visible` update in App state, wire `SET <key>.<param>.visible`).
-  // Transport: UI-only widget, localStorage cache.
+  // Eye toggle — round-trips via `onMetaSet` (optimistic `info.visible`
+  // update in App state, wire `SET <key>.<param>.visible`). Transport is
+  // now just another `params_info` entry, so no special-case path.
   function setVisible(param: string, visible: boolean) {
-    if (param === TRANSPORT_KEY) {
-      setTransportHidden(!visible);
-      saveTransportHidden(presetName, node.key, !visible);
-    } else {
-      onMetaSet(node.key, param, 'visible', visible);
-    }
+    onMetaSet(node.key, param, 'visible', visible);
   }
 
   function renderControl(info: ParamInfo, val: unknown): React.ReactNode {
@@ -217,7 +198,8 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
   return (
     <div className={`tile${active ? '' : ' inactive'}${expanded ? ' expanded' : ''}`}>
       {showSettings && (
-        <TileSettingsPopup node={node} onClose={() => setShowSettings(false)} />
+        <TileSettingsPopup node={node} onMetaSet={onMetaSet}
+          onClose={() => setShowSettings(false)} />
       )}
       <div className="tile-header">
         {activeEntry
@@ -229,136 +211,194 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
       </div>
       <div className="tile-body">
         <div className="tile-params">
-          {isLooper && (expanded || !transportHidden) && (() => {
+          {isLooper && transportActive && (expanded || transportVisible) && (() => {
             const nd          = node as Record<string, unknown>;
-            const looperState = String(nd['state'] ?? 'Idle');
-            // `buffer_cnt` is the live count (1 = base only, N = base + N-1
-            // completed overdubs), driven by the looper_state event into
-            // node.buffer_cnt. The cap lives in the `Setting` of the same
-            // name — its `default` is the configured cap (Type-resolved).
+            const looperState = String(nd['state_tag'] ?? 'looper-idle');
             const bufferCnt   = Number(nd['buffer_cnt'] ?? 0);
+            // The buffer-cap is the read-only ParamMeta's `max` (live cap
+            // resolved from canonical + Type/Instance overrides).
             const bufInfo     = node.params_info?.find(
-                i => i.name === 'buffer_cnt' && i.kind?.tag === 'Setting');
-            const maxBufs     = bufInfo && bufInfo.type === 'ContinuousInt' ? bufInfo.default : 0;
-            const isIdle      = looperState === 'Idle';
-            const isRecording = looperState === 'Recording';
-            const isPlaying   = looperState === 'Playing';
-            const isOverdub   = looperState === 'Overdub';
-            // During Overdub, a layer is being recorded but not yet counted — show +1
+                i => i.name === 'buffer_cnt' && i.kind?.tag === 'ParamMeta');
+            const maxBufs     = bufInfo && bufInfo.type === 'ContinuousInt' ? bufInfo.max : 0;
+            const isIdle      = looperState === 'looper-idle';
+            const isOverdub   = looperState === 'looper-overdub';
             const displayCnt  = isOverdub ? bufferCnt + 1 : bufferCnt;
             const atMerge     = maxBufs > 0 && displayCnt >= maxBufs;
-            const canUndo     = isRecording || isOverdub || bufferCnt > 1;
-            const isStop      = looperState === 'Stop';
-            const loopSecs    = Number(nd['duration'] ?? 0);
-            const posSecs     = Number(nd['pos_secs']  ?? 0);
 
-            const recActive   = isRecording || isOverdub;
-            const recClass    = `looper-btn${isRecording ? ' looper-btn-rec' : isOverdub ? ' looper-btn-overdub' : ''}`;
-            const recTitle    = isRecording ? 'Pause recording' : isOverdub ? 'Pause overdub' : isIdle ? 'Start recording' : 'Record overdub';
+            // Looper-specific styling — match on (action, state_tag). Other
+            // effects' Event clusters would have their own table.
+            const buttonClass = (action: string) => {
+              if (action === 'rec' && (looperState === 'looper-recording' || isOverdub))
+                return 'looper-btn looper-btn-rec';
+              if (action === 'play' && looperState === 'looper-playing')
+                return 'looper-btn looper-btn-play';
+              return 'looper-btn';
+            };
+            const posSecs = Number(nd['pos_secs'] ?? 0);
 
-            const playClass   = `looper-btn${isPlaying ? ' looper-btn-play' : ''}`;
-            const playTitle   = isPlaying ? 'Pause playback' : 'Play';
+            // Resolve a combined verb against current state → primitive that
+            // would fire on press. Mirrors looper's `dispatch_action` server-
+            // side, but only enough to drive the button's icon (the actual
+            // dispatch still happens server-side; this is purely cosmetic).
+            // Returns `null` when the verb would no-op in this state.
+            const resolve = (action: string): string | null => {
+              const primitives = ['rec', 'play', 'pause', 'stop', 'reset', 'undo'];
+              if (primitives.includes(action)) return action;
+
+              // PauseStopReset has a pos-dependent step in the backend: from
+              // Stop with pos > 0, it fires Stop (resets pos to 0) before
+              // becoming eligible for Reset on the next press. Mirror that
+              // so the icon reflects the 3-step Pause → Stop → Reset sequence.
+              if (action === 'pause-stop-reset' && looperState === 'looper-stop') {
+                return posSecs > 0 ? 'stop' : 'reset';
+              }
+              const table: Record<string, Record<string, string | null>> = {
+                'rec-play': {
+                  'looper-idle':      'rec',
+                  'looper-recording': 'play',
+                  'looper-overdub':   'play',
+                  'looper-playing':   'rec',
+                  'looper-stop':      'rec',
+                },
+                'rec-play-stop': {
+                  'looper-idle':      'rec',
+                  'looper-recording': 'play',
+                  'looper-overdub':   'play',
+                  'looper-playing':   'stop',
+                  'looper-stop':      'rec',
+                },
+                'rec-play-stop-play': {
+                  'looper-idle':      'rec',
+                  'looper-recording': 'play',
+                  'looper-overdub':   'play',
+                  'looper-playing':   'stop',
+                  'looper-stop':      'play',
+                },
+                'play-stop': {
+                  'looper-playing': 'stop',
+                  'looper-stop':    'play',
+                },
+                'play-pause': {
+                  'looper-playing': 'pause',
+                  'looper-stop':    'play',
+                },
+                'rec-pause': {
+                  'looper-idle':      'rec',
+                  'looper-recording': 'pause',
+                  'looper-overdub':   'pause',
+                  'looper-playing':   'rec',
+                  'looper-stop':      'rec',
+                },
+                'stop-reset': {
+                  'looper-idle':      'reset',
+                  'looper-recording': 'stop',
+                  'looper-overdub':   'stop',
+                  'looper-playing':   'stop',
+                  'looper-stop':      'reset',
+                },
+                'pause-stop': {
+                  'looper-recording': 'pause',
+                  'looper-overdub':   'pause',
+                  'looper-playing':   'pause',
+                  'looper-stop':      'stop',
+                },
+                'pause-stop-reset': {
+                  'looper-recording': 'pause',
+                  'looper-overdub':   'pause',
+                  'looper-playing':   'pause',
+                  'looper-stop':      'reset',
+                },
+              };
+              return table[action]?.[looperState] ?? null;
+            };
+
+            // When a combined verb has no resolution in the current state,
+            // the button is disabled — but we still want to *show* something
+            // informative, not the multi-icon composed fallback. Each verb
+            // declares the icon to show when idle/no-op — typically the
+            // primitive most associated with its active-state behaviour.
+            const verbHintIcon: Record<string, string> = {
+              'play-stop':        'stop',
+              'play-pause':       'pause',
+              'pause-stop':       'pause',
+              'pause-stop-reset': 'pause',
+            };
+
+            const buttonIcon = (action: string) => {
+              const resolved = resolve(action);
+              if (resolved) return t(`action.${resolved}`);
+              const hint = verbHintIcon[action];
+              if (hint) return t(`action.${hint}`);
+              return actionLabel(action);
+            };
+
+            const isDisabled = (action: string) => {
+              // Primitives: hand-tuned per the looper's state machine.
+              // `rec` is always enabled — from Playing starts overdub at
+              // current pos; from Idle begins the base recording.
+              if (action === 'play')  return isIdle;
+              if (action === 'pause') return isIdle || looperState === 'looper-stop';
+              if (action === 'stop')  return isIdle;
+              if (action === 'undo')  return !(looperState === 'looper-recording' || isOverdub || bufferCnt > 1);
+              if (action === 'reset') return isIdle;
+              if (action === 'rec')   return false;
+              // Combined verbs: disabled iff resolve returns null. The button
+              // still renders a hint icon (see `verbHintIcon`).
+              return resolve(action) === null;
+            };
+
+            // Collect transport cells in canonical order: Event entries
+            // (buttons) + the `duration` read-only ParamMeta (timer display).
+            // Other read-only ParamMetas (buffer_cnt) are consumed by the
+            // Undo button's badge — they don't get their own cell.
+            const cells = (node.params_info ?? [])
+                .filter(i => i.active !== false && i.visible !== false)
+                .filter(i =>
+                    i.kind?.tag === 'Event' ||
+                    (i.kind?.tag === 'ParamMeta' && i.kind.read_only && i.name === 'duration'));
+
+            const renderCell = (info: ParamInfo) => {
+              if (info.kind?.tag === 'Event') {
+                const action = info.kind.action;
+                let cls = buttonClass(action);
+                if (action === 'undo') cls += ' looper-undo-btn';
+                if (action === 'undo' && atMerge) cls += ' looper-btn-at-merge';
+                return (
+                  <button key={info.name}
+                    className={cls}
+                    disabled={isDisabled(action)}
+                    title={action}
+                    onMouseDown={e => e.stopPropagation()}
+                    onClick={() => sendAction(`${node.key}.${info.name}`, action)}>
+                    {buttonIcon(action)}
+                    {action === 'undo' && bufferCnt > 0 &&
+                      <span className="looper-undo-count">{displayCnt}</span>}
+                  </button>
+                );
+              }
+              // Timer display cell (read-only `duration`). Free-running ticker
+              // driven by useLooperTimer; bound by node.duration / pos_secs.
+              return (
+                <div key={info.name} className="looper-time">{looperTime}</div>
+              );
+            };
+
+            // Split active+visible cells half-and-half; top row gets the
+            // extra one when odd. Canonical order = render order.
+            const half  = Math.ceil(cells.length / 2);
+            const top   = cells.slice(0, half);
+            const bot   = cells.slice(half);
 
             return (
               <div className={`param-cell looper-transport${transportHidden ? ' param-hidden' : ''}`}>
                 <div className="looper-transport-inner">
-                  <div className="looper-buttons">
-                    <button className={recClass}
-                      disabled={isPlaying}
-                      title={recTitle}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => sendAction(`${node.key}.action`, recActive ? 'pause' : 'rec')}>
-                      {recActive ? <PauseIcon /> : t('looper.rec')}
-                    </button>
-                    <button className={playClass}
-                      disabled={isIdle}
-                      title={playTitle}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => sendAction(`${node.key}.action`, isPlaying ? 'pause' : 'play')}>
-                      {isPlaying ? <PauseIcon /> : '▶'}
-                    </button>
-                    <button className="looper-btn"
-                      disabled={isIdle}
-                      title={t('ui.looper_stop')}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => sendAction(`${node.key}.action`, 'stop')}>
-                      ■
-                    </button>
-                  </div>
-                  <div className="looper-bottom-row">
-                    {seekEditing
-                      ? <input
-                          className="looper-time looper-time-edit"
-                          type="number"
-                          step="0.1"
-                          min={0}
-                          max={loopSecs}
-                          value={seekInput}
-                          onChange={e => setSeekInput(e.target.value)}
-                          onBlur={() => {
-                            const v = Math.max(0, Math.min(loopSecs, parseFloat(seekInput) || 0));
-                            onSet(`${node.key}.pos_secs`, v);
-                            setSeekEditing(false);
-                          }}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                            if (e.key === 'Escape') setSeekEditing(false);
-                          }}
-                          onMouseDown={e => e.stopPropagation()}
-                          // eslint-disable-next-line jsx-a11y/no-autofocus
-                          autoFocus
-                        />
-                      : <div
-                          className={`looper-time${isStop ? ' looper-time-seekable' : ''}`}
-                          title={isStop ? 'Drag or click to seek' : undefined}
-                          onMouseDown={!isStop ? undefined : e => {
-                            e.stopPropagation();
-                            const startPos = posSecs;
-                            const sensitivity = loopSecs > 0 ? loopSecs / 200 : 0.1;
-                            seekDragRef.current = { startY: e.clientY, startPos, moved: false };
-                            const onMove = (me: MouseEvent) => {
-                              if (!seekDragRef.current) return;
-                              const dy = seekDragRef.current.startY - me.clientY;
-                              if (Math.abs(dy) > 3) seekDragRef.current.moved = true;
-                              const newPos = Math.max(0, Math.min(loopSecs, startPos + dy * sensitivity));
-                              onSet(`${node.key}.pos_secs`, newPos);
-                            };
-                            const onUp = () => {
-                              if (seekDragRef.current && !seekDragRef.current.moved) {
-                                setSeekInput(startPos.toFixed(1));
-                                setSeekEditing(true);
-                              }
-                              seekDragRef.current = null;
-                              document.removeEventListener('mousemove', onMove);
-                              document.removeEventListener('mouseup', onUp);
-                            };
-                            document.addEventListener('mousemove', onMove);
-                            document.addEventListener('mouseup', onUp);
-                          }}
-                        >
-                          {looperTime}
-                        </div>
-                    }
-                    <button className="looper-btn looper-undo-btn"
-                      disabled={!canUndo}
-                      title={`Undo overdub (${displayCnt} layer${displayCnt !== 1 ? 's' : ''})`}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => sendAction(`${node.key}.action`, 'undo')}>
-                      ↩<span className="looper-undo-count" style={atMerge ? { color: 'var(--red, #e05)' } : undefined}>{displayCnt}</span>
-                    </button>
-                    <button className="looper-btn"
-                      disabled={isIdle}
-                      title={t('ui.looper_reset')}
-                      onMouseDown={e => e.stopPropagation()}
-                      onClick={() => sendAction(`${node.key}.action`, 'reset')}>
-                      {t('looper.reset')}
-                    </button>
-                  </div>
+                  <div className="looper-row">{top.map(renderCell)}</div>
+                  <div className="looper-row">{bot.map(renderCell)}</div>
                 </div>
                 <button className="param-vis-btn"
                   title={transportHidden ? t('ui.show_param') : t('ui.hide_param')}
                   onMouseDown={e => e.stopPropagation()}
-                  onClick={() => setVisible(TRANSPORT_KEY, transportHidden)}>
+                  onClick={() => setVisible(TRANSPORT_NAME, transportHidden)}>
                   {transportHidden ? <EyeIcon /> : <EyeOffIcon />}
                 </button>
               </div>

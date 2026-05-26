@@ -113,8 +113,40 @@ export function createWs(
 }
 
 //---------- Handlers ----------//
+
+/// UI-only fields the React state accumulates from LIVE / EVENT broadcasts.
+/// They live on the node object for ergonomic widget binding but have no
+/// backend counterpart — must be stripped before sending CHAINS to the
+/// server, otherwise (a) string values like `state_tag` fail to deserialize
+/// as `ParamValue`, and (b) numeric ones (pos, count) would silently land
+/// in persisted `node.params`.
+const UI_EPHEMERAL_KEYS = new Set(['state_tag', '_wrap_ts']);
+
+/// Strip ephemeral + read-only-ParamMeta fields from a node so the wire
+/// payload only carries fields the server expects in `NodeDef`.
+function cleanNodeForWire(node: Record<string, any>): Record<string, any> {
+    const out: Record<string, any> = {};
+    // Read-only ParamMeta names are also effect-published live values — they
+    // get LIVE-broadcast onto `node[name]`, but mustn't ride CHAINS back.
+    const readOnly = new Set(
+        (node.params_info ?? [])
+            .filter((i: any) => i?.kind?.tag === 'ParamMeta' && i.kind.read_only)
+            .map((i: any) => i.name as string)
+    );
+    for (const [k, v] of Object.entries(node)) {
+        if (UI_EPHEMERAL_KEYS.has(k)) continue;
+        if (readOnly.has(k)) continue;
+        out[k] = v;
+    }
+    return out;
+}
+
 export async function sendChains(chains: object[]): Promise<boolean> {
-    const chainsStr = JSON.stringify(chains);
+    const cleaned = chains.map((chain: any) => ({
+        ...chain,
+        nodes: (chain.nodes ?? []).map(cleanNodeForWire),
+    }));
+    const chainsStr = JSON.stringify(cleaned);
     return (await sendWs(`CHAINS ${chainsStr}`))[0];
 }
 
@@ -131,7 +163,7 @@ export async function sendSet(path: string, value: number | boolean): Promise<bo
 }
 
 export async function sendAction(target: string, action: string): Promise<boolean> {
-    return (await sendWs(`SET ${target} ${action}`))[0];
+    return (await sendWs(`ACT ${target} ${action}`))[0];
 }
 
 // Meta override — same `SET` verb as values; three-segment path discriminates

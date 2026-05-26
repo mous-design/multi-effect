@@ -21,7 +21,7 @@ export function Popup({ title, onClose, confirmLabel, onConfirm, confirmDisabled
         <div className="popup-overlay" onClick={onClose}>
             <div className="popup" onClick={e => e.stopPropagation()}>
                 <p className="popup-title">{title}</p>
-                {children}
+                <div className="popup-body">{children}</div>
                 <div className="popup-actions">
                     <button className="popup-cancel" onClick={onClose}>{t('ui.cancel')}</button>
                     <div className="popup-actions-right">

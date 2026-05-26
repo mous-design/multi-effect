@@ -247,10 +247,13 @@ impl AudioEngine {
                     for chain in &mut self.chains { chain.on_note_off(note); }
                 },
                 ControlMessage::Action { path, action, .. } => {
-                    let handled = self.chains.iter_mut().any(|c| c.dispatch_action(&path, &action).is_ok());
+                    let handled = self.chains.iter_mut().any(|c| c.dispatch_action(&path, action).is_ok());
                     if !handled {
-                        warn!("ACTION '{path}' '{action}': no handler");
+                        warn!("ACTION '{path}' {action:?}: no handler");
                     }
+                },
+                ControlMessage::RepublishLiveState => {
+                    for chain in &self.chains { chain.republish_state(); }
                 },
                 _ => {}
             }

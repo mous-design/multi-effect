@@ -12,8 +12,8 @@ use crate::control::{self, EventBus, NetworkControl, SerialControl, ControlMessa
 use crate::control::mapping::{ControlDef, ControllerDef, DeviceDef};
 use crate::control::midi::{MidiControl, MidiOutControl};
 use crate::engine::AudioHandle;
-use crate::engine::device::{apply_override, aspect_value, MetaAspect, MetaTarget, OverrideMap,
-    ParamInfo, ParamKind, ParamValue};
+use crate::engine::device::{apply_override, aspect_value, EventAction, MetaAspect, MetaTarget,
+    OverrideMap, ParamInfo, ParamKind, ParamValue};
 use crate::engine::patch::{self, resolve_params_info, Chain};
 
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ pub enum ConfigRequest {
                         source: String, resp: OptionResp<SnapshotState> },
     ApplyCtrl         { channel_id: String, raw: f32, alias: String,
                         source: String, resp: OptionResp<SnapshotState> },
-    ApplyAction       { path: String, action: String, source: String, resp: OptionRespEmpty },
+    ApplyAction       { path: String, action: EventAction, source: String, resp: OptionRespEmpty },
     ApplyReset        { source: String, resp: OptionRespEmpty },
     /// Apply an Instance bound override (the runtime "edit a param's
     /// min/max/default" path). `path` is the node key, `target` is param +
@@ -71,6 +71,11 @@ pub enum ConfigRequest {
     // -- Fire-and-forget (MIDI notes) --
     ApplyControl(ControlMessage), // @todo maybe rename this to ApplyMidiControl, otherwise confusing with ApplyCtrl
     ToggleCompare { source: String, resp: OptionRespEmpty },
+    /// Ask each effect to re-fire its current live state on the bus. Used
+    /// when a client connects so it can catch up. All current bus
+    /// subscribers receive the events; existing clients see a no-op refresh,
+    /// the new one gets state-from-zero.
+    RepublishLiveState { resp: OptionRespEmpty },
 
     // -- Internal --
     Reload { source: String, resp: OptionRespEmpty },
@@ -233,7 +238,7 @@ impl ConfigMaster {
                 Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, &source));
             },
             ConfigRequest::ApplyAction { path, action, source, resp } => {
-                Self::respond(resp, self.handle_apply_action(&path, &action, &source));
+                Self::respond(resp, self.handle_apply_action(&path, action, &source));
             },
             ConfigRequest::ApplyReset { source, resp } => {
                 Self::respond(resp, self.handle_apply_reset(&source));
@@ -256,6 +261,10 @@ impl ConfigMaster {
             },
             ConfigRequest::ToggleCompare { source, resp } => {
                 Self::respond(resp,self.handle_toggle_compare(&source));
+            },
+            ConfigRequest::RepublishLiveState { resp } => {
+                Self::respond(resp, self.audio.push_control(ControlMessage::RepublishLiveState)
+                    .map_err(|e| anyhow::anyhow!(e)));
             },
             ConfigRequest::Reload { source, resp }=> {
                 Self::respond(resp,self.handle_reload(&source));
@@ -509,9 +518,9 @@ impl ConfigMaster {
         }
     }
 
-    fn handle_apply_action(&mut self, path: &str, action: &str, source: &str) -> Result<()> {
-        debug!("ACTION {path} {action} [source={source}]");
-        let cm = ControlMessage::Action { path: path.to_string(), action: action.to_string(), source: source.to_string() };
+    fn handle_apply_action(&mut self, path: &str, action: EventAction, source: &str) -> Result<()> {
+        debug!("ACTION {path} {action:?} [source={source}]");
+        let cm = ControlMessage::Action { path: path.to_string(), action, source: source.to_string() };
         self.audio.push_control(cm.clone())?;
         self.bus.send(cm).ok();
         Ok(())
@@ -540,12 +549,12 @@ impl ConfigMaster {
         // resolve to diff against the new state and broadcast every aspect
         // that changed (including cascades like default auto-clamp).
         let param = target.param.clone();
-        // Match the override's target entry: ParamMeta by name, or Setting by
-        // name + aspect. Mirrors `apply_override`'s dispatch.
+        // Match the override's target entry by name — ParamMeta carries
+        // value-shape aspects, ActionsGroup carries only visible/active.
+        // Mirrors `apply_override`'s dispatch.
         let find_target = |i: &ParamInfo| i.name == param && match i.kind {
-            ParamKind::ParamMeta { .. }       => true,
-            ParamKind::Setting   { aspect, .. } => aspect == target.aspect,
-            ParamKind::BoundMeta { .. }       => false,
+            ParamKind::ParamMeta { .. } | ParamKind::ActionsGroup => true,
+            ParamKind::BoundMeta { .. } | ParamKind::Event { .. }  => false,
         };
         let old_aspects = self.snapshot.preset.chains.iter()
             .flat_map(|c| c.nodes.iter())
@@ -734,27 +743,13 @@ impl ConfigMaster {
         for chain in &self.snapshot.preset.chains {
             for node in &chain.nodes {
                 for info in &node.params_info {
-                    // Both kinds participate in buffer sizing:
-                    // - `ParamMeta { max_growable_at_runtime: false }` — buffer
-                    //   sized from the ParamMeta's `max` at construction.
-                    // - `Setting   { max_growable_at_runtime: false }` — buffer
-                    //   sized from the Setting's `default` (the configured cap)
-                    //   at construction.
-                    let (is_locked, value) = match info.kind {
-                        ParamKind::ParamMeta { max_growable_at_runtime: false } => {
-                            if let ParamType::ContinuousFloat { max, .. } = info.data_kind {
-                                (true, max)
-                            } else { continue; }
-                        },
-                        ParamKind::Setting { max_growable_at_runtime: false, .. } => {
-                            if let ParamType::ContinuousFloat { default, .. } = info.data_kind {
-                                (true, default)
-                            } else { continue; }
-                        },
-                        _ => (false, 0.0),
-                    };
-                    if is_locked {
-                        out.insert((node.key.clone(), info.name.to_string()), value);
+                    if !matches!(info.kind,
+                        ParamKind::ParamMeta { max_growable_at_runtime: false, .. })
+                    {
+                        continue;
+                    }
+                    if let ParamType::ContinuousFloat { max, .. } = info.data_kind {
+                        out.insert((node.key.clone(), info.name.to_string()), max);
                     }
                 }
             }
@@ -960,14 +955,12 @@ fn sanitize_one(canonical: &[ParamInfo], om: &mut OverrideMap) {
     }
     let targets: Vec<MetaTarget> = om.keys().cloned().collect();
     for target in targets {
-        // Find the entry the override touches: either a ParamMeta named
-        // `target.param` (whose aspect field gets edited) or a Setting with
-        // matching name + aspect (whose `default` field IS the value).
+        // Find the entry the override touches by name — ParamMeta (whose
+        // aspect field gets edited) or ActionsGroup (visible/active only).
         let Some(idx) = resolved.iter()
             .position(|i| i.name == target.param && match i.kind {
-                ParamKind::ParamMeta { .. }       => true,
-                ParamKind::Setting   { aspect, .. } => aspect == target.aspect,
-                ParamKind::BoundMeta { .. }       => false,
+                ParamKind::ParamMeta { .. } | ParamKind::ActionsGroup => true,
+                ParamKind::BoundMeta { .. } | ParamKind::Event { .. } => false,
             })
         else {
             om.remove(&target);
@@ -1000,18 +993,11 @@ fn canonical_map() -> HashMap<String, Vec<ParamInfo>> {
 /// every aspect that actually changed (the user's direct edit plus any
 /// cascades — default auto-clamp on min/max change, etc.).
 fn extract_aspects(info: &ParamInfo) -> Vec<(MetaAspect, ParamValue)> {
-    use crate::engine::device::{ParamKind, ParamType};
-    // Setting: a single aspect (the one declared on the Setting), with the
-    // configured value sourced from `default`. No `visible` flag — Settings
-    // don't have a knob to hide.
-    if let ParamKind::Setting { aspect, .. } = info.kind {
-        return match info.data_kind {
-            ParamType::ContinuousFloat { default, .. } => vec![(aspect, ParamValue::Float(default))],
-            ParamType::ContinuousInt   { default, .. } => vec![(aspect, ParamValue::Int(default))],
-            _ => vec![],
-        };
-    }
-    let mut out = vec![(MetaAspect::Visible, ParamValue::Bool(info.visible))];
+    use crate::engine::device::ParamType;
+    let mut out = vec![
+        (MetaAspect::Visible, ParamValue::Bool(info.visible)),
+        (MetaAspect::Active,  ParamValue::Bool(info.active)),
+    ];
     match info.data_kind {
         ParamType::ContinuousFloat { min, max, default, log, .. } => {
             out.push((MetaAspect::Min,     ParamValue::Float(min)));

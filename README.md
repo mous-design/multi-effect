@@ -351,3 +351,76 @@ Multiple chains run in parallel and their outputs are summed. The dry signal is 
 - Master pushes to audio via lock-free SPSC ring buffers (`rtrb`).
 - Master broadcasts state changes on the bus (tokio `broadcast`); all transports subscribe.
 - All wire-format I/O happens at the transport layer; master speaks only typed Rust values.
+
+## Adding a combined-action button
+
+Combined verbs (`PlayPause`, `RecPlayStop`, …) encode a small state machine
+inside the effect — the UI sends one verb, the effect resolves to the right
+primitive based on current state.
+
+### Minimum path — backend only
+
+The UI auto-renders one button per active+visible `Event` entry and
+auto-composes the icon from the verb name (`play-stop` → `▶■`, etc.). No
+UI changes needed.
+
+1. **`EventAction` variant** in `src/engine/device.rs`. By convention each
+   letter of the verb name encodes a state-machine step:
+   ```rust
+   /// idle→Rec, recording→Play, playing→Stop, stop→Play (resume).
+   RecPlayStopPlay,
+   ```
+2. **Kebab name** in `EventAction::name()`:
+   ```rust
+   EventAction::RecPlayStopPlay => "rec-play-stop-play",
+   ```
+3. **Dispatch arms** in `Looper::dispatch_action` — one per `LooperState`.
+   Return the primitive the verb fires:
+   ```rust
+   (EventAction::RecPlayStopPlay, LooperState::Idle)      => Some(EventAction::Rec),
+   (EventAction::RecPlayStopPlay, LooperState::Recording) => Some(EventAction::Play),
+   ...
+   ```
+4. **Canonical entry** in `CANONICAL` (order = render order in the tile):
+   ```rust
+   ParamInfo::new_event(EventAction::RecPlayStopPlay),
+   // …or `.with_inactive()` if the button should be hidden by default
+   ```
+
+That's all the backend needs. Button appears on the tile, fires the right
+primitives, composes its icon from the verb name letters.
+
+### Optional — state-aware icon
+
+To make the button show what it'll do *right now* instead of the static
+composed icon (e.g. `⏺` when idle, `■` when playing), add an entry to the
+UI's `resolve()` table in `ui/src/components/EffectTile.tsx`. Mirror the
+dispatch arms:
+
+```ts
+'rec-play-stop-play': {
+    'looper-idle':      'rec',
+    'looper-recording': 'play',
+    'looper-overdub':   'play',
+    'looper-playing':   'stop',
+    'looper-stop':      'play',
+},
+```
+
+This is cosmetic — the actual dispatch happens server-side. The UI table is
+the "what icon would this button show in each state" hint.
+
+For verbs that are no-op in some states (`PlayPause` from Idle, etc.),
+optionally add a `verbHintIcon` entry so the disabled button still shows a
+meaningful glyph instead of the multi-icon composed fallback:
+
+```ts
+const verbHintIcon = {
+    'play-pause': 'pause',
+    ...
+};
+```
+
+This UI bit is intentionally effect-specific — the project's "flexible
+specific UI" stance: the metadata describes what verbs exist, the UI knows
+how to *display* them.

@@ -16,9 +16,31 @@
     border-radius: $radius-lg;
     padding: 20px 24px;
     min-width: 200px;
+    // Cap height to the viewport so the popup never overflows. Body inside
+    // scrolls; title + action bar stay pinned.
+    max-height: 90vh;
     display: flex;
     flex-direction: column;
     gap: $gap-lg;
+}
+
+// Scrollable middle section. `min-height: 0` is the classic flexbox trick
+// that lets a flex child shrink below its content size — without it, the
+// child sticks to its intrinsic height and the parent overflows.
+.popup-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: $gap-lg;
+
+    // Keep the scrollbar from overlapping the rightmost controls when it
+    // appears: reserve 15px of internal padding for it, then offset the
+    // whole element 15px right with negative margin so the visual right
+    // edge of content lines up with title / action bar.
+    padding-right: 15px;
+    margin-right: -15px;
 }
 
 .popup-title {

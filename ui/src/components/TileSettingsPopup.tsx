@@ -1,13 +1,21 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { NodeDef } from '../types';
-import { sendParamMeta } from '../api';
 import { Popup } from './Popup';
-import { ParamRow, boundFor } from './ParamAspectsRow';
+import { ParamRow, ActionsTable, boundFor } from './ParamAspectsRow';
 import { t } from '../i18n';
 
 interface Props {
     node: NodeDef;
+    /// Threaded through from App via EffectTile — applies optimistic local
+    /// patch + fires the wire SET. The popup must go through this rather
+    /// than calling `sendParamMeta` directly, otherwise the originator's
+    /// source-filter would silently swallow master's PARAM echo and the
+    /// tile wouldn't reflect the change until a snapshot resync.
+    onMetaSet: (
+        nodeKey: string, param: string, aspect: string,
+        value: number | boolean, confirmed?: boolean,
+    ) => Promise<{ ok: boolean; confirmRequired: boolean }>;
     onClose: () => void;
 }
 
@@ -25,9 +33,13 @@ type Edit    = { param: string; aspect: string; value: number | boolean };
 /// envelope each aspect override can take; the row consults them via
 /// `boundFor` for input-range hints.
 /// `DiscreteFloat` / `Event` params are skipped — no useful Instance bounds.
-export function TileSettingsPopup({ node, onClose }: Props) {
+export function TileSettingsPopup({ node, onMetaSet, onClose }: Props) {
+    // Override popup shows inactive entries too — that's the surface where
+    // the user re-enables them via the `active` override. Includes Event
+    // entries so combined verbs (`play-stop`, etc.) can be toggled on/off.
     const params = (node.params_info ?? []).filter(i =>
-        i.kind?.tag === 'ParamMeta' || i.kind?.tag === 'Setting');
+        i.kind?.tag === 'ParamMeta' || i.kind?.tag === 'Event'
+        || i.kind?.tag === 'ActionsGroup');
     const [pending, setPending] = useState<Pending>({});
     // Edits the server refused pending reload acknowledgement. Non-null →
     // confirm popup is showing; on confirm we replay these with the flag set,
@@ -55,7 +67,7 @@ export function TileSettingsPopup({ node, onClose }: Props) {
             Object.entries(aspects).map(([aspect, value]) => ({ param, aspect, value })));
         const refused: Edit[] = [];
         for (const e of edits) {
-            const { ok, confirmRequired } = await sendParamMeta(node.key, e.param, e.aspect, e.value);
+            const { ok, confirmRequired } = await onMetaSet(node.key, e.param, e.aspect, e.value);
             if (confirmRequired) refused.push(e);
             else if (!ok)        return;  // hard error — toast already fired
         }
@@ -66,7 +78,7 @@ export function TileSettingsPopup({ node, onClose }: Props) {
     async function confirmSave() {
         if (!needConfirm) return;
         for (const e of needConfirm) {
-            const { ok } = await sendParamMeta(node.key, e.param, e.aspect, e.value, true);
+            const { ok } = await onMetaSet(node.key, e.param, e.aspect, e.value, true);
             if (!ok) { setNeedConfirm(null); return; }
         }
         onClose();
@@ -79,12 +91,21 @@ export function TileSettingsPopup({ node, onClose }: Props) {
                 onConfirm={save}
                 confirmLabel={t('ui.apply')}>
                 <div className="tile-settings">
-                    {params.map(info => (
-                        <ParamRow key={info.name} info={info}
+                    {params.filter(i => i.kind?.tag !== 'Event').map(info => (
+                        <ParamRow key={info.name} info={info} scope="instance"
                             effective={(aspect, fallback) => effective(info.name, aspect, fallback)}
                             bound={aspect => boundFor(node.params_info, info.name, aspect)}
                             onChange={(aspect, v) => setAspect(info.name, aspect, v)} />
                     ))}
+                    {params.some(i => i.kind?.tag === 'Event') && (
+                        <>
+                            <div className="param-settings-section">{t('ui.actions')}</div>
+                            <ActionsTable
+                                events={params.filter(i => i.kind?.tag === 'Event')}
+                                effective={effective}
+                                onChange={setAspect} />
+                        </>
+                    )}
                 </div>
             </Popup>
             {needConfirm && (

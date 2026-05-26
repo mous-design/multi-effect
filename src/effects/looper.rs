@@ -1,7 +1,6 @@
 use crate::control::{ControlMessage, EventBus};
-use crate::engine::device::{find_param_info, validate_canonical,
-    MetaAspect, ParamInfo, Device, Frame, Parameterized, ParamValue};
-use tracing::warn;
+use crate::engine::device::{find_param_info, find_param_meta, validate_canonical,
+    EventAction, MetaAspect, ParamInfo, Device, Frame, Parameterized, ParamValue};
 
 const LOOP_FADE_SAMPLES: usize = 8;
 const LOOP_FADE_STEP: f32 = 1.0 / LOOP_FADE_SAMPLES as f32;
@@ -117,17 +116,69 @@ pub struct Looper {
     event_bus: Option<EventBus>,
 }
 
-pub static CANONICAL: [ParamInfo; 5] = [
+pub static CANONICAL: [ParamInfo; 24] = [
     ParamInfo::new_discrete_bool("active", true, None),
     ParamInfo::new_continuous_float("wet",        0.0,   1.0,  0.5, false, None),
     ParamInfo::new_continuous_float("decay",      0.0,   1.0,  1.0, false, None),
-    // Standalone settings — caps the looper consults at construction. The
-    // configured value lives in `default`; `min`/`max` is the editable
-    // envelope. Buffer-affecting → non-growable (widen requires reload).
-    ParamInfo::new_continuous_float("duration",   1.0, 300.0, 30.0, false, Some("s"))
-        .with_kind_setting(MetaAspect::Max).with_non_growable(),
-    ParamInfo::new_continuous_int("buffer_cnt",   1,    16,   4,    None)
-        .with_kind_setting(MetaAspect::Max),
+
+    // ── Transport grouping anchor ─────────────────────────────────────────
+    // UI-only marker for the cluster of Event buttons below. `visible`
+    // controls whether the cluster shows on the tile by default; `active`
+    // controls whether the group exists at all (declared-but-off can be
+    // flipped on via Type-override). Hidden by default — most users drive
+    // the looper from a foot controller and don't want the on-screen
+    // transport row taking space until they ask for it.
+    ParamInfo::new_actions_group("transport").with_hidden(),
+
+    // ── Live read-only buffer counter + its cap ───────────────────────────
+    // The read-only ParamMeta's `max` IS the cap (initial 4, configurable up
+    // to 16 via meta-override on `max`). BoundMeta declares the envelope.
+    // Consumed by the Undo button's badge in the tile.
+    ParamInfo::new_continuous_int("buffer_cnt",   0,    4,   0,    None)
+        .with_read_only(),
+    ParamInfo::new_continuous_int("buffer_cnt",   0,   16,   0,    None)
+        .with_kind_bound_meta(MetaAspect::Max),
+
+    // ── Live RW playhead position ─────────────────────────────────────────
+    // Reserved for the eventual scrubber widget. Inactive for now — proper
+    // scrubber design pending.
+    ParamInfo::new_continuous_float("pos_secs",   0.0, 300.0, 0.0, false, Some("s"))
+        .with_inactive(),
+
+    // ── Transport cells (canonical order = render order) ──────────────────
+    // The tile iterates active+visible cells and splits them into two equal
+    // rows. Order chosen so the default layout reads:
+    //   row 1: Rec, Play, Pause, Stop
+    //   row 2: Timer, Undo, Reset
+    // The `duration` RO ParamMeta is the timer display (effect-published live
+    // loop length). Combined verbs are declared but inactive — per-instance
+    // override flips `active` on for users who want them; the effect's state
+    // machine resolves them all.
+    ParamInfo::new_event(EventAction::Rec).with_inactive(),
+    ParamInfo::new_event(EventAction::RecPlay),
+    ParamInfo::new_event(EventAction::RecPlayStop),
+    // 4thd verb is where it loops to, so loops to Stop/Play
+    ParamInfo::new_event(EventAction::RecPlayStopPlay), 
+    ParamInfo::new_event(EventAction::Play).with_inactive(),
+    ParamInfo::new_event(EventAction::PlayStop),
+    ParamInfo::new_event(EventAction::PlayPause),
+    ParamInfo::new_event(EventAction::RecPause),
+    ParamInfo::new_event(EventAction::StopReset),
+    ParamInfo::new_event(EventAction::PauseStop),
+    ParamInfo::new_event(EventAction::PauseStopReset),
+    ParamInfo::new_event(EventAction::Pause),
+    ParamInfo::new_event(EventAction::Stop),
+    ParamInfo::new_event(EventAction::Undo),
+    ParamInfo::new_event(EventAction::Reset),
+    // ── Live read-only duration + its cap ─────────────────────────────────
+    // The read-only ParamMeta's `max` IS the cap (initial 30 s, configurable
+    // up to 300 s). Non-growable: widening past construction-time max
+    // requires reload (sizes the underlying buffer). BoundMeta on `max`
+    // declares the override envelope.
+    ParamInfo::new_continuous_float("duration",   0.0,  30.0, 0.0, false, Some("s"))
+        .with_read_only().with_non_growable(),
+    ParamInfo::new_continuous_float("duration",   1.0, 300.0, 0.0, false, Some("s"))
+        .with_kind_bound_meta(MetaAspect::Max),
 ];
 const _: () = validate_canonical(&CANONICAL);
 
@@ -143,11 +194,12 @@ impl Looper {
         let active      = find_param_info(params_info, "active"    ).bool_default();
         let decay       = find_param_info(params_info, "decay"     ).continuous_float_default();
         let wet         = find_param_info(params_info, "wet"       ).continuous_float_default();
-        // Caps live in the `Setting` entries — their `default` is the
-        // configured value (overrides on `duration.max` / `buffer_cnt.max`
-        // are baked into `default` by the resolver; we just read it).
-        let max_seconds = find_param_info(params_info, "duration"  ).continuous_float_default();
-        let max_buffers = find_param_info(params_info, "buffer_cnt").continuous_int_default() as usize;
+        // The cap for each live read-only counter is the entry's `max` —
+        // configurable via meta-override (`SET <key>.<param>.max <n>`),
+        // bounded by the BoundMeta envelope declared alongside it.
+        // `find_param_meta` disambiguates against the BoundMeta sibling.
+        let max_seconds = find_param_meta(params_info, "duration"  ).continuous_float_max();
+        let max_buffers = find_param_meta(params_info, "buffer_cnt").continuous_int_max() as usize;
 
         let init_len = (sample_rate * max_seconds) as usize;
         // Pre-allocate buffer[0] (OS gives us lazily-zeroed pages)
@@ -175,7 +227,9 @@ impl Looper {
         }
     }
 
-    /// Fire a NodeEvent on the bus (no-op if bus not set).
+    /// Fire a NodeEvent on the bus (no-op if bus not set). Used for the
+    /// abstract state tag (`looper-recording`, …); live values go through
+    /// `fire_live` as `LiveParam` instead.
     fn fire_event(&self, event: &str, data: serde_json::Value) {
         tracing::debug!(key = %self.key, event, data = %data, "looper event");
         if let Some(bus) = &self.event_bus {
@@ -187,35 +241,59 @@ impl Looper {
         }
     }
 
-    /// Fire a `looper_state` event reflecting the current state.
-    ///
-    /// `duration_secs` / `buffer_cnt` map onto the read-only `ParamMeta`
-    /// entries of the same name — the UI bridges these into `node.duration` /
-    /// `node.buffer_cnt` for the generic param-display path. `state` / `pos_ms`
-    /// remain looper-specific transport state.
+    /// Publish a live read-only ParamMeta value via `LiveParam`. Wire-shaped
+    /// identical to a regular PARAM broadcast — the UI updates `node.<param>`
+    /// the same way it does for SetParam.
+    fn fire_live(&self, param: &str, value: ParamValue) {
+        if let Some(bus) = &self.event_bus {
+            bus.send(ControlMessage::LiveParam {
+                path:  format!("{}.{param}", self.key),
+                value,
+            }).ok();
+        }
+    }
+
+    /// Snapshot of state-derived values to publish. Loop length grows during
+    /// recording; pos cycles during playback; buffer_cnt steps on
+    /// overdub/merge.
     fn fire_state(&self) {
         self.fire_state_as(self.state, self.current_pos);
     }
 
-    /// Same as `fire_state` but with a state-override and a pos override —
-    /// used by `do_pause` / `do_stop` to update the UI immediately during the
-    /// short audio fade-out before the actual state transition completes.
+    /// Same as `fire_state` but with a state-override and pos override — used
+    /// by `do_pause` / `do_stop` to update the UI immediately during the short
+    /// audio fade-out before the actual state transition completes.
+    ///
+    /// Publishes:
+    ///   - State tag as a NodeEvent (`looper-recording`, etc.) — picked up by
+    ///     any subscriber that wants to react to abstract state.
+    ///   - Live values (`duration`, `pos_secs`, `buffer_cnt`) as `LiveParam`s
+    ///     mapping onto the read-only ParamMeta entries of the same name.
     fn fire_state_as(&self, state: LooperState, pos: usize) {
-        let duration_secs = if self.sample_rate > 0.0 && self.loop_len > 0 {
+        let duration = if self.sample_rate > 0.0 && self.loop_len > 0 {
             self.loop_len as f32 / self.sample_rate
         } else { 0.0 };
-        let pos_ms = if self.sample_rate > 0.0 {
-            (pos as f32 / self.sample_rate * 1000.0) as u32
-        } else { 0 };
+        let pos_secs = if self.sample_rate > 0.0 {
+            pos as f32 / self.sample_rate
+        } else { 0.0 };
         // `buffer_cnt` counts base + completed overdubs (1 = just base, no overdubs).
         let buffer_cnt = if matches!(state, LooperState::Idle) { 0 }
-                         else { 1 + self.overdub_count };
-        self.fire_event("looper_state", serde_json::json!({
-            "state":         format!("{:?}", state),
-            "duration_secs": duration_secs,
-            "pos_ms":        pos_ms,
-            "buffer_cnt":    buffer_cnt,
-        }));
+                         else { (1 + self.overdub_count) as i32 };
+
+        // State tag — kebab-case, ambient broadcast for any subscriber.
+        let tag = match state {
+            LooperState::Idle      => "looper-idle",
+            LooperState::Recording => "looper-recording",
+            LooperState::Playing   => "looper-playing",
+            LooperState::Overdub   => "looper-overdub",
+            LooperState::Stop      => "looper-stop",
+        };
+        self.fire_event("state", serde_json::json!({ "tag": tag }));
+
+        // Live read-only values.
+        self.fire_live("duration",   ParamValue::Float(duration));
+        self.fire_live("pos_secs",   ParamValue::Float(pos_secs));
+        self.fire_live("buffer_cnt", ParamValue::Int(buffer_cnt));
     }
 
     fn start_fade_in(&mut self) {
@@ -538,94 +616,103 @@ impl Looper {
     // Combined action dispatch
     // -----------------------------------------------------------------------
 
-    fn dispatch_combined(&mut self, action: &str) {
-        // pause-stop-reset needs dynamic branching on current_pos, handled specially.
-        if action == "pause-stop-reset" {
+    /// Resolve a combined transport verb against the current state, then
+    /// dispatch the appropriate primitive. Combined verbs encode a small
+    /// state-machine "what should this button do given current state".
+    fn dispatch_action(&mut self, action: EventAction) {
+        // PauseStopReset is the one verb whose resolution depends on
+        // `current_pos` as well as state — special-case.
+        if matches!(action, EventAction::PauseStopReset) {
             match self.state {
-                LooperState::Idle                                  => {}
-                LooperState::Recording |
-                LooperState::Playing   |
-                LooperState::Overdub                               => self.do_pause(),
-                LooperState::Stop if self.current_pos > 0          => self.do_stop(),
-                LooperState::Stop                                  => self.do_reset(),
+                LooperState::Idle                                                    => {},
+                LooperState::Recording | LooperState::Playing | LooperState::Overdub => self.do_pause(),
+                LooperState::Stop if self.current_pos > 0                            => self.do_stop(),
+                LooperState::Stop                                                    => self.do_reset(),
             }
             return;
         }
 
-        let primitive = match (action, self.state) {
-            // rec-play-stop-rec
-            ("rec-play-stop-rec", LooperState::Idle)      => Some("rec"),
-            ("rec-play-stop-rec", LooperState::Recording) => Some("play"),
-            ("rec-play-stop-rec", LooperState::Overdub)   => Some("play"),
-            ("rec-play-stop-rec", LooperState::Playing)   => Some("pause"),
-            ("rec-play-stop-rec", LooperState::Stop)      => Some("rec"),
+        // Resolve combined → primitive (or None = no-op). Primitives map
+        // directly to do_* methods at the bottom.
+        let primitive: Option<EventAction> = match (action, self.state) {
+            // Primitives — pass through unchanged.
+            (EventAction::Rec,    _) => Some(EventAction::Rec),
+            (EventAction::Play,   _) => Some(EventAction::Play),
+            (EventAction::Pause,  _) => Some(EventAction::Pause),
+            (EventAction::Stop,   _) => Some(EventAction::Stop),
+            (EventAction::Reset,  _) => Some(EventAction::Reset),
+            (EventAction::Undo,   _) => Some(EventAction::Undo),
 
-            // rec-play-stop-play
-            ("rec-play-stop-play", LooperState::Idle)      => Some("rec"),
-            ("rec-play-stop-play", LooperState::Recording) => Some("play"),
-            ("rec-play-stop-play", LooperState::Overdub)   => Some("play"),
-            ("rec-play-stop-play", LooperState::Playing)   => Some("pause"),
-            ("rec-play-stop-play", LooperState::Stop)      => Some("play"),
+            // RecPlay — 2-letter Rec ↔ Play cycle. From Playing fires Rec
+            // (starts overdub at current pos); Overdub fires Play (commits
+            // and goes back to Playing). Stop wraps to Rec.
+            (EventAction::RecPlay, LooperState::Idle)      => Some(EventAction::Rec),
+            (EventAction::RecPlay, LooperState::Recording) => Some(EventAction::Play),
+            (EventAction::RecPlay, LooperState::Overdub)   => Some(EventAction::Play),
+            (EventAction::RecPlay, LooperState::Playing)   => Some(EventAction::Rec),
+            (EventAction::RecPlay, LooperState::Stop)      => Some(EventAction::Rec),
 
-            // rec-play-rec-rec
-            ("rec-play-rec-rec", LooperState::Idle)      => Some("rec"),
-            ("rec-play-rec-rec", LooperState::Recording) => Some("play"),
-            ("rec-play-rec-rec", LooperState::Overdub)   => Some("play"),
-            ("rec-play-rec-rec", LooperState::Playing)   => Some("rec"),
-            ("rec-play-rec-rec", LooperState::Stop)      => Some("rec"),
+            // RecPlayStop — 3-letter cycle, Stop wraps back to Rec.
+            (EventAction::RecPlayStop, LooperState::Idle)      => Some(EventAction::Rec),
+            (EventAction::RecPlayStop, LooperState::Recording) => Some(EventAction::Play),
+            (EventAction::RecPlayStop, LooperState::Overdub)   => Some(EventAction::Play),
+            (EventAction::RecPlayStop, LooperState::Playing)   => Some(EventAction::Stop),
+            (EventAction::RecPlayStop, LooperState::Stop)      => Some(EventAction::Rec),
 
-            // rec-play-rec-play
-            ("rec-play-rec-play", LooperState::Idle)      => Some("rec"),
-            ("rec-play-rec-play", LooperState::Recording) => Some("play"),
-            ("rec-play-rec-play", LooperState::Overdub)   => Some("play"),
-            ("rec-play-rec-play", LooperState::Playing)   => Some("rec"),
-            ("rec-play-rec-play", LooperState::Stop)      => Some("rec"),
+            // RecPlayStopPlay — distinct 4-letter: Stop → Play (resume),
+            // not Rec (start over).
+            (EventAction::RecPlayStopPlay, LooperState::Idle)      => Some(EventAction::Rec),
+            (EventAction::RecPlayStopPlay, LooperState::Recording) => Some(EventAction::Play),
+            (EventAction::RecPlayStopPlay, LooperState::Overdub)   => Some(EventAction::Play),
+            (EventAction::RecPlayStopPlay, LooperState::Playing)   => Some(EventAction::Stop),
+            (EventAction::RecPlayStopPlay, LooperState::Stop)      => Some(EventAction::Play),
 
-            // play-stop (now pauses instead of stopping at pos)
-            ("play-stop", LooperState::Playing) => Some("pause"),
-            ("play-stop", LooperState::Stop)    => Some("play"),
-            ("play-stop", _)                    => None,
+            // PlayStop — true stop (resets playhead to 0).
+            (EventAction::PlayStop, LooperState::Playing) => Some(EventAction::Stop),
+            (EventAction::PlayStop, LooperState::Stop)    => Some(EventAction::Play),
+            (EventAction::PlayStop, _)                    => None,
 
-            // rec-stop (now pauses instead of stopping at pos)
-            ("rec-stop", LooperState::Idle)      => Some("rec"),
-            ("rec-stop", LooperState::Recording) => Some("pause"),
-            ("rec-stop", LooperState::Overdub)   => Some("pause"),
-            ("rec-stop", LooperState::Playing)   => Some("rec"),
-            ("rec-stop", LooperState::Stop)      => Some("rec"),
+            // PlayPause — soft toggle (keeps playhead).
+            (EventAction::PlayPause, LooperState::Playing) => Some(EventAction::Pause),
+            (EventAction::PlayPause, LooperState::Stop)    => Some(EventAction::Play),
+            (EventAction::PlayPause, _)                    => None,
 
-            // stop-reset (now pauses instead of stopping at pos)
-            ("stop-reset", LooperState::Idle)      => None,
-            ("stop-reset", LooperState::Recording) => Some("pause"),
-            ("stop-reset", LooperState::Overdub)   => Some("pause"),
-            ("stop-reset", LooperState::Playing)   => Some("pause"),
-            ("stop-reset", LooperState::Stop)      => Some("reset"),
+            // RecPause — Rec when at-rest, Pause when actively recording/playing
+            // back. Press oscillates Rec/Pause once the loop is established.
+            (EventAction::RecPause, LooperState::Idle)      => Some(EventAction::Rec),
+            (EventAction::RecPause, LooperState::Recording) => Some(EventAction::Pause),
+            (EventAction::RecPause, LooperState::Overdub)   => Some(EventAction::Pause),
+            (EventAction::RecPause, LooperState::Playing)   => Some(EventAction::Rec),
+            (EventAction::RecPause, LooperState::Stop)      => Some(EventAction::Rec),
 
-            // pause-stop: pause → then stop (goto pos 0)
-            ("pause-stop", LooperState::Idle)      => None,
-            ("pause-stop", LooperState::Recording) => Some("pause"),
-            ("pause-stop", LooperState::Overdub)   => Some("pause"),
-            ("pause-stop", LooperState::Playing)   => Some("pause"),
-            ("pause-stop", LooperState::Stop)      => Some("stop"),
+            // StopReset — true Stop while active (resets playhead), Reset
+            // from Stop. From Idle, Reset is harmless and serves as a hint
+            // ("nothing to stop yet").
+            (EventAction::StopReset, LooperState::Idle)      => Some(EventAction::Reset),
+            (EventAction::StopReset, LooperState::Recording) => Some(EventAction::Stop),
+            (EventAction::StopReset, LooperState::Overdub)   => Some(EventAction::Stop),
+            (EventAction::StopReset, LooperState::Playing)   => Some(EventAction::Stop),
+            (EventAction::StopReset, LooperState::Stop)      => Some(EventAction::Reset),
 
-            _ => {
-                warn!("Looper: unknown action '{action}'");
-                None
-            }
+            // PauseStop
+            (EventAction::PauseStop, LooperState::Idle)      => None,
+            (EventAction::PauseStop, LooperState::Recording) => Some(EventAction::Pause),
+            (EventAction::PauseStop, LooperState::Overdub)   => Some(EventAction::Pause),
+            (EventAction::PauseStop, LooperState::Playing)   => Some(EventAction::Pause),
+            (EventAction::PauseStop, LooperState::Stop)      => Some(EventAction::Stop),
+
+            // Handled above; unreachable.
+            (EventAction::PauseStopReset, _) => unreachable!(),
         };
-        if let Some(p) = primitive {
-            self.dispatch_primitive(p);
-        }
-    }
 
-    fn dispatch_primitive(&mut self, action: &str) {
-        match action {
-            "rec"   => self.do_rec(),
-            "play"  => self.do_play(),
-            "pause" => self.do_pause(),
-            "stop"  => self.do_stop(),
-            "reset" => self.do_reset(),
-            "undo"  => self.do_undo(),
-            other   => warn!("Looper: unknown primitive action '{other}'"),
+        match primitive {
+            Some(EventAction::Rec)   => self.do_rec(),
+            Some(EventAction::Play)  => self.do_play(),
+            Some(EventAction::Pause) => self.do_pause(),
+            Some(EventAction::Stop)  => self.do_stop(),
+            Some(EventAction::Reset) => self.do_reset(),
+            Some(EventAction::Undo)  => self.do_undo(),
+            _ => {},
         }
     }
 }
@@ -641,6 +728,12 @@ impl Device for Looper {
 
     fn init_bus(&mut self, bus: &crate::control::EventBus) {
         self.event_bus = Some(bus.clone());
+    }
+
+    fn republish_state(&self) {
+        // Re-fire current state for any newly-joined subscribers. Existing
+        // subscribers receive the same values as a no-op refresh.
+        self.fire_state();
     }
 
     fn process(&mut self, _dry: &[Frame], eff: &mut [Frame]) {
@@ -784,14 +877,14 @@ impl Device for Looper {
     fn reset(&mut self) {
         self.do_reset();
     }
-    fn set_action(&mut self, param: &str, action: &str) -> Result<(), String> {
-        if param != "action" {
-            return Err(format!("{}: unknown action param '{param}'", NAME));
+    fn set_action(&mut self, param: &str, action: EventAction) -> Result<(), String> {
+        // With one Event entry per action, `param` == `action.name()`.
+        // Cross-check so a malformed wire SET-with-action-mismatch errors
+        // visibly instead of silently dispatching.
+        if param != action.name() {
+            return Err(format!("{}: action param '{param}' != verb '{}'", NAME, action.name()));
         }
-        match action {
-            "rec" | "play" | "pause" | "stop" | "reset" | "undo" => self.dispatch_primitive(action),
-            _ => self.dispatch_combined(action),
-        }
+        self.dispatch_action(action);
         Ok(())
     }
 

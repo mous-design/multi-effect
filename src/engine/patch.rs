@@ -4,7 +4,8 @@ use tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use super::device::{Device, Frame, MetaTarget, ParamInfo, Parameterized, ParamValue};
+use super::device::{Device, Frame, MetaTarget, ParamInfo, Parameterized, 
+    ParamValue, EventAction};
 
 // ---------------------------------------------------------------------------
 // Custom deserializers
@@ -192,6 +193,12 @@ impl Chain {
         }
     }
 
+    pub fn republish_state(&self) {
+        for node in &self.nodes {
+            node.republish_state();
+        }
+    }
+
     pub fn set_param(&mut self, param: &str, value: ParamValue) -> Result<(), String> {
         // Key-prefix routing: "04-reverb.wet" → node "04-reverb", param "wet"
         if let Some((key, rest)) = param.split_once('.') {
@@ -208,13 +215,13 @@ impl Chain {
     }
 
 
-    pub fn dispatch_action(&mut self, path: &str, action: &str) -> Result<(), String> {
+    pub fn dispatch_action(&mut self, path: &str, action: EventAction) -> Result<(), String> {
         // Key-prefix routing: "01-looper.action" → node "01-looper", param "action"
         if let Some((key, param)) = path.split_once('.') {
             for node in &mut self.nodes {
                 if node.key() == key {
                     match node.set_action(param, action) {
-                        Ok(())  => { debug!("ACTION {path} {action}"); return Ok(()); }
+                        Ok(())  => { debug!("ACTION {path} {action:?}"); return Ok(()); }
                         Err(e)  => { warn!("{e}"); return Ok(()); }
                     }
                 }

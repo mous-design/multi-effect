@@ -47,7 +47,10 @@ interface Props {
   /// source of truth shared with the Per-effect settings popup.
   effectTypes: string[];
   onSet: (path: string, value: number | boolean) => void;
-  onMetaSet: (nodeKey: string, param: string, aspect: string, value: number | boolean) => void;
+  onMetaSet: (
+    nodeKey: string, param: string, aspect: string,
+    value: number | boolean, confirmed?: boolean,
+  ) => Promise<{ ok: boolean; confirmRequired: boolean }>;
   onDelete: (key: string) => void;
   onReorder: (chainIdx: number, newNodes: NodeDef[]) => void;
   onAddNode: (chainIdx: number, node: NodeDef) => void;

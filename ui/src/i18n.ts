@@ -22,3 +22,22 @@ export function t(key: string, ...args: (string | number)[]): string {
   }
   return msg;
 }
+
+/**
+ * Visual label for an action verb. Primitives use their own i18n entry
+ * (`action.rec` → `⏺`, etc.). Combined verbs (`play-stop`, `rec-play-stop-rec`)
+ * are composed automatically by splitting on `-` and concatenating each
+ * primitive's label — so `play-stop` renders as `▶■`, `rec-play-stop-rec` as
+ * `⏺▶■⏺`, and so on. An explicit `action.<verb>` entry overrides composition,
+ * which is useful when the auto-compose doesn't read well.
+ */
+export function actionLabel(action: string): string {
+  const direct = current[`action.${action}`];
+  if (direct !== undefined) return direct;
+  if (action.includes('-')) {
+    return action.split('-')
+      .map(p => current[`action.${p}`] ?? p)
+      .join('');
+  }
+  return action;
+}
