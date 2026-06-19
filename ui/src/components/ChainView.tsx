@@ -3,6 +3,7 @@ import { ChainDef, ControllerDef, DeviceMap, NodeDef } from '../types';
 import { EffectTile } from './EffectTile';
 import { MappingsPanel } from './MappingsPanel';
 import { ConfirmDelete } from './ConfirmDelete';
+import { Toggle } from './Toggle';
 import { t } from '../i18n';
 
 const EQ_TYPES = new Set(['eq_mid', 'eq_low', 'eq_high']);
@@ -47,6 +48,9 @@ interface Props {
   /// source of truth shared with the Per-effect settings popup.
   effectTypes: string[];
   onSet: (path: string, value: number | boolean) => void;
+  /// Chain-level set (e.g. `mute_dry`). Does the optimistic state patch on
+  /// `state.chains[chainIdx][param]` + fires `SET_CHAIN` over the wire.
+  onChainSet: (chainIdx: number, param: string, value: number | boolean) => void;
   onMetaSet: (
     nodeKey: string, param: string, aspect: string,
     value: number | boolean, confirmed?: boolean,
@@ -59,7 +63,7 @@ interface Props {
   onSaveControllers: (controllers: ControllerDef[]) => void;
 }
 
-export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, effectTypes, onSet, onMetaSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
+export function ChainView({ chainIdx, chain, presetName, controllers, devices, allNodes, effectTypes, onSet, onChainSet, onMetaSet, onDelete, onReorder, onAddNode, onDeleteChain, onRouting, onSaveControllers }: Props) {
   const items = groupNodes(chain.nodes);
 
   const [mappingsOpen, setMappingsOpen] = useState(false);
@@ -167,6 +171,10 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
         <button className="chain-routing-btn" onClick={() => onRouting(chainIdx)} title={t('ui.edit_routing')}>
           in [{chain.input.join(',')}] → out [{chain.output.join(',')}]
         </button>
+        <Toggle value={chain.mute_dry ?? false} labelPos="right"
+            label={t('ui.mute_dry')}
+            title={t('ui.mute_dry_help')}
+            onSet={v => onChainSet(chainIdx, 'mute_dry', v)} />
         {confirmDelete ? (
           <ConfirmDelete
             message={t('ui.confirm_delete_chain')}
@@ -213,9 +221,9 @@ export function ChainView({ chainIdx, chain, presetName, controllers, devices, a
               onDragEnd={handleDragEnd}
             >
               {Array.isArray(item) ? (
-                <div className="eq-group-wrapper">
+                <div className="group-wrapper">
                   {item.map((node) => (
-                    <div key={node.key} className="eq-band-wrapper">
+                    <div key={node.key} className="group-wrapper-item">
                       <EffectTile node={node} presetName={presetName} onSet={onSet} onMetaSet={onMetaSet} onDelete={onDelete} />
                     </div>
                   ))}

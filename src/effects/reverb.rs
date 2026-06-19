@@ -118,6 +118,8 @@ pub const REGISTRATION: crate::effects::registry::EffectRegistration =
         name:      NAME,
         canonical: &CANONICAL,
         factory:   |key, sr, info| Box::new(Reverb::new(key, sr, info)),
+        // Time-shift: diffuse reflections, doesn't consume dry.
+        needs_dry: false,
     };
 
 impl Reverb {

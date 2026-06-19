@@ -35,14 +35,12 @@ export function EqGroupTile({ nodes, onSet, onDelete }: Props) {
               <button className="tile-delete" onClick={() => onDelete(node.key)} title={t('ui.delete')}>×</button>
             </div>
             {typeof node.active === 'boolean' &&
-              <Toggle nodeKey={node.key} param="active" value={node.active}
-                label="On" onSet={(p, v) => onSet(p, v)} />}
+              <Toggle value={node.active} label="On" onSet={v => onSet(`${node.key}.active`, v)} />}
             {Object.entries(node).filter(([k]) => EQ_PARAMS[k]).map(([param, val]) => {
               const meta = EQ_PARAMS[param];
-              return <Knob key={param} nodeKey={node.key} param={param}
-                value={val as number} min={meta.min} max={meta.max}
+              return <Knob value={val as number} min={meta.min} max={meta.max}
                 label={meta.label} unit={meta.unit}
-                onSet={(p, v) => onSet(p, v)} />;
+                onSet={v => onSet(`${node.key}.${param}`, v)} />;
             })}
           </div>
         ))}

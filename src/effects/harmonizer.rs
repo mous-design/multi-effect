@@ -114,6 +114,8 @@ pub const REGISTRATION: crate::effects::registry::EffectRegistration =
         name:      NAME,
         canonical: &CANONICAL,
         factory:   |key, sr, info| Box::new(Harmonizer::new(key, sr, info)),
+        // Time-shift: pitch-shifted copies, doesn't consume dry.
+        needs_dry: false,
     };
 
 impl Harmonizer {

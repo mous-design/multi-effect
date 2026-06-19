@@ -21,7 +21,6 @@
     gap: $gap-sm;
 
     .toggle {
-        flex-direction: row;
         padding: 0;
         gap: 0;
         flex-shrink: 0;
@@ -336,16 +335,28 @@
 // ── Toggle ────────────────────────────────────────────────────────────────────
 .toggle {
     display: flex;
-    flex-direction: column;
     align-items: center;
     gap: $gap-sm;
+    column-gap: calc($gap-sm + 2px); 
     cursor: pointer;
     padding: $gap-sm;
+    &.toggle-top {
+        flex-direction: column-reverse;
+    }
+    &.toggle-bottom {
+        flex-direction: column;
+    }
+    &.toggle-left {
+        flex-direction: row-reverse;
+    }
+    &.toggle-right {
+        flex-direction: row;
+    }
 }
 
 .toggle-track {
-    width: 32px;
     height: 16px;
+    aspect-ratio: 2 / 1;
     border-radius: $gap;
     position: relative;
     transition: background 0.2s;
@@ -362,14 +373,15 @@
 .toggle-thumb {
     position: absolute;
     top: 2px;
-    width: 12px;
-    height: 12px;
+    bottom: 2px;
+    aspect-ratio: 1 / 1;
     background: white;
     border-radius: 50%;
     transition: left 0.2s;
 
     .toggle-track.on & {
-        left: 18px;
+        left: auto;
+        right: 2px;
     }
 
     .toggle-track.off & {
@@ -383,7 +395,7 @@
 }
 
 // ── EQ connected group ───────────────────────────────────────────────────────
-.eq-group-wrapper {
+.group-wrapper {
     display: flex;
     flex-direction: row;
 
@@ -393,17 +405,17 @@
         min-width: 0;
     }
 
-    .eq-band-wrapper:first-child .tile {
+    .group-wrapper-item:first-child .tile {
         border-top-left-radius: $radius-md;
         border-bottom-left-radius: $radius-md;
     }
 
-    .eq-band-wrapper:last-child .tile {
+    .group-wrapper-item:last-child .tile {
         border-top-right-radius: $radius-md;
         border-bottom-right-radius: $radius-md;
     }
 
-    .eq-band-wrapper:not(:last-child) .tile {
+    .group-wrapper-item:not(:last-child) .tile {
         border-right: none;
     }
 }

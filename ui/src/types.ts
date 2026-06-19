@@ -38,6 +38,14 @@ export type ParamInfo = ParamType & {
 export interface ChainDef {
   input: [number, number];
   output: [number, number];
+  /// User-set: mute the digital dry on this chain's output (default false).
+  /// Honoured only when no active `needs_dry` effect is present in the chain
+  /// — else master overrides via `dry_effective`.
+  mute_dry: boolean;
+  /// Master-derived: actual dry-state in audio. `!mute_dry || any_active_needs_dry`.
+  /// Drives the chain-output dry-subtract and the future hardware LED.
+  /// Read-only from the UI's POV — not user-settable.
+  dry_effective: boolean;
   nodes: NodeDef[];
 }
 export interface AppState {

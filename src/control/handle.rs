@@ -108,6 +108,16 @@ where
                             // changes; LIVE is for effect-emitted state).
                             format!("LIVE {path} {value}\n")
                         },
+                        ControlMessage::SetChainParam { chain_idx, param, value, .. } => {
+                            // Chain-level user set echo (`mute_dry`, …).
+                            // Mirrors `PARAM` for node params.
+                            format!("PARAM_CHAIN {chain_idx} {param} {value}\n")
+                        },
+                        ControlMessage::LiveChainParam { chain_idx, param, value } => {
+                            // Chain-level derived state (`dry_effective`).
+                            // No dirty mark on receivers.
+                            format!("LIVE_CHAIN {chain_idx} {param} {value}\n")
+                        },
                         ControlMessage::Reset { .. } => "RESET\n".to_string(),
                         ControlMessage::PresetLoaded { ref preset, .. } => {
                             let json = preset.to_wire()
@@ -269,6 +279,27 @@ async fn handle_command(
                 },
                 _ => bail!("usage: SET <key>.<param>[.<aspect>] <value>"),
             }
+        },
+        "SET_CHAIN" => {
+            // Chain-level set. Wire path: `SET_CHAIN <idx> <param> <value>`.
+            // `idx` is the chain index in `snapshot.preset.chains`; today the
+            // only writable chain param is `mute_dry` (bool). Other params
+            // are master-derived (`dry_effective`) and rejected.
+            let mut it = rest.splitn(3, ' ');
+            let idx_str  = it.next().context("usage: SET_CHAIN <idx> <param> <value>")?;
+            let param    = it.next().context("usage: SET_CHAIN <idx> <param> <value>")?;
+            let val_str  = it.next().context("usage: SET_CHAIN <idx> <param> <value>")?.trim();
+            let chain_idx: usize = idx_str.trim().parse()
+                .with_context(|| format!("chain idx not a number: {idx_str}"))?;
+            let value =
+                if let Ok(b) = val_str.parse::<bool>() { ParamValue::Bool(b) }
+                else if let Ok(i) = val_str.parse::<i32>() { ParamValue::Int(i) }
+                else if let Ok(f) = val_str.parse::<f32>() { ParamValue::Float(f) }
+                else { anyhow::bail!("SET_CHAIN value must parse as bool/int/float"); };
+            let state = snd_request(master_tx, |tx| ConfigRequest::ApplyChainSet {
+                chain_idx, param: param.to_string(), value, source, resp: Some(tx),
+            }).await?;
+            format!("STATE {}\n", state.label())
         },
         "ACT" => {
             // Fire an action (one-shot event) on a specific param. Wire path:

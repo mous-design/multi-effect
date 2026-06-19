@@ -185,6 +185,14 @@ export async function sendParamMeta(
     return { ok, confirmRequired: !ok && (msg?.startsWith('confirm_required:') ?? false) };
 }
 
+// Chain-level set. Today the only writable chain param is `mute_dry` (bool).
+// Wire: `SET_CHAIN <idx> <param> <value>`. Returns ok/dirty-state.
+export async function sendChainSet(
+    chainIdx: number, param: string, value: number | boolean,
+): Promise<boolean> {
+    return (await sendWs(`SET_CHAIN ${chainIdx} ${param} ${value}`, 'STATE'))[0];
+}
+
 export async function savePreset(n: number):Promise<boolean> {
     return (await sendWs(`SAVE_PRESET ${n}`))[0];
 }

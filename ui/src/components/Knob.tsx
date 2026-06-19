@@ -1,15 +1,13 @@
 import { useRef } from 'react';
 
 interface KnobProps {
-  nodeKey: string;
-  param: string;
   value: number;
   min: number;
   max: number;
   label: string;
   unit?: string;
   log?: boolean;
-  onSet: (path: string, value: number) => void;
+  onSet: (value: number) => void;
 }
 
 function toRad(deg: number) { return deg * Math.PI / 180; }
@@ -34,7 +32,7 @@ function valToLog(v: number, min: number, max: number) {
   return Math.log(Math.max(min, v) / min) / Math.log(max / min);
 }
 
-export function Knob({ nodeKey, param, value, min, max, label, unit, log, onSet }: KnobProps) {
+export function Knob({ value, min, max, label, unit, log, onSet }: KnobProps) {
   const dragRef = useRef<{ startY: number; startVal: number } | null>(null);
   const cx = 40, cy = 40, r = 28;
   const START = -135, END = 135, RANGE = 270;
@@ -69,7 +67,7 @@ export function Knob({ nodeKey, param, value, min, max, label, unit, log, onSet 
     } else {
       newVal = Math.max(min, Math.min(max, dragRef.current.startVal + dy / 150 * (max - min)));
     }
-    onSet(`${nodeKey}.${param}`, newVal);
+    onSet(newVal);
   };
   const onPointerUp = () => { dragRef.current = null; };
 

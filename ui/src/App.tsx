@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AppState, ChainDef, ControllerDef, NodeDef } from './types';
-import { sendSet, sendChains, savePreset, saveConfig, sendProgram, deletePreset, sendCompare, sendParamMeta } from './api';
+import { sendSet, sendChainSet, sendChains, savePreset, saveConfig, sendProgram, deletePreset, sendCompare, sendParamMeta } from './api';
 import { t } from './i18n';
 import { useToasts } from './hooks/useToasts';
 import { useTheme } from './hooks/useTheme';
@@ -163,6 +163,49 @@ export default function App() {
                 });
                 break;
             }
+            case 'PARAM_CHAIN': {
+                // Chain-level user set echo (`mute_dry`). Marks dirty.
+                // Format: `<chain_idx> <param> <value>`.
+                const [idxStr, param, valueStr] = splitN(params, ' ', 3);
+                const idx = Number(idxStr);
+                if (!Number.isFinite(idx)) break;
+                let value: number | string | boolean;
+                if      (valueStr === 'true')  value = true;
+                else if (valueStr === 'false') value = false;
+                else {
+                    const num = Number(valueStr);
+                    value = isFinite(num) ? num : valueStr;
+                }
+                setIsDirty(true);
+                setState(prev => prev && {
+                    ...prev, chains: prev.chains.map((chain, i) =>
+                        i === idx ? { ...chain, [param]: value } : chain
+                    )
+                });
+                break;
+            }
+            case 'LIVE_CHAIN': {
+                // Chain-level derived state (`dry_effective`). No dirty mark.
+                // Format: `<chain_idx> <param> <value>`. Used today by the
+                // hardware LED daemon (future) — the UI just keeps state in
+                // sync so SNAPSHOT-shaped reads remain current.
+                const [idxStr, param, valueStr] = splitN(params, ' ', 3);
+                const idx = Number(idxStr);
+                if (!Number.isFinite(idx)) break;
+                let value: number | string | boolean;
+                if      (valueStr === 'true')  value = true;
+                else if (valueStr === 'false') value = false;
+                else {
+                    const num = Number(valueStr);
+                    value = isFinite(num) ? num : valueStr;
+                }
+                setState(prev => prev && {
+                    ...prev, chains: prev.chains.map((chain, i) =>
+                        i === idx ? { ...chain, [param]: value } : chain
+                    )
+                });
+                break;
+            }
             case 'SNAPSHOT':
                 applySnapshot(JSON.parse(params));
                 break;
@@ -295,6 +338,19 @@ export default function App() {
         sendSet(path, value);
     };
 
+    // Chain-level set (`mute_dry`). Same optimistic-then-wire pattern as
+    // `handleSet`. The originator's PARAM_CHAIN echo is dropped by master's
+    // source filter, so this local patch is the *only* path that updates
+    // this client's view until the next SNAPSHOT.
+    const handleChainSet = (chainIdx: number, param: string, value: number | boolean) => {
+        setState(prev => prev && {
+            ...prev, chains: prev.chains.map((chain, i) =>
+                i === chainIdx ? { ...chain, [param]: value } : chain
+            )
+        });
+        sendChainSet(chainIdx, param, value);
+    };
+
     // Meta-override (3-segment SET) — bound / visibility / active edit on a
     // single param. Optimistic update of `params_info[i]` on the addressed
     // node; the originator's source-filter drops master's echoed PARAM, so
@@ -373,7 +429,10 @@ export default function App() {
 
     const handleNewChain = (input: [number, number], output: [number, number]) => {
         if (!state) return;
-        const next = { ...state, chains: [...state.chains, { input, output, nodes: [] }] };
+        // Default chain-level state: `mute_dry` off (digital dry in output),
+        // `dry_effective` true (matches default behaviour). Master will
+        // recompute `dry_effective` after the chains land.
+        const next = { ...state, chains: [...state.chains, { input, output, mute_dry: false, dry_effective: true, nodes: [] }] };
         setState(next);
         sendChains(next.chains);
     };
@@ -455,6 +514,7 @@ export default function App() {
                         allNodes={state.chains.flatMap(c => c.nodes)}
                         effectTypes={Object.keys(canonical).sort()}
                         onSet={handleSet}
+                        onChainSet={handleChainSet}
                         onMetaSet={handleMetaSet}
                         onDelete={handleDelete}
                         onReorder={handleReorder}

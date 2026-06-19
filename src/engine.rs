@@ -1,5 +1,4 @@
 pub mod device;
-pub mod mix;
 pub mod patch;
 pub mod ring_buffer;
 
@@ -60,7 +59,6 @@ pub struct AudioEngine {
     pub in_channels: u16,
     /// Interleaved channel count of the output buffer (to DAC).
     pub out_channels: u16,
-    #[allow(dead_code)]
     pub sample_rate: u32,
     pub buffer_size: u32,
 
@@ -235,6 +233,25 @@ impl AudioEngine {
                     let handled = self.chains.iter_mut().any(|c| c.set_param(&path, value).is_ok());
                     if !handled {
                         warn!("SET '{path}' {value} [source={source}]: unknown parameter");
+                    }
+                },
+                ControlMessage::SetChainParam { chain_idx, ref param, value, .. } => {
+                    // Chain-level state. Today only `dry_effective` reaches
+                    // audio — master computes it and pushes via this path;
+                    // `Chain::process` reads it next buffer to decide whether
+                    // to subtract dry at chain output. Other chain params
+                    // (user's `mute_dry`) stay master-side; audio only cares
+                    // about the resolved effective.
+                    let Some(chain) = self.chains.get_mut(chain_idx) else {
+                        warn!("SET_CHAIN: chain_idx {chain_idx} out of range");
+                        continue;
+                    };
+                    match param.as_str() {
+                        "dry_effective" => match value.try_bool() {
+                            Ok(b)  => chain.dry_effective = b,
+                            Err(e) => warn!("SET_CHAIN dry_effective: {e}"),
+                        },
+                        other => warn!("SET_CHAIN: audio ignores chain param '{other}'"),
                     }
                 },
                 ControlMessage::Reset { .. } => {

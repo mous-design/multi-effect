@@ -1,14 +1,15 @@
 interface ToggleProps {
-  nodeKey: string;
-  param: string;
   value: boolean;
   label: string;
-  onSet: (path: string, value: boolean) => void;
+  title?: string;
+  onSet: (value: boolean) => void;
+  labelPos?: 'left' | 'right' | 'top' | 'bottom'
 }
 
-export function Toggle({ nodeKey, param, value, label, onSet }: ToggleProps) {
+export function Toggle({value, label, title, onSet, labelPos = 'bottom'}: ToggleProps) {
+
   return (
-    <div className="toggle" onClick={() => onSet(`${nodeKey}.${param}`, !value)}>
+    <div className={`toggle toggle-${labelPos}`} onClick={() => onSet(!value)} title={title}>
       <div className={`toggle-track ${value ? 'on' : 'off'}`}>
         <div className="toggle-thumb" />
       </div>

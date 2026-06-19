@@ -109,7 +109,6 @@ pub struct Looper {
     stopping:   bool,  // true while fading out before transitioning to Stop
 
     sample_rate: f32,
-    #[allow(dead_code)]
     init_len:    usize, // initial capacity of buffers[0]
 
     // Event bus: set via init_bus(), used to fire NodeEvent messages.
@@ -187,6 +186,8 @@ pub const REGISTRATION: crate::effects::registry::EffectRegistration =
         name:      NAME,
         canonical: &CANONICAL,
         factory:   |key, sr, info| Box::new(Looper::new(key, sr, info)),
+        // Time-shift: generates its own loop signal, doesn't consume dry.
+        needs_dry: false,
     };
 
 impl Looper {
@@ -334,7 +335,6 @@ impl Looper {
         }
     }
 
-    #[allow(dead_code)]
     pub fn state(&self) -> LooperState { self.state }
 
     // -----------------------------------------------------------------------

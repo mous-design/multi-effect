@@ -16,7 +16,6 @@
 use crate::engine::device::{Device, ParamInfo};
 
 use crate::effects::{chorus, delay, eq, harmonizer, looper, reverb};
-use crate::engine::mix;
 
 /// Per-effect registration entry. Co-locates name, canonical metadata, and
 /// constructor so all three travel together. The factory takes the universal
@@ -26,12 +25,21 @@ pub struct EffectRegistration {
     pub name:      &'static str,
     pub canonical: &'static [ParamInfo],
     pub factory:   fn(key: &str, sample_rate: f32, params_info: &[ParamInfo]) -> Box<dyn Device>,
+    /// Type-level: instances of this effect process dry (replace, add to, or
+    /// subtract from it). Master combines with the per-instance `active` flag
+    /// to compute each chain's `dry_effective` — when any active node in a
+    /// chain has `needs_dry: true`, the chain's mix node force-overrides its
+    /// user-set `dry` to on (and the future analog signal-relay closes).
+    /// Time-shift effects (delay / chorus / reverb / looper / harmonizer)
+    /// generate their own output and don't pull dry on — they leave it
+    /// `false`. EQ / exciter / distortion / phaser / flanger consume dry and
+    /// set `true`.
+    pub needs_dry: bool,
 }
 
 /// All shipped effects. Order isn't load-bearing — `lookup` and consumers
 /// iterate the slice; UI sorts alphabetically.
 pub static REGISTRY: &[&EffectRegistration] = &[
-    &mix::REGISTRATION,
     &looper::REGISTRATION,
     &delay::REGISTRATION,
     &reverb::REGISTRATION,

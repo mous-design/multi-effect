@@ -55,6 +55,7 @@ pub enum ParamType {
     },
     /// Discrete choice from a fixed set of float values. Each option has a
     /// label and the numeric value sent to the device on selection.
+    #[allow(dead_code)]
     DiscreteFloat {
         options: &'static [DiscreteFloatOption],
         default: f32,
@@ -360,7 +361,6 @@ impl ParamInfo {
 
     /// Mark this param hidden by default in the UI. Per-preset overrides
     /// can still flip it back on via `SET <key>.<param>.visible true` (meta form).
-    #[allow(dead_code)]
     pub const fn with_hidden(self) -> Self {
         Self { visible: false, ..self }
     }
@@ -369,7 +369,6 @@ impl ParamInfo {
     /// (tile, override popup) until an override flips `active` back on.
     /// Used to ship a wide menu of optional controls (e.g. all transport
     /// variants for the looper) with sensible defaults visible.
-    #[allow(dead_code)]
     pub const fn with_inactive(self) -> Self {
         Self { active: false, ..self }
     }
@@ -419,7 +418,6 @@ impl ParamInfo {
             _ => panic!("{}: expected ContinuousInt", self.name),
         }
     }
-    #[allow(dead_code)]
     pub fn continuous_int_max(&self) -> i32 {
         match &self.data_kind {
             ParamType::ContinuousInt { max, .. } => *max,
@@ -912,10 +910,9 @@ pub fn apply_override(
 
 /// Named parameter access.
 ///
-/// Implemented by effects, mix nodes, loopers, and chains.
-/// Separating this from [`Device`] allows non-audio nodes (like `MixNode`)
-/// to participate in the same parameter system without implementing the full
-/// audio processing interface.
+/// Implemented by effects, loopers, and chains. Separating this from
+/// [`Device`] allows non-audio nodes to participate in the same parameter
+/// system without implementing the full audio processing interface.
 pub trait Parameterized {
     /// Set a named parameter. Master validates and clamps before push, so
     /// audio implementations can store directly (use `try_float` / `try_bool`

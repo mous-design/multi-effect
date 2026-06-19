@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::collections::HashMap;
 use tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -39,8 +39,28 @@ pub struct ChainDef {
     #[serde(deserialize_with = "deserialize_channel_pair")]
     pub output: [u8; 2],
 
+    /// User-set: "mute the digital dry on this chain's output, if possible".
+    /// Default `false` — normal behaviour, dry is in the digital output.
+    /// `true` asks master to subtract dry at the chain's output stage so the
+    /// signal-flow can rely on analog dry instead. Only honoured when the
+    /// chain has no active `needs_dry: true` effect (else the request is
+    /// overridden because the `(eff - dry)` subtract would no longer recover
+    /// clean wet — see `recompute_dry_effective_all`).
+    #[serde(default)]
+    pub mute_dry: bool,
+
+    /// Master-derived: the actual dry-state in audio. Equals `!mute_dry ||
+    /// any_active_needs_dry`. Drives `Chain::process`'s dry-subtract and (in
+    /// future) the hardware analog signal-relay. Always serialised so wire
+    /// clients can read it; recomputed by master on every relevant change
+    /// (preset load, chain reshape, SET on `active`/`mute_dry`, …).
+    #[serde(default = "default_true")]
+    pub dry_effective: bool,
+
     pub nodes: Vec<NodeDef>,
 }
+
+fn default_true() -> bool { true }
 
 /// One node in the chain as it appears in JSON.
 ///
@@ -119,6 +139,10 @@ pub struct Chain {
     pub input: [u8; 2],
     pub output: [u8; 2],
     pub nodes: Vec<Box<dyn Device>>,
+    /// Mirror of `ChainDef.dry_effective`. Master pushes updates via the
+    /// audio rtrb (see `ControlMessage::SetChainParam`); `process()` reads
+    /// to decide whether to subtract dry from `eff_buf` at chain output.
+    pub dry_effective: bool,
     dry_buf: Vec<Frame>,
     eff_buf: Vec<Frame>,
 }
@@ -128,9 +152,10 @@ impl Chain {
         input: [u8; 2],
         output: [u8; 2],
         nodes: Vec<Box<dyn Device>>,
+        dry_effective: bool,
     ) -> Self {
         Self {
-            input, output, nodes,
+            input, output, nodes, dry_effective,
             dry_buf: Vec::new(),
             eff_buf: Vec::new(),
         }
@@ -172,6 +197,21 @@ impl Chain {
         for node in nodes.iter_mut() {
             if node.is_active() {
                 node.process(&dry_buf[..block_size], &mut eff_buf[..block_size]);
+            }
+        }
+
+        // Chain-level dry-subtract: when `dry_effective` is false, the chain
+        // is in "analog-bypass" mode — analog hardware provides dry, so the
+        // digital path must not also add it. `eff_buf` started as `dry_buf`
+        // and effects ran on top; subtracting `dry_buf` at output recovers
+        // pure wet for analog summation. Only valid when no upstream effect
+        // touched the dry baseline — master enforces this in
+        // `recompute_dry_effective_all` (forces `dry_effective` on when an
+        // active `needs_dry` effect is present).
+        if !self.dry_effective {
+            for f in 0..block_size {
+                self.eff_buf[f][0] -= self.dry_buf[f][0];
+                self.eff_buf[f][1] -= self.dry_buf[f][1];
             }
         }
 
@@ -230,7 +270,6 @@ impl Chain {
         Err(format!("no node handles action '{path}'"))
     }
 
-    #[allow(dead_code)]
     pub fn on_cc(&mut self, controller: u8, value: u8) {
         for node in &mut self.nodes {
             node.on_cc(controller, value);
@@ -271,12 +310,15 @@ pub fn build_chain(idx: usize, def: &ChainDef, cfg: &Config) -> Result<Chain> {
         }
     }
 
-    validate_eq_order(&def.nodes)
-        .with_context(|| format!("Chain {idx}"))?;
+    // No EQ-after-Mix constraint anymore: master's `recompute_dry_effective_all`
+    // detects when a `needs_dry: true` node sits before the chain's mix node
+    // and forces `dry_effective` on, switching the chain into digital-dry
+    // mode where the math handles EQ-before-mix cleanly. EQ after mix
+    // continues to work in analog-dry mode (it only filters the wet bus).
 
     let nodes: Result<Vec<Box<dyn Device>>> =
         def.nodes.iter().map(|n| build_node(n, cfg)).collect();
-    let chain = Chain::new(def.input, def.output, nodes?);
+    let chain = Chain::new(def.input, def.output, nodes?, def.dry_effective);
     debug!(
         "Chain {idx}: input=[{},{}] output=[{},{}], {} node(s)",
         chain.input[0], chain.input[1],
@@ -350,25 +392,6 @@ fn build_node(def: &NodeDef, cfg: &Config) -> Result<Box<dyn Device>> {
 /// submits an Instance bound edit (3-segment `SET <key>.<param>.<aspect> <value>`).
 pub fn canonical_for(effect_type: &str) -> Option<&'static [crate::engine::device::ParamInfo]> {
     crate::effects::registry::lookup(effect_type).map(|r| r.canonical)
-}
-
-fn validate_eq_order(nodes: &[NodeDef]) -> Result<()> {
-    const EQ_TYPES: &[&str] = &["eq_mid", "eq_low", "eq_high"];
-
-    for (mix_pos, mix_node) in nodes.iter().enumerate()
-        .filter(|(_, n)| n.device_type == "mix")
-    {
-        if let Some((_, eq_node)) = nodes.iter().enumerate()
-            .find(|(pos, n)| *pos < mix_pos && EQ_TYPES.contains(&n.device_type.as_str()))
-        {
-            bail!(
-                "EQ must be placed after Mix (analogue bypass phase issue). \
-                 Move '{}' after '{}'.",
-                eq_node.key, mix_node.key
-            );
-        }
-    }
-    Ok(())
 }
 
 pub fn load_patch_def(defs: &Vec<ChainDef>, cfg: &Config) -> Result<Vec<Chain>> {

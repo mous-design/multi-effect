@@ -177,15 +177,16 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
       case 'ContinuousInt': {
         if (typeof val !== 'number') return null;
         const log = info.type === 'ContinuousFloat' ? !!info.log : false;
-        return <Knob nodeKey={node.key} param={info.name}
-          value={val} min={info.min} max={info.max}
-          label={t(`param.${info.name}`)} unit={info.unit} log={log}
-          onSet={(p, v) => onSet(p, v)} />;
+        return <Knob
+            value={val} min={info.min} max={info.max}
+            label={t(`param.${info.name}`)} unit={info.unit} log={log}
+            onSet={v => onSet(`${node.key}.${info.name}`, v)} />;
       }
       case 'DiscreteBool': {
         if (typeof val !== 'boolean') return null;
-        return <Toggle nodeKey={node.key} param={info.name}
-          value={val} label={t(`param.${info.name}`)} onSet={(p, v) => onSet(p, v)} />;
+        return <Toggle value={active} 
+            label={t(`param.${info.name}`)} 
+            onSet={v => onSet(`${node.key}.${info.name}`, v)} />
       }
       // DiscreteFloat (dropdown) and Event (action buttons) not wired yet.
       default:
@@ -203,7 +204,7 @@ export function EffectTile({ node, presetName, onSet, onMetaSet, onDelete }: Pro
       )}
       <div className="tile-header">
         {activeEntry
-          ? <Toggle nodeKey={node.key} param="active" value={active} label="" onSet={(p, v) => onSet(p, v)} />
+          ? <Toggle value={active} label="" onSet={v => onSet(`${node.key}.active`, v)} />
           : <div className="tile-header-spacer" />}
         <span className="tile-type">{t(`type.${node.type}`)}</span>
         <button className="tile-settings-btn" onClick={() => setShowSettings(true)} title={t('ui.settings')}><CogIcon /></button>

@@ -77,11 +77,15 @@ const _: () = validate_canonical(&CANONICAL_LOW);
 const _: () = validate_canonical(&CANONICAL_MID);
 const _: () = validate_canonical(&CANONICAL_HIGH);
 
+// EQ consumes dry — it reshapes the signal's frequency response. An active
+// EQ band in any chain forces that chain's `dry_effective` on (analog
+// signal-relay closes) so the EQ has the dry input it requires.
 pub const REG_MID: crate::effects::registry::EffectRegistration =
     crate::effects::registry::EffectRegistration {
         name:      NAME_MID,
         canonical: &CANONICAL_MID,
         factory:   |key, sr, info| Box::new(Eq::new(key, EqType::Peak, sr, info)),
+        needs_dry: true,
     };
 
 pub const REG_LOW: crate::effects::registry::EffectRegistration =
@@ -89,6 +93,7 @@ pub const REG_LOW: crate::effects::registry::EffectRegistration =
         name:      NAME_LOW,
         canonical: &CANONICAL_LOW,
         factory:   |key, sr, info| Box::new(Eq::new(key, EqType::LowShelf, sr, info)),
+        needs_dry: true,
     };
 
 pub const REG_HIGH: crate::effects::registry::EffectRegistration =
@@ -96,6 +101,7 @@ pub const REG_HIGH: crate::effects::registry::EffectRegistration =
         name:      NAME_HIGH,
         canonical: &CANONICAL_HIGH,
         factory:   |key, sr, info| Box::new(Eq::new(key, EqType::HighShelf, sr, info)),
+        needs_dry: true,
     };
 
 impl Eq {

@@ -48,6 +48,8 @@ pub const REGISTRATION: crate::effects::registry::EffectRegistration =
         name:      NAME,
         canonical: &CANONICAL,
         factory:   |key, sr, info| Box::new(Chorus::new(key, sr, info)),
+        // Time-shift: modulated delay copies, doesn't consume dry.
+        needs_dry: false,
     };
 
 impl Chorus {

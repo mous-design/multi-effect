@@ -72,6 +72,8 @@ const en: Record<string, string> = {
     'ui.show_param': 'Show',
     'ui.settings': 'Settings',
     'ui.actions':  'Actions',
+    'ui.mute_dry': 'Mute dry',
+    'ui.mute_dry_help': 'Suppress the digital dry signal on this chain\'s output. Honoured only when the chain has no active dry-consuming effect (EQ, distortion, …); else master keeps dry on regardless.',
     'ui.type_overrides': 'Per effect settings',
     'ui.effect_type': 'Effect',
     'ui.select_effect': 'Select',

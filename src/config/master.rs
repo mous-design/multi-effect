@@ -45,6 +45,12 @@ pub enum ConfigRequest {
     UpdateControllers { controllers: Vec<ControllerDef>, source: String, resp: OptionRespEmpty },
     ApplySet          { path: String, value: ParamValue,
                         source: String, resp: OptionResp<SnapshotState> },
+    /// Chain-level set (e.g. `mute_dry`). `chain_idx` indexes into
+    /// `snapshot.preset.chains`. Marks the preset dirty on real change;
+    /// triggers a `recompute_dry_effective_all` walk so derived state
+    /// follows the new user setting.
+    ApplyChainSet     { chain_idx: usize, param: String, value: ParamValue,
+                        source: String, resp: OptionResp<SnapshotState> },
     ApplyCtrl         { channel_id: String, raw: f32, alias: String,
                         source: String, resp: OptionResp<SnapshotState> },
     ApplyAction       { path: String, action: EventAction, source: String, resp: OptionRespEmpty },
@@ -173,6 +179,8 @@ impl ConfigMaster {
             },
             Err(e) => warn!("Initial chain build failed: {e}"),
         }
+        // Initialize each mix node's `dry_effective` based on current chains.
+        self.recompute_dry_effective_all();
 
         while let Some(req) = rx.recv().await {
             self.handle(req);
@@ -233,6 +241,9 @@ impl ConfigMaster {
             },
             ConfigRequest::ApplySet { path, value, source, resp } => {
                 Self::respond(resp, self.handle_apply_set(&path, value, &source));
+            },
+            ConfigRequest::ApplyChainSet { chain_idx, param, value, source, resp } => {
+                Self::respond(resp, self.handle_apply_chain_set(chain_idx, &param, value, &source));
             },
             ConfigRequest::ApplyCtrl { channel_id, raw, alias, source, resp } => {
                 Self::respond(resp, self.handle_apply_ctrl(&channel_id, raw, &alias, &source));
@@ -343,6 +354,8 @@ impl ConfigMaster {
         self.refresh_preset_params_info();
         self.notify_preset_loaded(source);
         self.notify_state_changed(source);
+        // Recompute per-mix `dry_effective` for the newly-loaded chains.
+        self.recompute_dry_effective_all();
         info!("Loaded preset {slot} [source={source}]");
         Ok(())
     }
@@ -477,6 +490,8 @@ impl ConfigMaster {
         if self.snapshot.set_state(Dirty) {
             self.notify_state_changed(source);
         }
+        // New chain composition → re-evaluate per-mix `dry_effective`.
+        self.recompute_dry_effective_all();
         info!("Applied PATCH ({} chains) [source={source}]", self.snapshot.preset.chains.len());
         Ok(())
     }
@@ -499,6 +514,11 @@ impl ConfigMaster {
             let cm = ControlMessage::SetParam { path: path.clone(), value: stored, source: bcast_source };
             self.audio.push_control(cm.clone())?;
             self.bus.send(cm).ok();
+            // Any SET could affect `dry_effective` — an effect's `active` flip
+            // (changes the chain-needs-dry tally) or a mix node's `dry`
+            // (changes the user-side input to the OR). Cheap walk; recompute
+            // unconditionally and let the per-mix diff check suppress no-ops.
+            self.recompute_dry_effective_all();
         }
         Ok(self.snapshot.state)
     }
@@ -670,6 +690,9 @@ impl ConfigMaster {
         if self.snapshot.set_state(SnapshotState::Dirty) {
             self.notify_state_changed(source);
         }
+        // Meta override on the `active` aspect changes the chain's needs-dry
+        // tally for the touched node; cheap walk, suppressed when no diff.
+        self.recompute_dry_effective_all();
         if grew {
             // Only reached when client supplied `confirmed = true` (else we
             // bailed before the broadcast pass). The live audio buffer was
@@ -712,6 +735,7 @@ impl ConfigMaster {
         self.refresh_preset_params_info();
         self.notify_preset_loaded(source);
         self.notify_state_changed(source);
+        self.recompute_dry_effective_all();
         Ok(())
     }
 
@@ -800,6 +824,106 @@ impl ConfigMaster {
                 node.params_info = resolve_params_info(node, &self.cfg).unwrap_or_default();
             }
         }
+    }
+
+    /// Apply a chain-level set. Today the only writable chain param is
+    /// `mute_dry` (bool) — the user's "I'd like analog-bypass dry on this
+    /// chain" request. Resolution to `dry_effective` happens in the
+    /// `recompute_dry_effective_all` walk triggered afterwards.
+    fn handle_apply_chain_set(&mut self, chain_idx: usize, param: &str, value: ParamValue, source: &str) -> Result<SnapshotState> {
+        debug!("SET_CHAIN {chain_idx} {param} {value:?} [source={source}]");
+        let Some(chain) = self.snapshot.preset.chains.get_mut(chain_idx) else {
+            bail!("SET_CHAIN: chain_idx {chain_idx} out of range");
+        };
+        let stored = match param {
+            "mute_dry" => {
+                let v = value.try_bool().map_err(|e| anyhow::anyhow!(e))?;
+                if chain.mute_dry == v { return Ok(self.snapshot.state); }  // idempotent
+                chain.mute_dry = v;
+                ParamValue::Bool(v)
+            },
+            "dry_effective" => bail!("dry_effective is master-derived; cannot SET"),
+            other => bail!("SET_CHAIN: unknown chain param '{other}'"),
+        };
+        if self.snapshot.set_state(Dirty) {
+            self.notify_state_changed(source);
+        }
+        // Echo the user-set to other clients as PARAM_CHAIN (originator
+        // filtered by source). `mute_dry` isn't pushed to audio — audio
+        // only cares about `dry_effective`, which the recompute below
+        // produces.
+        self.bus.send(ControlMessage::SetChainParam {
+            chain_idx, param: param.to_string(), value: stored, source: source.to_string(),
+        }).ok();
+        // Recompute `dry_effective` (this chain at least) and broadcast diffs.
+        self.recompute_dry_effective_all();
+        Ok(self.snapshot.state)
+    }
+
+    /// When using Effectance with an analog dry signal, we need to suppress
+    /// the digital dry to avoid doubling it. Suppressing the dry signal in
+    /// the final output must be done by subtracting the original dry signal
+    /// from the result. This can only be done if the dry signal remains
+    /// unchanged through the chain. For example: distortion will replace
+    /// the complete signal, eq will change the phase. These effects need
+    /// dry to flow digitally.
+    ///
+    /// For each chain, compute `dry_effective` and push audio + bus updates
+    /// when it differs from the current value.
+    ///
+    /// Rule: `dry_effective = !mute_dry || any_active_needs_dry`.
+    /// - `mute_dry=false` (default): digital dry always on, no override needed.
+    /// - `mute_dry=true`, no active `needs_dry` effect: allow the mute,
+    ///   `dry_effective=false`; `Chain::process` subtracts dry at output.
+    /// - `mute_dry=true`, any active `needs_dry` effect: override the mute,
+    ///   `dry_effective=true`; digital dry stays in the chain output (the
+    ///   user's hardware-LED indicator stays lit, reflecting actual state).
+    ///
+    /// Call after: preset load, chain reshape, ApplySet (any active flag),
+    /// SET_CHAIN (mute_dry), info-override (active aspect), Type-override
+    /// save, COMPARE toggle.
+    fn recompute_dry_effective_all(&mut self) {
+        let mut updates: Vec<(usize, bool)> = Vec::new();
+        for (idx, chain) in self.snapshot.preset.chains.iter().enumerate() {
+            let any_active_needs_dry = chain.nodes.iter().any(|n| {
+                // Effect's `active` lives in `params.active`; absent = canonical default (true).
+                let active = n.params.get("active")
+                    .and_then(|v| if let ParamValue::Bool(b) = v { Some(*b) } else { None })
+                    .unwrap_or(true);
+                active && crate::effects::registry::lookup(&n.device_type)
+                    .is_some_and(|r| r.needs_dry)
+            });
+            let effective = !chain.mute_dry || any_active_needs_dry;
+            if chain.dry_effective != effective {
+                updates.push((idx, effective));
+            }
+        }
+        for (idx, value) in updates {
+            self.update_chain_dry_effective(idx, value);
+        }
+    }
+
+    /// Master-driven update of a chain's `dry_effective` — writes the
+    /// snapshot, pushes to audio so `Chain::process` flips its dry-subtract
+    /// next buffer, and broadcasts as `LiveChainParam` (wire `LIVE_CHAIN`)
+    /// for the future analog signal-relay daemon. Does **not** mark dirty:
+    /// derived state, not a user edit.
+    fn update_chain_dry_effective(&mut self, chain_idx: usize, value: bool) {
+        if let Some(chain) = self.snapshot.preset.chains.get_mut(chain_idx) {
+            chain.dry_effective = value;
+        }
+        let pv = ParamValue::Bool(value);
+        // Push to audio so `Chain::process` uses the new dry-subtract decision.
+        if let Err(e) = self.audio.push_control(ControlMessage::SetChainParam {
+            chain_idx, param: "dry_effective".to_string(),
+            value: pv, source: "master".to_string(),
+        }) {
+            warn!("chain dry_effective push to audio failed: {e}");
+        }
+        // Bus broadcast — LIVE_CHAIN, no dirty mark on any subscriber.
+        self.bus.send(ControlMessage::LiveChainParam {
+            chain_idx, param: "dry_effective".to_string(), value: pv,
+        }).ok();
     }
 
     /// Push a StateChanged event on the bus (Clean / Dirty / Comparing).

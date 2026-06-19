@@ -42,6 +42,17 @@ pub fn connection_id(alias: &str) -> String {
 pub enum ControlMessage {
     /// Set parameter, mostly coming from a user interface.
     SetParam { path: String, value: ParamValue, source: String },
+    /// Chain-level parameter set. Wired form is `PARAM_CHAIN <idx> <param>
+    /// <value>` (outbound) and `SET_CHAIN <idx> <param> <value>` (inbound).
+    /// Sent both to the audio thread (so `Chain::process` can react to
+    /// `dry_effective` flips) and on the bus (so other clients see chain-
+    /// level changes). `chain_idx` indexes into `snapshot.preset.chains`.
+    SetChainParam { chain_idx: usize, param: String, value: ParamValue, source: String },
+    /// Master-derived chain-level state (e.g. `dry_effective` recomputed from
+    /// active `needs_dry` effects + `mute_dry`). Wire form `LIVE_CHAIN <idx>
+    /// <param> <value>`. Does NOT mark the preset dirty — it's computed,
+    /// not user-set. Future analog signal-relay daemon listens for these.
+    LiveChainParam { chain_idx: usize, param: String, value: ParamValue },
     /// Instance bound override (the runtime "edit a param's min/max/default").
     /// `path` is the node key (e.g. `"04-chorus"`); `target` selects param +
     /// aspect. Master-only notification — audio doesn't react (master clamps
@@ -83,6 +94,7 @@ impl ControlMessage {
     pub fn source(&self) -> &str {
         match self {
             Self::SetParam          { source, .. }
+            | Self::SetChainParam   { source, .. }
             | Self::SetInfoOverride { source, .. }
             | Self::Reset           { source, .. }
             | Self::Action          { source, .. }

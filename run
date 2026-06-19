@@ -11,10 +11,13 @@ case "$TASK" in
     cargo build --release
     ;;
   npm-build)
-    cd ui && npm run build -- --mode debug 
+    cd ui && npm run build -- --mode debug
     ;;
   npm-build-release)
     cd ui && npm run build
+    ;;
+  npm-watch)
+    cd ui && npm run build -- --mode debug --watch
     ;;
   "")
     cargo run
@@ -29,6 +32,7 @@ where command is one of:
     build-release
     npm-build
     npm-build-release
+    npm-watch
     run [-v] [-f]"
     ;;
 esac
