@@ -965,6 +965,7 @@ pub trait Device: Parameterized + Send + Sync {
     fn is_active(&self) -> bool { true }
 
     /// MIDI Control Change
+    #[allow(dead_code)]
     fn on_cc(&mut self, controller: u8, value: u8) {
         let _ = (controller, value);
     }

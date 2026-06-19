@@ -109,7 +109,6 @@ pub struct Looper {
     stopping:   bool,  // true while fading out before transitioning to Stop
 
     sample_rate: f32,
-    init_len:    usize, // initial capacity of buffers[0]
 
     // Event bus: set via init_bus(), used to fire NodeEvent messages.
     event_bus: Option<EventBus>,
@@ -221,9 +220,8 @@ impl Looper {
             stopping:      false,
 
             max_buffers,
-            wet, 
+            wet,
             sample_rate,
-            init_len,
             event_bus:     None,
         }
     }
@@ -334,8 +332,6 @@ impl Looper {
             }
         }
     }
-
-    pub fn state(&self) -> LooperState { self.state }
 
     // -----------------------------------------------------------------------
     // Primitive actions

@@ -270,6 +270,7 @@ impl Chain {
         Err(format!("no node handles action '{path}'"))
     }
 
+    #[allow(dead_code)]
     pub fn on_cc(&mut self, controller: u8, value: u8) {
         for node in &mut self.nodes {
             node.on_cc(controller, value);
